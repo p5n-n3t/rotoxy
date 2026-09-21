@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="${ROTOXY_DIR:-$HOME/rotoxy}"
+CFG="$HOME/.config/rotoxy"
+CONF="$CFG/config.env"
+TOKEN="$CFG/token"
+LOG="$CFG/server.log"
+PID="$CFG/server.pid"
+mkdir -p "$CFG"
+
+if [[ -f "$CONF" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONF"
+fi
+ROTOXY_BACKEND_PORT="${ROTOXY_BACKEND_PORT:-2025}"
+ROTOXY_EXPOSURE="${ROTOXY_EXPOSURE:-serve}"
+ROTOXY_START_CMD="${ROTOXY_START_CMD:-pnpm start}"
+
+die(){ printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+token(){ [[ -f "$TOKEN" ]] || die "Missing client token. Run: rotoxy configure"; cat "$TOKEN"; }
+backend_pid(){ [[ -f "$PID" ]] && cat "$PID" 2>/dev/null || true; }
+backend_alive(){ local p; p="$(backend_pid)"; [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
+ts_dns(){
+  tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("Self",{}).get("DNSName") or "").rstrip("."))' 2>/dev/null || true
+}
+url(){ local h; h="$(ts_dns)"; [[ -n "$h" ]] || die "Tailscale DNS name unavailable"; printf 'https://%s\n' "$h"; }
+
+start_backend(){
+  [[ -d "$ROOT" ]] || die "Missing $ROOT"
+  [[ -f "$ROOT/.env" ]] || die "Missing $ROOT/.env"
+  if backend_alive; then return 0; fi
+  : > "$LOG"
+  (
+    cd "$ROOT"
+    export ROTOXY_DIR="$ROOT"
+    setsid zsh -lc "exec $ROTOXY_START_CMD" >>"$LOG" 2>&1 &
+    echo $! > "$PID"
+  )
+  for _ in $(seq 1 80); do
+    curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$ROTOXY_BACKEND_PORT/__rotoxy/health" -H "Authorization: Bearer $(token)" 2>/dev/null && return 0
+    sleep .25
+  done
+  tail -50 "$LOG" >&2 || true
+  die "ROTOXY backend failed to start"
+}
+
+expose(){
+  case "$(lower "$ROTOXY_EXPOSURE")" in
+    serve|tailnet)
+      tailscale funnel reset >/dev/null 2>&1 || true
+      tailscale serve --bg --yes "http://127.0.0.1:$ROTOXY_BACKEND_PORT" >/dev/null
+      ;;
+    funnel|public)
+      tailscale serve reset >/dev/null 2>&1 || true
+      tailscale funnel --bg --yes "http://127.0.0.1:$ROTOXY_BACKEND_PORT" >/dev/null
+      ;;
+    none|local) ;;
+    *) die "Unknown exposure mode: $ROTOXY_EXPOSURE" ;;
+  esac
+}
+
+up(){
+  start_backend
+  expose
+  echo "ROTOXY is up."
+  echo "  local:  http://127.0.0.1:$ROTOXY_BACKEND_PORT"
+  if [[ "$ROTOXY_EXPOSURE" != none && "$ROTOXY_EXPOSURE" != local ]]; then
+    echo "  https:  $(url)"
+    echo "  mode:   $ROTOXY_EXPOSURE"
+  fi
+}
+
+down(){
+  local p; p="$(backend_pid)"
+  if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then kill -- "-$p" 2>/dev/null || kill "$p" 2>/dev/null || true; fi
+  rm -f "$PID"
+  tailscale serve reset >/dev/null 2>&1 || true
+  tailscale funnel reset >/dev/null 2>&1 || true
+  echo "ROTOXY is down."
+}
+
+status(){
+  if backend_alive; then echo "backend: UP (PID $(backend_pid))"; else echo "backend: DOWN"; fi
+  echo "provider: $(grep '^ROTOXY_PROVIDER=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- || echo unknown)"
+  echo "port: $ROTOXY_BACKEND_PORT"
+  echo "exposure: $ROTOXY_EXPOSURE"
+  if command -v tailscale >/dev/null; then
+    echo "tailscale: $(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("BackendState","unknown"))' 2>/dev/null || echo unknown)"
+    [[ "$ROTOXY_EXPOSURE" == "serve" ]] && tailscale serve status 2>/dev/null || true
+    [[ "$ROTOXY_EXPOSURE" == "funnel" ]] && tailscale funnel status 2>/dev/null || true
+  fi
+}
+
+api_get(){
+  local path="$1"
+  curl -sS "http://127.0.0.1:$ROTOXY_BACKEND_PORT$path" -H "Authorization: Bearer $(token)"
+}
+usage(){ backend_alive || start_backend; api_get "/__rotoxy/usage" | python3 -m json.tool; }
+models(){ backend_alive || start_backend; api_get "/__rotoxy/models" | python3 -m json.tool; }
+health(){ backend_alive || start_backend; api_get "/__rotoxy/health" | python3 -m json.tool; }
+
+doctor(){
+  echo "== ROTOXY doctor =="
+  command -v node >/dev/null && echo "OK node $(node -v)" || echo "MISSING node"
+  command -v pnpm >/dev/null && echo "OK pnpm $(pnpm -v)" || echo "MISSING pnpm"
+  command -v tailscale >/dev/null && echo "OK tailscale $(tailscale version 2>/dev/null | head -1)" || echo "MISSING tailscale"
+  [[ -f "$ROOT/.env" ]] && echo "OK .env" || echo "MISSING .env"
+  [[ -f "$TOKEN" ]] && echo "OK client token" || echo "MISSING client token"
+  status
+  backend_alive && health || true
+}
+
+autostart(){
+  local unit="$HOME/.config/systemd/user/rotoxy.service"
+  case "$(lower "${1:-status}")" in
+    on|enable)
+      mkdir -p "$(dirname "$unit")"
+      cat >"$unit" <<EOF
+[Unit]
+Description=ROTOXY API key rotation proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$HOME/.local/bin/rotoxy up
+ExecStop=$HOME/.local/bin/rotoxy down
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
+EOF
+      systemctl --user daemon-reload
+      systemctl --user enable --now rotoxy.service
+      sudo loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+      ;;
+    off|disable) systemctl --user disable --now rotoxy.service 2>/dev/null || true ;;
+    status) systemctl --user status rotoxy.service --no-pager 2>/dev/null || true ;;
+    *) die "Usage: rotoxy autostart on|off|status" ;;
+  esac
+}
+
+configure(){ exec "$ROOT/install.sh" --configure-only; }
+logs(){ tail -n "${1:-100}" "$LOG" 2>/dev/null || true; }
+rotate_token(){ umask 077; openssl rand -hex 32 >"$TOKEN"; chmod 600 "$TOKEN"; echo "Client token rotated."; }
+
+help(){
+cat <<'EOF'
+ROTOXY - provider-agnostic API key rotation proxy
+
+Commands:
+  rotoxy up | down | restart
+  rotoxy status | doctor | health
+  rotoxy usage             Per-account/model token telemetry
+  rotoxy models            Query accessible models for each account/key
+  rotoxy url               Print Tailscale HTTPS URL
+  rotoxy token             Print client access token
+  rotoxy rotate-token      Generate a new client token
+  rotoxy configure         Interactive provider/account/exposure config
+  rotoxy autostart on|off|status
+  rotoxy logs [N]
+  rotoxy version
+EOF
+}
+
+cmd="$(lower "${1:-help}")"; shift || true
+case "$cmd" in
+  up|start) up ;;
+  down|stop) down ;;
+  restart) down; up ;;
+  status) status ;;
+  doctor|diag) doctor ;;
+  health|test) health ;;
+  usage|quota|meter) usage ;;
+  models) models ;;
+  url) url ;;
+  token|key) token; echo ;;
+  rotate-token|rotate-key) rotate_token ;;
+  configure|config) configure ;;
+  autostart) autostart "$@" ;;
+  logs|log) logs "$@" ;;
+  version|-v|--version) echo "1.0.0" ;;
+  help|-h|--help) help ;;
+  *) die "Unknown command: $cmd" ;;
+esac
