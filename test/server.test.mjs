@@ -4,7 +4,9 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createRotoxyServer } from "../dist/server.js";
+const stateRoot=fs.mkdtempSync(path.join(os.tmpdir(),"rotoxy-test-state-"));
+process.env.ROTOXY_STATE_DIR=stateRoot;
+const { createRotoxyServer } = await import("../dist/server.js");
 
 const listen=(s)=>new Promise(r=>s.listen(0,"127.0.0.1",()=>r(s.address().port)));
 const close=(s)=>new Promise(r=>s.close(()=>r()));
@@ -28,5 +30,8 @@ test("gateway enforces client token and rotates upstream accounts",async()=>{
   assert.equal(r1.status,200);assert.equal(r2.status,200);
   assert.deepEqual(seen.map(x=>x.auth),["Bearer up-one","Bearer up-two"]);
   assert.equal(seen[0].body.model,"same");
-  await close(gateway);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});
+  await close(gateway);await close(upstream);
+  await new Promise(r=>setTimeout(r,250));
+  fs.rmSync(dir,{recursive:true,force:true});
+  fs.rmSync(stateRoot,{recursive:true,force:true});
 });
