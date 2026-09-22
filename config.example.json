@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "listen": { "host": "127.0.0.1", "port": 2025 },
+  "security": { "tokenFile": "~/.config/rotoxy/token" },
+  "exposure": { "mode": "serve", "layout": "single", "servicePrefix": "rotoxy" },
+  "defaultPool": "ollama",
+  "providers": {
+    "ollama": {
+      "id": "ollama",
+      "label": "Ollama Cloud",
+      "adapter": "ollama",
+      "wire": "openai",
+      "baseUrl": "https://ollama.com",
+      "auth": { "kind": "bearer", "header": "Authorization", "prefix": "Bearer " },
+      "modelListPath": "/api/tags",
+      "accounts": [
+        { "id": "account-1", "name": "Account 1", "secret": "ROTOXY_OLLAMA_ACCOUNT_1" }
+      ],
+      "enabled": true
+    }
+  },
+  "pools": {
+    "ollama": {
+      "id": "ollama",
+      "label": "Ollama Cloud accounts",
+      "type": "provider",
+      "strategy": "round-robin",
+      "provider": "ollama"
+    }
+  },
+  "routers": {
+    "task": { "enabled": false, "fallbackPool": "ollama", "mappings": {} },
+    "difficulty": { "enabled": false, "fallbackPool": "ollama", "mappings": {} },
+    "autoPolicy": "task-then-difficulty"
+  },
+  "workers": {
+    "profiles": {},
+    "pools": {
+      "subscriptions": {
+        "id": "subscriptions",
+        "label": "OAuth/subscription CLI workers",
+        "strategy": "round-robin",
+        "workers": []
+      }
+    }
+  }
+}

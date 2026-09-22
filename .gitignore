@@ -5,3 +5,4 @@ dist/
 *.log
 *.pid
 .DS_Store
+data/

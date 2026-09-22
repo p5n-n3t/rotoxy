@@ -2,73 +2,140 @@
 set -Eeuo pipefail
 
 ROOT="${ROTOXY_DIR:-$HOME/rotoxy}"
-CFG="$HOME/.config/rotoxy"
-CONF="$CFG/config.env"
+CFG="${ROTOXY_CONFIG_DIR:-$HOME/.config/rotoxy}"
+CONFIG="$CFG/config.json"
 TOKEN="$CFG/token"
-LOG="$CFG/server.log"
-PID="$CFG/server.pid"
-mkdir -p "$CFG"
+STATE_DIR="${ROTOXY_STATE_DIR:-$HOME/.local/state/rotoxy}"
+LOG="$STATE_DIR/server.log"
+PID="$STATE_DIR/server.pid"
+EXPOSURE_STATE="$STATE_DIR/exposure.state"
+mkdir -p "$CFG" "$STATE_DIR"
 
-if [[ -f "$CONF" ]]; then
-  # shellcheck disable=SC1090
-  source "$CONF"
-fi
-ROTOXY_BACKEND_PORT="${ROTOXY_BACKEND_PORT:-2025}"
-ROTOXY_EXPOSURE="${ROTOXY_EXPOSURE:-serve}"
-ROTOXY_START_CMD="${ROTOXY_START_CMD:-pnpm start}"
-
-die(){ printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+[[ -n "${NO_COLOR:-}" ]] && RED='' GREEN='' YELLOW='' CYAN='' BOLD='' DIM='' RESET=''
+die(){ printf '%sERROR:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+info(){ printf '%s•%s %s\n' "$CYAN" "$RESET" "$*"; }
+ok(){ printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn(){ printf '%s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
 lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-token(){ [[ -f "$TOKEN" ]] || die "Missing client token. Run: rotoxy configure"; cat "$TOKEN"; }
+
+need_runtime(){
+  [[ -f "$CONFIG" ]] || die "Missing $CONFIG. Run: rotoxy configure"
+  [[ -f "$ROOT/dist/index.js" ]] || die "Missing compiled backend. Run: cd $ROOT && pnpm build"
+  [[ -s "$TOKEN" ]] || die "Missing ROTOXY client token: $TOKEN"
+}
+json_get(){
+  local expr="$1"
+  node - "$CONFIG" "$expr" <<'NODE'
+const fs=require("fs"); const d=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+const path=process.argv[3].split("."); let v=d; for(const k of path)v=v?.[k];
+if(v===undefined||v===null)process.exit(1);
+if(typeof v==="object")console.log(JSON.stringify(v)); else console.log(v);
+NODE
+}
+port(){ json_get listen.port; }
+exposure_mode(){ json_get exposure.mode; }
+exposure_layout(){ json_get exposure.layout; }
+token(){ cat "$TOKEN"; }
 backend_pid(){ [[ -f "$PID" ]] && cat "$PID" 2>/dev/null || true; }
 backend_alive(){ local p; p="$(backend_pid)"; [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
 ts_dns(){
-  tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("Self",{}).get("DNSName") or "").rstrip("."))' 2>/dev/null || true
+  tailscale status --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let j=JSON.parse(s);process.stdout.write((j.Self?.DNSName||"").replace(/\.$/,""))}catch{}})'
 }
 url(){ local h; h="$(ts_dns)"; [[ -n "$h" ]] || die "Tailscale DNS name unavailable"; printf 'https://%s\n' "$h"; }
 
+api_get(){
+  local path="$1"
+  curl -sS --max-time 60 "http://127.0.0.1:$(port)$path" -H "Authorization: Bearer $(token)"
+}
+api_post_json(){
+  local path="$1" file="$2"
+  curl -sS --max-time 60 "http://127.0.0.1:$(port)$path" -H "Authorization: Bearer $(token)" -H 'Content-Type: application/json' --data-binary "@$file"
+}
+
 start_backend(){
-  [[ -d "$ROOT" ]] || die "Missing $ROOT"
-  [[ -f "$ROOT/.env" ]] || die "Missing $ROOT/.env"
-  if backend_alive; then return 0; fi
+  need_runtime
+  backend_alive && return 0
   : > "$LOG"
   (
     cd "$ROOT"
-    export ROTOXY_DIR="$ROOT"
-    setsid zsh -lc "exec $ROTOXY_START_CMD" >>"$LOG" 2>&1 &
+    setsid node dist/index.js >>"$LOG" 2>&1 &
     echo $! > "$PID"
   )
-  for _ in $(seq 1 80); do
-    curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$ROTOXY_BACKEND_PORT/__rotoxy/health" -H "Authorization: Bearer $(token)" 2>/dev/null && return 0
+  local n=80
+  while ((n--)); do
+    if curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$(port)/__rotoxy/health" -H "Authorization: Bearer $(token)" 2>/dev/null; then return 0; fi
     sleep .25
   done
-  tail -50 "$LOG" >&2 || true
+  tail -80 "$LOG" >&2 || true
   die "ROTOXY backend failed to start"
 }
 
-expose(){
-  case "$(lower "$ROTOXY_EXPOSURE")" in
-    serve|tailnet)
-      tailscale funnel reset >/dev/null 2>&1 || true
-      tailscale serve --bg --yes "http://127.0.0.1:$ROTOXY_BACKEND_PORT" >/dev/null
-      ;;
-    funnel|public)
-      tailscale serve reset >/dev/null 2>&1 || true
-      tailscale funnel --bg --yes "http://127.0.0.1:$ROTOXY_BACKEND_PORT" >/dev/null
-      ;;
-    none|local) ;;
-    *) die "Unknown exposure mode: $ROTOXY_EXPOSURE" ;;
-  esac
+disable_single_exposure(){
+  command -v tailscale >/dev/null 2>&1 || return 0
+  tailscale serve --https=443 off >/dev/null 2>&1 || true
+  tailscale funnel --https=443 off >/dev/null 2>&1 || true
+}
+
+clear_services(){
+  command -v tailscale >/dev/null 2>&1 || return 0
+  [[ -f "$ROOT/dist/service-cli.js" ]] || return 0
+  while IFS=$'\t' read -r svc route label; do
+    [[ -n "$svc" ]] || continue
+    tailscale serve clear "$svc" >/dev/null 2>&1 || true
+  done < <(node "$ROOT/dist/service-cli.js" machine 2>/dev/null || true)
+}
+
+apply_exposure(){
+  local mode layout p
+  mode="$(exposure_mode)"; layout="$(exposure_layout)"; p="$(port)"
+  if [[ "$mode" == "none" ]]; then
+    disable_single_exposure; clear_services
+    printf 'none/single\n' > "$EXPOSURE_STATE"
+    return
+  fi
+  command -v tailscale >/dev/null 2>&1 || { warn "Tailscale is not installed; backend remains local-only."; return; }
+  if [[ "$layout" == "services" ]]; then
+    [[ "$mode" == "serve" ]] || die "Named Tailscale Services are tailnet-only. Use exposure mode 'serve' with services layout."
+    disable_single_exposure
+    local failures=0
+    while IFS=$'\t' read -r svc route label; do
+      [[ -n "$svc" ]] || continue
+      info "Advertising $svc → $route"
+      if ! tailscale serve --service="$svc" --https=443 --set-path="$route" --yes "http://127.0.0.1:$p" >/dev/null 2>&1; then
+        warn "$svc could not be advertised. It may need to be defined/approved in the tailnet admin console."
+        failures=$((failures+1))
+      fi
+    done < <(node "$ROOT/dist/service-cli.js" machine)
+    printf 'serve/services\n' > "$EXPOSURE_STATE"
+    (( failures == 0 )) && ok "Named Tailscale Services applied." || warn "$failures named service(s) need tailnet setup/approval."
+    return
+  fi
+
+  clear_services
+  if [[ "$mode" == "serve" ]]; then
+    tailscale funnel --https=443 off >/dev/null 2>&1 || true
+    tailscale serve --bg --yes "http://127.0.0.1:$p" >/dev/null
+  elif [[ "$mode" == "funnel" ]]; then
+    tailscale serve --https=443 off >/dev/null 2>&1 || true
+    tailscale funnel --bg --yes "http://127.0.0.1:$p" >/dev/null
+  else die "Unknown exposure mode: $mode"; fi
+  printf '%s/single\n' "$mode" > "$EXPOSURE_STATE"
 }
 
 up(){
   start_backend
-  expose
-  echo "ROTOXY is up."
-  echo "  local:  http://127.0.0.1:$ROTOXY_BACKEND_PORT"
-  if [[ "$ROTOXY_EXPOSURE" != none && "$ROTOXY_EXPOSURE" != local ]]; then
-    echo "  https:  $(url)"
-    echo "  mode:   $ROTOXY_EXPOSURE"
+  apply_exposure
+  ok "ROTOXY is up."
+  printf '  Local:   http://127.0.0.1:%s\n' "$(port)"
+  local mode layout
+  mode="$(exposure_mode)"; layout="$(exposure_layout)"
+  if [[ "$mode" != "none" && "$layout" == "single" ]]; then
+    printf '  HTTPS:   %s\n' "$(url)"
+    printf '  Access:  %s\n' "$mode"
+  elif [[ "$layout" == "services" ]]; then
+    printf '  Access:  Tailscale named services\n'
+    node "$ROOT/dist/service-cli.js" plan
   fi
 }
 
@@ -76,86 +143,90 @@ down(){
   local p; p="$(backend_pid)"
   if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then kill -- "-$p" 2>/dev/null || kill "$p" 2>/dev/null || true; fi
   rm -f "$PID"
-  tailscale serve reset >/dev/null 2>&1 || true
-  tailscale funnel reset >/dev/null 2>&1 || true
-  echo "ROTOXY is down."
+  disable_single_exposure
+  clear_services
+  ok "ROTOXY is down."
 }
 
 status(){
-  if backend_alive; then echo "backend: UP (PID $(backend_pid))"; else echo "backend: DOWN"; fi
-  echo "provider: $(grep '^ROTOXY_PROVIDER=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- || echo unknown)"
-  echo "port: $ROTOXY_BACKEND_PORT"
-  echo "exposure: $ROTOXY_EXPOSURE"
-  if command -v tailscale >/dev/null; then
-    echo "tailscale: $(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("BackendState","unknown"))' 2>/dev/null || echo unknown)"
-    [[ "$ROTOXY_EXPOSURE" == "serve" ]] && tailscale serve status 2>/dev/null || true
-    [[ "$ROTOXY_EXPOSURE" == "funnel" ]] && tailscale funnel status 2>/dev/null || true
+  need_runtime
+  if backend_alive; then printf '%s● ONLINE%s  backend PID %s\n' "$GREEN" "$RESET" "$(backend_pid)"; else printf '%s● OFFLINE%s backend\n' "$RED" "$RESET"; fi
+  if backend_alive; then api_get "/__rotoxy/config" | node "$ROOT/dist/pretty-cli.js" config; else node "$ROOT/dist/admin-cli.js" summary; fi
+  if command -v tailscale >/dev/null 2>&1; then
+    local state; state="$(tailscale status --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).BackendState||"unknown")}catch{console.log("unknown")}})')"
+    printf '\nTailscale: %s\n' "$state"
+    [[ "$(exposure_layout)" == "single" && "$(exposure_mode)" != "none" ]] && printf 'Endpoint: %s\n' "$(url)"
   fi
 }
 
-api_get(){
-  local path="$1"
-  curl -sS "http://127.0.0.1:$ROTOXY_BACKEND_PORT$path" -H "Authorization: Bearer $(token)"
-}
-usage(){ backend_alive || start_backend; api_get "/__rotoxy/usage" | python3 -m json.tool; }
 models(){
-  backend_alive || start_backend
-  local mode="${1:-compact}" tmp
-  tmp="$(mktemp)"
-  api_get "/__rotoxy/models" >"$tmp"
-  if [[ "$mode" == "--json" || "$mode" == "json" || "$mode" == "--raw" ]]; then
-    python3 -m json.tool <"$tmp"
-    rm -f "$tmp"
-    return
+  start_backend
+  local provider="" raw=0
+  while (($#)); do
+    case "$1" in
+      --json|--raw) raw=1; shift;;
+      --provider) provider="${2:?missing provider}"; shift 2;;
+      *) die "Usage: rotoxy models [--provider ID] [--json]";;
+    esac
+  done
+  local q=""
+  [[ -n "$provider" ]] && q="?provider=$provider"
+  if ((raw)); then api_get "/__rotoxy/catalog$q" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(JSON.parse(s),null,2)))'
+  else api_get "/__rotoxy/catalog$q" | node "$ROOT/dist/pretty-cli.js" models
   fi
-  python3 - "$tmp" <<'PY2'
-import json,sys
-p=sys.argv[1]
-d=json.load(open(p))
-provider=d.get('provider','unknown')
-accounts=d.get('accounts',[])
-seen={}
-working=0
-for a in accounts:
-    if a.get('status') and int(a.get('status',0)) < 400:
-        working += 1
-    data=a.get('data') or {}
-    models=[]
-    if isinstance(data,dict):
-        if isinstance(data.get('models'),list):
-            models=data['models']
-        elif isinstance(data.get('data'),list):
-            models=data['data']
-    names=[]
-    for m in models:
-        if isinstance(m,str): name=m
-        elif isinstance(m,dict): name=m.get('name') or m.get('model') or m.get('id')
-        else: name=None
-        if name: names.append(str(name))
-    for name in set(names):
-        seen.setdefault(name,[]).append(a.get('account','?'))
-print(f"Provider: {provider}")
-print(f"Accounts responding: {working}/{len(accounts)}")
-print(f"Unique models: {len(seen)}")
-print()
-for name in sorted(seen, key=str.lower):
-    owners=seen[name]
-    suffix=f"  [{len(owners)}/{len(accounts)} accounts]" if len(accounts)>1 else ""
-    print(f"{name}{suffix}")
-PY2
+}
+
+usage(){
+  start_backend
+  if [[ "${1:-}" == "--json" ]]; then api_get "/__rotoxy/usage" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(JSON.parse(s),null,2)))'
+  else api_get "/__rotoxy/usage" | node "$ROOT/dist/pretty-cli.js" usage
+  fi
+}
+health(){ start_backend; api_get "/__rotoxy/health" | node "$ROOT/dist/pretty-cli.js" health; }
+routes(){ start_backend; api_get "/__rotoxy/config" | node "$ROOT/dist/pretty-cli.js" config; }
+
+classify(){
+  start_backend
+  [[ $# -gt 0 ]] || die 'Usage: rotoxy classify "task description"'
+  local tmp; tmp="$(mktemp)"
+  PROMPT_TEXT="$*" node -e 'process.stdout.write(JSON.stringify({messages:[{role:"user",content:process.env.PROMPT_TEXT}]}))' >"$tmp"
+  api_post_json "/__rotoxy/classify" "$tmp" | node "$ROOT/dist/pretty-cli.js" classify
   rm -f "$tmp"
 }
-health(){ backend_alive || start_backend; api_get "/__rotoxy/health" | python3 -m json.tool; }
+
+endpoints(){
+  local h=""; command -v tailscale >/dev/null 2>&1 && h="$(ts_dns)"
+  printf '%sROTOXY endpoints%s\n' "$BOLD" "$RESET"
+  if [[ -n "$h" ]]; then
+    printf '  Main:             https://%s\n' "$h"
+    printf '  Provider route:   https://%s/p/PROVIDER/v1/...\n' "$h"
+    printf '  Pool route:       https://%s/pool/POOL/v1/...\n' "$h"
+    printf '  Task router:      https://%s/smart/task/v1/...\n' "$h"
+    printf '  Difficulty router:https://%s/smart/difficulty/v1/...\n' "$h"
+    printf '  Auto router:      https://%s/smart/auto/v1/...\n' "$h"
+  fi
+  printf '\n'
+  node "$ROOT/dist/service-cli.js" plan
+}
+
+rotate_token(){
+  umask 077
+  openssl rand -hex 32 > "$TOKEN"
+  chmod 600 "$TOKEN"
+  ok "Client token rotated. Existing clients using the previous token are now rejected."
+}
 
 doctor(){
-  echo "== ROTOXY doctor =="
-  command -v node >/dev/null && echo "OK node $(node -v)" || echo "MISSING node"
-  command -v pnpm >/dev/null && echo "OK pnpm $(pnpm -v)" || echo "MISSING pnpm"
-  command -v tailscale >/dev/null && echo "OK tailscale $(tailscale version 2>/dev/null | head -1)" || echo "MISSING tailscale"
-  [[ -f "$ROOT/.env" ]] && echo "OK .env" || echo "MISSING .env"
-  [[ -f "$TOKEN" ]] && echo "OK client token" || echo "MISSING client token"
-  status
-  backend_alive && health || true
+  printf '%sROTOXY doctor%s\n' "$BOLD" "$RESET"
+  command -v node >/dev/null && ok "Node $(node -v)" || warn "Node missing"
+  command -v pnpm >/dev/null && ok "pnpm $(pnpm -v)" || warn "pnpm missing"
+  command -v tailscale >/dev/null && ok "Tailscale $(tailscale version 2>/dev/null | head -1)" || warn "Tailscale missing"
+  [[ -f "$CONFIG" ]] && ok "config.json present" || warn "config.json missing"
+  [[ -f "$CFG/secrets.env" ]] && ok "secrets.env present" || warn "secrets.env missing"
+  [[ -f "$TOKEN" ]] && ok "client token present" || warn "client token missing"
+  [[ -f "$ROOT/dist/index.js" ]] && ok "compiled backend present" || warn "compiled backend missing"
+  backend_alive && health || warn "backend is not running"
+  node "$ROOT/dist/worker-cli.js" detect
 }
 
 autostart(){
@@ -165,7 +236,7 @@ autostart(){
       mkdir -p "$(dirname "$unit")"
       cat >"$unit" <<EOF
 [Unit]
-Description=ROTOXY API key rotation proxy
+Description=ROTOXY model gateway and router
 After=network-online.target
 Wants=network-online.target
 
@@ -174,7 +245,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=$HOME/.local/bin/rotoxy up
 ExecStop=$HOME/.local/bin/rotoxy down
-TimeoutStartSec=60
+TimeoutStartSec=90
 TimeoutStopSec=30
 
 [Install]
@@ -183,34 +254,66 @@ EOF
       systemctl --user daemon-reload
       systemctl --user enable --now rotoxy.service
       sudo loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+      ok "ROTOXY autostart enabled."
       ;;
-    off|disable) systemctl --user disable --now rotoxy.service 2>/dev/null || true ;;
+    off|disable) systemctl --user disable --now rotoxy.service 2>/dev/null || true; ok "ROTOXY autostart disabled." ;;
     status) systemctl --user status rotoxy.service --no-pager 2>/dev/null || true ;;
     *) die "Usage: rotoxy autostart on|off|status" ;;
   esac
 }
 
-configure(){ exec "$ROOT/install.sh" --configure-only; }
-logs(){ tail -n "${1:-100}" "$LOG" 2>/dev/null || true; }
-rotate_token(){ umask 077; openssl rand -hex 32 >"$TOKEN"; chmod 600 "$TOKEN"; echo "Client token rotated."; }
-
 help(){
 cat <<'EOF'
-ROTOXY - provider-agnostic API key rotation proxy
+ROTOXY v2 — model gateway, account rotator, smart router and agent-worker broker
 
-Commands:
+START / HEALTH
   rotoxy up | down | restart
-  rotoxy status | doctor | health
-  rotoxy usage             Per-account/model token telemetry
-  rotoxy models            Unique provider models + account coverage
-  rotoxy models --json     Raw per-account provider response
-  rotoxy url               Print Tailscale HTTPS URL
-  rotoxy token             Print client access token
-  rotoxy rotate-token      Generate a new client token
-  rotoxy configure         Interactive provider/account/exposure config
-  rotoxy autostart on|off|status
+  rotoxy status
+  rotoxy doctor
+  rotoxy health
   rotoxy logs [N]
-  rotoxy version
+
+MODELS / ROUTING
+  rotoxy models [--provider ID] [--json]
+  rotoxy usage [--json]
+  rotoxy routes
+  rotoxy endpoints
+  rotoxy classify "task description"
+  rotoxy provider use PROVIDER
+  rotoxy configure
+
+AGENT WORKERS
+  rotoxy agents [--json]
+  rotoxy oauth list
+  rotoxy oauth add codex|gemini|copilot|claude|agy NAME
+  rotoxy delegate --worker ID --prompt "..."
+  rotoxy delegate --pool subscriptions --prompt "..."
+  rotoxy fanout --pool subscriptions --prompt "..."
+  Add --cwd PATH or --json to delegate/fanout when needed.
+
+AUTH / NETWORK
+  rotoxy url
+  rotoxy token
+  rotoxy rotate-token
+  rotoxy autostart on|off|status
+
+ROUTING WITHOUT CHANGING URL
+  Headers: X-Rotoxy-Provider, X-Rotoxy-Pool, X-Rotoxy-Task, X-Rotoxy-Difficulty
+  Virtual models:
+    rotoxy/auto
+    rotoxy/provider/ollama
+    rotoxy/pool/my-pool
+    rotoxy/task/coding
+    rotoxy/difficulty/hard
+
+  URL routes:
+    /p/PROVIDER/...
+    /pool/POOL/...
+    /smart/task/...
+    /smart/difficulty/...
+    /smart/auto/...
+
+Raw JSON is only printed when you explicitly request --json.
 EOF
 }
 
@@ -222,15 +325,27 @@ case "$cmd" in
   status) status ;;
   doctor|diag) doctor ;;
   health|test) health ;;
-  usage|quota|meter) usage ;;
   models) models "$@" ;;
+  usage|quota|meter) usage "$@" ;;
+  routes|routing) routes ;;
+  endpoints|endpoint) endpoints ;;
+  classify) classify "$@" ;;
+  configure|config|setup) node "$ROOT/dist/admin-cli.js" menu ;;
+  provider)
+    sub="$(lower "${1:-}")"; shift || true
+    case "$sub" in use|switch) node "$ROOT/dist/admin-cli.js" provider-use "${1:?provider ID}" ;; *) die "Usage: rotoxy provider use PROVIDER" ;; esac
+    ;;
+  agents|workers) node "$ROOT/dist/worker-cli.js" detect "$@" ;;
+  oauth) node "$ROOT/dist/oauth-cli.js" "$@" ;;
+  delegate) node "$ROOT/dist/worker-cli.js" delegate "$@" ;;
+  fanout) node "$ROOT/dist/worker-cli.js" fanout "$@" ;;
   url) url ;;
   token|key) token; echo ;;
   rotate-token|rotate-key) rotate_token ;;
-  configure|config) configure ;;
   autostart) autostart "$@" ;;
-  logs|log) logs "$@" ;;
-  version|-v|--version) echo "1.0.0" ;;
+  logs|log) tail -n "${1:-100}" "$LOG" 2>/dev/null || true ;;
+  install) exec "$ROOT/install.sh" ;;
+  version|-v|--version) echo "2.0.0" ;;
   help|-h|--help) help ;;
   *) die "Unknown command: $cmd" ;;
 esac
