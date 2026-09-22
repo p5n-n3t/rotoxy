@@ -98,7 +98,53 @@ api_get(){
   curl -sS "http://127.0.0.1:$ROTOXY_BACKEND_PORT$path" -H "Authorization: Bearer $(token)"
 }
 usage(){ backend_alive || start_backend; api_get "/__rotoxy/usage" | python3 -m json.tool; }
-models(){ backend_alive || start_backend; api_get "/__rotoxy/models" | python3 -m json.tool; }
+models(){
+  backend_alive || start_backend
+  local mode="${1:-compact}" tmp
+  tmp="$(mktemp)"
+  api_get "/__rotoxy/models" >"$tmp"
+  if [[ "$mode" == "--json" || "$mode" == "json" || "$mode" == "--raw" ]]; then
+    python3 -m json.tool <"$tmp"
+    rm -f "$tmp"
+    return
+  fi
+  python3 - "$tmp" <<'PY2'
+import json,sys
+p=sys.argv[1]
+d=json.load(open(p))
+provider=d.get('provider','unknown')
+accounts=d.get('accounts',[])
+seen={}
+working=0
+for a in accounts:
+    if a.get('status') and int(a.get('status',0)) < 400:
+        working += 1
+    data=a.get('data') or {}
+    models=[]
+    if isinstance(data,dict):
+        if isinstance(data.get('models'),list):
+            models=data['models']
+        elif isinstance(data.get('data'),list):
+            models=data['data']
+    names=[]
+    for m in models:
+        if isinstance(m,str): name=m
+        elif isinstance(m,dict): name=m.get('name') or m.get('model') or m.get('id')
+        else: name=None
+        if name: names.append(str(name))
+    for name in set(names):
+        seen.setdefault(name,[]).append(a.get('account','?'))
+print(f"Provider: {provider}")
+print(f"Accounts responding: {working}/{len(accounts)}")
+print(f"Unique models: {len(seen)}")
+print()
+for name in sorted(seen, key=str.lower):
+    owners=seen[name]
+    suffix=f"  [{len(owners)}/{len(accounts)} accounts]" if len(accounts)>1 else ""
+    print(f"{name}{suffix}")
+PY2
+  rm -f "$tmp"
+}
 health(){ backend_alive || start_backend; api_get "/__rotoxy/health" | python3 -m json.tool; }
 
 doctor(){
@@ -156,7 +202,8 @@ Commands:
   rotoxy up | down | restart
   rotoxy status | doctor | health
   rotoxy usage             Per-account/model token telemetry
-  rotoxy models            Query accessible models for each account/key
+  rotoxy models            Unique provider models + account coverage
+  rotoxy models --json     Raw per-account provider response
   rotoxy url               Print Tailscale HTTPS URL
   rotoxy token             Print client access token
   rotoxy rotate-token      Generate a new client token
