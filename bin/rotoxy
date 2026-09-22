@@ -223,7 +223,7 @@ case "$cmd" in
   doctor|diag) doctor ;;
   health|test) health ;;
   usage|quota|meter) usage ;;
-  models) models ;;
+  models) models "$@" ;;
   url) url ;;
   token|key) token; echo ;;
   rotate-token|rotate-key) rotate_token ;;
