@@ -35,3 +35,42 @@ test("gateway enforces client token and rotates upstream accounts",async()=>{
   fs.rmSync(dir,{recursive:true,force:true});
   fs.rmSync(stateRoot,{recursive:true,force:true});
 });
+
+test("MCP HTTP relay hides upstream credentials behind the ROTOXY token",async()=>{
+  const seen=[];
+  const upstream=http.createServer((req,res)=>{
+    let body="";
+    req.on("data",d=>body+=d).on("end",()=>{
+      seen.push({auth:req.headers.authorization,protocol:req.headers["mcp-protocol-version"],body});
+      res.writeHead(200,{"content-type":"application/json","mcp-session-id":"relay-test"});
+      res.end(body||JSON.stringify({ok:true}));
+    });
+  });
+  const upPort=await listen(upstream);
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"rotoxy-mcp-relay-"));
+  const tokenFile=path.join(dir,"token");fs.writeFileSync(tokenFile,"front-door");
+  process.env.MCP_UPSTREAM_TOKEN="provider-secret";
+  const config={
+    version:2,listen:{host:"127.0.0.1",port:0},security:{tokenFile},exposure:{mode:"none",layout:"single",servicePrefix:"r"},
+    defaultPool:"mock",
+    providers:{mock:{id:"mock",label:"Mock",adapter:"openai",wire:"openai",baseUrl:"http://127.0.0.1:1",auth:{kind:"bearer"},accounts:[{id:"one",name:"One",secret:"TEST_S1"}]}},
+    pools:{mock:{id:"mock",label:"Mock",type:"provider",strategy:"round-robin",provider:"mock"}},
+    routers:{task:{enabled:false,fallbackPool:"mock",mappings:{}},difficulty:{enabled:false,fallbackPool:"mock",mappings:{}},autoPolicy:"task-then-difficulty"},
+    workers:{profiles:{},pools:{}},
+    mcp:{servers:{memory:{id:"memory",label:"Memory",transport:"streamable-http",url:`http://127.0.0.1:${upPort}/mcp`,bearerTokenSecret:"MCP_UPSTREAM_TOKEN",enabled:true}},assignments:{}}
+  };
+  const gateway=createRotoxyServer(config);const port=await listen(gateway);
+  const payload=JSON.stringify({jsonrpc:"2.0",id:1,method:"initialize"});
+  const response=await new Promise((resolve,reject)=>{
+    const req=http.request({hostname:"127.0.0.1",port,path:"/mcp/memory",method:"POST",headers:{
+      Authorization:"Bearer front-door","content-type":"application/json","content-length":Buffer.byteLength(payload),"mcp-protocol-version":"2025-11-25"
+    }},res=>{const chunks=[];res.on("data",d=>chunks.push(d));res.on("end",()=>resolve({status:res.statusCode,headers:res.headers,body:Buffer.concat(chunks).toString()}));});
+    req.on("error",reject);req.end(payload);
+  });
+  assert.equal(response.status,200);
+  assert.equal(response.headers["mcp-session-id"],"relay-test");
+  assert.equal(seen[0].auth,"Bearer provider-secret");
+  assert.equal(seen[0].protocol,"2025-11-25");
+  assert.equal(seen[0].body,payload);
+  await close(gateway);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});
+});

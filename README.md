@@ -7,15 +7,15 @@
 <p align="center"><strong>One AI gateway. Many accounts. Many providers. Smart routing when you want it.</strong></p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-2.0.0-ff4b18?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.1.0-ff4b18?style=for-the-badge">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-3c873a?style=for-the-badge&logo=node.js&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178c6?style=for-the-badge&logo=typescript&logoColor=white">
   <img alt="Tailscale" src="https://img.shields.io/badge/Tailscale-Serve%20%7C%20Funnel-black?style=for-the-badge&logo=tailscale">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-8%2F8%20passing-22c55e?style=for-the-badge">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-12%2F12%20passing-22c55e?style=for-the-badge">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-8b5cf6?style=for-the-badge">
 </p>
 
-ROTOXY is a local-first AI model gateway combining **API-key rotation**, **multi-provider routing**, **same-model cross-provider pools**, **smart task routing**, **usage telemetry**, **Tailscale exposure**, and **delegation to authenticated local AI CLIs**.
+ROTOXY is a local-first AI model gateway combining **API-key rotation**, **multi-provider routing**, **same-model cross-provider pools**, **smart task routing**, **MCP tool-server management**, **usage telemetry**, **Tailscale exposure**, and **delegation to authenticated local AI CLIs**.
 
 The default experience stays simple:
 
@@ -34,8 +34,10 @@ Everything else is optional. Add providers, pools, smart routing, named Tailscal
 - Keep one endpoint, or optionally create named Tailscale Service endpoints.
 - Enforce OpenRouter free-only usage.
 - Track requests and token usage by provider, account, model, and pool.
+- Register and test MCP servers such as Mem0, Exa, Firecrawl, or any custom Streamable HTTP/stdio MCP server.
+- Relay remote MCP servers through the same protected ROTOXY/Tailscale endpoint so upstream MCP secrets stay inside ROTOXY.
 - Delegate work to Codex, Gemini CLI, Claude Code, Copilot CLI, AGY, and other local workers when they expose a safe headless interface.
-- Keep provider secrets local.
+- Keep provider and MCP secrets local.
 - Keep terminal output compact and color-coded; raw JSON is explicit with `--json`.
 
 ## Mental model
@@ -52,6 +54,10 @@ Router
 ├── explicit          provider / pool / virtual model / URL path
 ├── task              coding, research, vision, devops, etc.
 └── difficulty        easy / medium / hard
+
+MCP registry
+├── remote HTTP       relayed through /mcp/SERVER
+└── local stdio       launched through a secret-safe ROTOXY wrapper
 
 Exposure
 ├── one URL           recommended
@@ -87,6 +93,7 @@ rotoxy models
 rotoxy usage
 rotoxy routes
 rotoxy endpoints
+rotoxy mcp list
 rotoxy configure
 ```
 
@@ -197,6 +204,54 @@ rotoxy endpoints
 Tailscale Services can require Tailnet definition/approval:
 https://tailscale.com/docs/features/tailscale-services
 
+## MCP tool servers
+
+MCPs are tools, not model providers. ROTOXY keeps them in a separate registry and lets you reuse the same MCP setup across local agents.
+
+Built-in presets:
+
+- **Mem0 Cloud** → `https://mcp.mem0.ai/mcp` with the Mem0 API key injected by ROTOXY.
+- **Exa** → `https://mcp.exa.ai/mcp`; Exa currently offers the hosted MCP without requiring an API key for the default service.
+- **Firecrawl** → official `npx -y firecrawl-mcp` stdio server with `FIRECRAWL_API_KEY` held in the ROTOXY secret store.
+- **Custom** → any Streamable HTTP endpoint or stdio command.
+
+Add and inspect servers:
+
+```bash
+rotoxy mcp add mem0
+rotoxy mcp add exa
+rotoxy mcp add firecrawl
+rotoxy mcp add custom
+
+rotoxy mcp list
+rotoxy mcp test exa
+rotoxy mcp tools exa
+```
+
+Remote HTTP MCPs are exposed through a protected relay on the existing ROTOXY endpoint:
+
+```text
+https://YOUR-ROTOXY/mcp/mem0
+https://YOUR-ROTOXY/mcp/exa
+```
+
+The client authenticates to ROTOXY with the ROTOXY client token; ROTOXY strips that credential and injects the MCP server's own upstream secret. The upstream key therefore does not have to be copied into every agent configuration.
+
+Assign and sync MCPs to local agent clients:
+
+```bash
+rotoxy mcp assign mem0 codex
+rotoxy mcp assign exa '*'
+rotoxy mcp sync codex
+rotoxy mcp sync claude
+rotoxy mcp sync gemini
+rotoxy mcp sync copilot
+```
+
+For stdio servers, synced clients launch `rotoxy mcp stdio SERVER`, which loads MCP secrets inside ROTOXY rather than embedding them in the client command.
+
+See [MCP servers](docs/MCP.md).
+
 ## OAuth / subscription-backed agent workers
 
 ROTOXY does not scrape OAuth credential stores. It invokes official local CLIs that already own their authentication state.
@@ -264,6 +319,7 @@ Rotating it revokes clients using the previous ROTOXY token while leaving provid
 - [Architecture](docs/ARCHITECTURE.md)
 - [Configuration walkthrough](docs/CONFIGURATION.md)
 - [Routing and smart routers](docs/ROUTING.md)
+- [MCP servers](docs/MCP.md)
 - [Agent workers and OAuth profiles](docs/AGENT-WORKERS.md)
 - [Client configuration](docs/CLIENTS.md)
 - [Use cases](docs/USE-CASES.md)

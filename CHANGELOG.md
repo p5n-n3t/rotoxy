@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.0
+
+- MCP registry with Streamable HTTP and stdio transports.
+- Built-in Mem0, Exa and Firecrawl presets plus generic/custom MCP configuration.
+- Live MCP `tools/list` inspection through the official MCP TypeScript SDK.
+- Protected `/mcp/SERVER` HTTP relay that keeps upstream MCP credentials inside ROTOXY.
+- Secret-safe stdio wrapper for local MCP servers.
+- Per-worker/client MCP assignments and native sync adapters for Codex, Claude Code and Copilot CLI.
+- MCP configuration integrated into the main `rotoxy configure` menu.
+
 ## 2.0.0
 
 - Multi-provider configuration and provider pools.

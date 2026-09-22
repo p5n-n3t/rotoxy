@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { CONFIG_FILE, PROVIDER_PRESETS, SECRETS_FILE, loadConfig, saveConfig } from "./config.js";
 import { TASK_CATEGORIES } from "./router.js";
 import { detectWorkers } from "./workers.js";
@@ -24,7 +26,7 @@ function parseSecrets(){
 }
 function writeSecrets(map:Record<string,string>){
   fs.mkdirSync(path.dirname(SECRETS_FILE),{recursive:true,mode:0o700});
-  const lines=["# ROTOXY provider secrets. Never commit this file."];
+  const lines=["# ROTOXY secrets. Never commit this file."];
   for(const key of Object.keys(map).sort())lines.push(`${key}=${map[key]}`);
   fs.writeFileSync(SECRETS_FILE,lines.join("\n")+"\n",{mode:0o600});
   fs.chmodSync(SECRETS_FILE,0o600);
@@ -46,6 +48,7 @@ function summary(config:RotoxyConfig){
   console.log(`  Task router:      ${config.routers.task.enabled?paint(C.green,"on"):paint(C.dim,"off")}`);
   console.log(`  Difficulty router:${config.routers.difficulty.enabled?paint(C.green," on"):paint(C.dim," off")}`);
   console.log(`  Agent workers:    ${Object.keys(config.workers.profiles).length}`);
+  console.log(`  MCP servers:      ${Object.keys(config.mcp?.servers||{}).length}`);
 }
 
 async function choose(rl:readline.Interface,title:string,items:{id:string,label:string}[],allowBack=true){
@@ -200,7 +203,8 @@ async function interactive(){
         {id:"task",label:"Configure task-category smart routing"},
         {id:"difficulty",label:"Configure easy / medium / hard routing"},
         {id:"exposure",label:"Configure Tailscale exposure"},
-        {id:"workers",label:"Detect and sync OAuth/subscription agent CLIs"}
+        {id:"workers",label:"Detect and sync OAuth/subscription agent CLIs"},
+        {id:"mcp",label:"Manage MCP tool servers (Mem0, Exa, Firecrawl, custom)"}
       ]);
       if(!action)break;
       const cfg=loadConfig();
@@ -211,6 +215,11 @@ async function interactive(){
       if(action==="difficulty")await smartRouter(rl,cfg,"difficulty");
       if(action==="exposure")await exposureMenu(rl,cfg);
       if(action==="workers")await workersMenu(cfg);
+      if(action==="mcp"){
+        rl.close();
+        spawnSync(process.execPath,[fileURLToPath(new URL("./mcp-cli.js",import.meta.url)),"menu"],{stdio:"inherit"});
+        return;
+      }
     }
   }finally{rl.close();}
 }

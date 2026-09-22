@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import type { RotoxyConfig, WorkerProfile } from "./types.js";
-import { STATE_DIR } from "./config.js";
+import { CONFIG_DIR, STATE_DIR } from "./config.js";
 
 export const KNOWN_WORKERS = [
   {adapter:"codex",command:"codex",label:"OpenAI Codex CLI",oauth:true},
@@ -70,7 +70,9 @@ export async function runWorker(profile:WorkerProfile,prompt:string,overrideCwd?
   if(!which(command))throw new Error(`Worker command not found: ${command}`);
   const inv=workerInvocation(profile,prompt,overrideCwd);
   const cwd=overrideCwd||profile.cwd||process.cwd();
-  const env={...process.env,...(profile.env||{})};
+  const tokenPath=path.join(CONFIG_DIR,"token");
+  const gatewayToken=fs.existsSync(tokenPath)?fs.readFileSync(tokenPath,"utf8").trim():"";
+  const env={...process.env,...(gatewayToken?{ROTOXY_CLIENT_TOKEN:gatewayToken}:{}),...(profile.env||{})};
   const timeoutMs=(profile.timeoutSeconds||900)*1000;
   return await new Promise<{worker:string,code:number,stdout:string,stderr:string,durationMs:number}>((resolve,reject)=>{
     const start=Date.now();

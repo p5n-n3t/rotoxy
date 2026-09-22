@@ -19,7 +19,7 @@ fs.watchFile(CONFIG_FILE,{interval:1000},()=>{
 });
 
 server.listen(config.listen.port,config.listen.host,()=>{
-  console.log(`ROTOXY v2 listening on http://${config.listen.host}:${config.listen.port}`);
+  console.log(`ROTOXY v2.1.0 listening on http://${config.listen.host}:${config.listen.port}`);
   console.log(`providers=${Object.keys(config.providers).length} pools=${Object.keys(config.pools).length} default=${config.defaultPool}`);
   console.log("Secrets are loaded from the private ROTOXY config directory and are never logged.");
 });

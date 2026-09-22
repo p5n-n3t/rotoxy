@@ -27,6 +27,9 @@ export function loadConfig(): RotoxyConfig {
   }
   const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as RotoxyConfig;
   if (parsed.version !== 2) throw new Error("Unsupported ROTOXY config version. Run: rotoxy migrate");
+  parsed.mcp ||= { servers: {}, assignments: {} };
+  parsed.mcp.servers ||= {};
+  parsed.mcp.assignments ||= {};
   validateConfig(parsed);
   return parsed;
 }
@@ -64,6 +67,12 @@ function validateConfig(config: RotoxyConfig) {
       }
       if (wires.size > 1) throw new Error(`Federated pool "${id}" mixes incompatible wire protocols (${[...wires].join(", ")}). Use providers with the same wire protocol or separate pools.`);
     }
+  }
+  for (const [id, server] of Object.entries(config.mcp?.servers || {})) {
+    if (server.transport === "streamable-http" && !server.url) throw new Error(`MCP server "${id}" requires a URL`);
+    if (server.transport === "stdio" && !server.command) throw new Error(`MCP server "${id}" requires a command`);
+    for (const ref of Object.values(server.secretEnv || {})) if (!ref) throw new Error(`MCP server "${id}" has an empty secret env reference`);
+    for (const ref of Object.values(server.secretHeaders || {})) if (!ref) throw new Error(`MCP server "${id}" has an empty secret header reference`);
   }
 }
 

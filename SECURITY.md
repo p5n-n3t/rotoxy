@@ -4,14 +4,15 @@ ROTOXY separates three credential classes:
 
 1. **ROTOXY client token** authenticates clients to the gateway.
 2. **Provider API keys** authenticate ROTOXY to API providers.
-3. **OAuth/subscription sessions** remain owned by official third-party CLIs.
+3. **MCP upstream credentials** authenticate ROTOXY to remote/local MCP tool servers.
+4. **OAuth/subscription sessions** remain owned by official third-party CLIs.
 
 ROTOXY does not print provider keys in normal status output and does not copy OAuth tokens from CLI stores.
 
 ## Files
 
 - `~/.config/rotoxy/token`: gateway client token
-- `~/.config/rotoxy/secrets.env`: provider API keys
+- `~/.config/rotoxy/secrets.env`: provider API keys and MCP upstream secrets
 - `~/.config/rotoxy/config.json`: routing configuration
 - `~/.local/state/rotoxy/`: logs, PID and usage counters
 
@@ -32,3 +33,9 @@ rotoxy rotate-token
 This revokes the old ROTOXY client credential. It does not rotate or revoke upstream provider credentials.
 
 Do not open a public issue containing API keys, OAuth tokens, private Tailnet names, or secret-bearing logs.
+
+## MCP relay boundary
+
+Remote HTTP MCP clients authenticate to ROTOXY using the rotatable ROTOXY client token. ROTOXY removes that front-door credential before forwarding the MCP request and injects the MCP server's own upstream authorization.
+
+For stdio MCP servers, synchronized clients launch the server through `rotoxy mcp stdio SERVER`; ROTOXY resolves secret environment variables at process launch rather than placing provider keys in the client command line.

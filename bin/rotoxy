@@ -282,6 +282,17 @@ MODELS / ROUTING
   rotoxy provider use PROVIDER
   rotoxy configure
 
+MCP TOOL SERVERS
+  rotoxy mcp list [--json]
+  rotoxy mcp add [mem0|exa|firecrawl|custom]
+  rotoxy mcp test SERVER
+  rotoxy mcp tools SERVER
+  rotoxy mcp assign SERVER WORKER|CLIENT|*
+  rotoxy mcp unassign SERVER WORKER|CLIENT|*
+  rotoxy mcp sync codex|claude|gemini|copilot|all [SERVER]
+  rotoxy mcp export [CLIENT]
+  rotoxy mcp endpoint SERVER
+
 AGENT WORKERS
   rotoxy agents [--json]
   rotoxy oauth list
@@ -335,6 +346,7 @@ case "$cmd" in
     sub="$(lower "${1:-}")"; shift || true
     case "$sub" in use|switch) node "$ROOT/dist/admin-cli.js" provider-use "${1:?provider ID}" ;; *) die "Usage: rotoxy provider use PROVIDER" ;; esac
     ;;
+  mcp) node "$ROOT/dist/mcp-cli.js" "$@" ;;
   agents|workers) node "$ROOT/dist/worker-cli.js" detect "$@" ;;
   oauth) node "$ROOT/dist/oauth-cli.js" "$@" ;;
   delegate) node "$ROOT/dist/worker-cli.js" delegate "$@" ;;
@@ -345,7 +357,7 @@ case "$cmd" in
   autostart) autostart "$@" ;;
   logs|log) tail -n "${1:-100}" "$LOG" 2>/dev/null || true ;;
   install) exec "$ROOT/install.sh" ;;
-  version|-v|--version) echo "2.0.0" ;;
+  version|-v|--version) echo "2.1.0" ;;
   help|-h|--help) help ;;
   *) die "Unknown command: $cmd" ;;
 esac

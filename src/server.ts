@@ -7,6 +7,7 @@ import type { ProviderConfig, RotoxyConfig } from "./types.js";
 import { catalog } from "./catalog.js";
 import { classifyRequest, markCooldown, resolveRoute, TASK_CATEGORIES } from "./router.js";
 import { extractUsage, flushUsage, recordUsage, usageSnapshot } from "./usage.js";
+import { ensureMcp, getMcpServer, resolvedMcpHeaders } from "./mcp.js";
 
 const MAX_REQUEST_BYTES = Number(process.env.ROTOXY_MAX_REQUEST_BYTES || 50 * 1024 * 1024);
 const MAX_RESPONSE_CAPTURE = Number(process.env.ROTOXY_MAX_RESPONSE_CAPTURE || 2 * 1024 * 1024);
@@ -79,14 +80,53 @@ function rewriteModel(original:Buffer,parsed:any,model?:string){
   return Buffer.from(JSON.stringify(copy));
 }
 
+function mcpRelayMatch(rawPath:string){
+  const u=new URL(rawPath,"http://rotoxy.local");
+  const m=u.pathname.match(/^\/mcp\/([^/]+)\/?$/);
+  return m?{id:decodeURIComponent(m[1]),search:u.search}:null;
+}
+
+function relayMcpHttp(req:IncomingMessage,res:ServerResponse,config:RotoxyConfig,id:string,search:string){
+  const server=getMcpServer(config,id);
+  if(server.enabled===false){sendJson(res,503,{error:"MCP server disabled",server:id});return;}
+  if(server.transport!=="streamable-http"||!server.url){
+    sendJson(res,400,{error:"MCP relay requires a Streamable HTTP server",server:id,hint:`For stdio use: rotoxy mcp sync <client> ${id}`});return;
+  }
+  const target=new URL(server.url);
+  if(search){
+    const incoming=new URLSearchParams(search);
+    for(const [k,v] of incoming)target.searchParams.append(k,v);
+  }
+  const headers:Record<string,string|string[]>={};
+  const blocked=new Set(["host","authorization","x-rotoxy-token","x-api-key","api-key","connection","proxy-authorization","proxy-authenticate"]);
+  for(const [k,v] of Object.entries(req.headers))if(v!==undefined&&!blocked.has(k.toLowerCase()))headers[k]=v;
+  for(const [k,v] of Object.entries(resolvedMcpHeaders(server)))headers[k]=v;
+  headers.host=target.host;
+  const transport=target.protocol==="http:"?http:https;
+  const upstream=transport.request({
+    protocol:target.protocol,hostname:target.hostname,port:target.port||undefined,path:target.pathname+target.search,method:req.method,headers
+  },up=>{
+    const out={...up.headers};delete out.connection;
+    out["x-rotoxy-mcp-server"]=id;
+    res.writeHead(up.statusCode||502,out);
+    up.pipe(res);
+  });
+  upstream.on("error",err=>{if(!res.headersSent)sendJson(res,502,{error:"MCP upstream error",server:id,message:err.message});else res.end();});
+  req.on("aborted",()=>upstream.destroy());
+  req.pipe(upstream);
+}
+
 export function createRotoxyServer(config:RotoxyConfig){
   return http.createServer(async(req,res)=>{
     try{
       if(!safeEqual(credential(req),clientToken(config))){sendJson(res,401,{error:"Unauthorized",message:"Supply the ROTOXY client token."});return;}
       const rawPath=req.url||"/";
+      ensureMcp(config);
+      const mcpRelay=mcpRelayMatch(rawPath);
+      if(mcpRelay){relayMcpHttp(req,res,config,mcpRelay.id,mcpRelay.search);return;}
 
       if(rawPath==="/__rotoxy/health"){
-        sendJson(res,200,{ok:true,name:"rotoxy",version:2,providers:Object.keys(config.providers).length,pools:Object.keys(config.pools).length,defaultPool:config.defaultPool});
+        sendJson(res,200,{ok:true,name:"rotoxy",version:"2.1.0",configVersion:2,providers:Object.keys(config.providers).length,pools:Object.keys(config.pools).length,mcpServers:Object.keys(config.mcp.servers).length,defaultPool:config.defaultPool});
         return;
       }
       if(rawPath==="/__rotoxy/config"){
@@ -94,7 +134,11 @@ export function createRotoxyServer(config:RotoxyConfig){
           version:config.version,listen:config.listen,exposure:config.exposure,defaultPool:config.defaultPool,
           providers:Object.values(config.providers).map(p=>({id:p.id,label:p.label,adapter:p.adapter,wire:p.wire,accounts:p.accounts.length,freeOnly:!!p.policy?.freeOnly,defaultModel:p.defaultModel||null})),
           pools:Object.values(config.pools).map(p=>({id:p.id,label:p.label,type:p.type,strategy:p.strategy,provider:p.provider||null,targets:p.targets||[]})),
-          routers:config.routers
+          routers:config.routers,
+          mcp:{
+            servers:Object.values(config.mcp.servers).map(s=>({id:s.id,label:s.label,transport:s.transport,enabled:s.enabled!==false,preset:s.preset||"custom",relay:s.transport==="streamable-http"?`/mcp/${encodeURIComponent(s.id)}`:null})),
+            assignments:config.mcp.assignments
+          }
         });
         return;
       }

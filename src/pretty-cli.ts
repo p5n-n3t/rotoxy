@@ -47,7 +47,7 @@ function usage(d:any){
 
 function health(d:any){
   console.log(`${d.ok?paint(C.green,"● ONLINE"):paint(C.red,"● OFFLINE")}  ROTOXY v${d.version||"?"}`);
-  console.log(`  Providers: ${d.providers}  •  Pools: ${d.pools}  •  Default: ${paint(C.cyan,d.defaultPool)}`);
+  console.log(`  Providers: ${d.providers}  •  Pools: ${d.pools}  •  MCP: ${d.mcpServers??0}  •  Default: ${paint(C.cyan,d.defaultPool)}`);
 }
 
 function config(d:any){
@@ -62,6 +62,11 @@ function config(d:any){
   console.log(`  Task:       ${d.routers?.task?.enabled?paint(C.green,"ON"):paint(C.dim,"OFF")}`);
   console.log(`  Difficulty: ${d.routers?.difficulty?.enabled?paint(C.green,"ON"):paint(C.dim,"OFF")}`);
   console.log(`  Auto policy: ${d.routers?.autoPolicy}`);
+  if(d.mcp){
+    console.log("\n"+paint(C.bold,"MCP tool servers"));
+    console.log(`  Registered: ${d.mcp.servers?.length||0}`);
+    for(const m of d.mcp.servers||[])console.log(`  ${m.enabled?paint(C.green,"●"):paint(C.dim,"○")} ${m.id.padEnd(16)} ${m.transport}${m.relay?" • "+m.relay:""}`);
+  }
 }
 
 function classify(d:any){

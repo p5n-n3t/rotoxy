@@ -56,7 +56,8 @@ const config:RotoxyConfig={
     pools:{
       subscriptions:{id:"subscriptions",label:"OAuth/subscription CLI workers",strategy:"round-robin",workers:Object.keys(profiles)}
     }
-  }
+  },
+  mcp:{servers:{},assignments:{}}
 };
 saveConfig(config);
 console.log(`Migrated ${keys.length} Ollama account(s) to ROTOXY v2 without printing secrets.`);

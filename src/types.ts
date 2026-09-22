@@ -63,6 +63,32 @@ export interface SmartRouterConfig {
   mappings: Record<string, SmartTarget | null>;
 }
 
+
+export type McpTransport = "streamable-http" | "stdio";
+
+export interface McpServerConfig {
+  id: string;
+  label: string;
+  transport: McpTransport;
+  url?: string;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  secretEnv?: Record<string, string>;
+  headers?: Record<string, string>;
+  secretHeaders?: Record<string, string>;
+  bearerTokenSecret?: string;
+  enabled?: boolean;
+  timeoutSeconds?: number;
+  preset?: string;
+}
+
+export interface McpRegistryConfig {
+  servers: Record<string, McpServerConfig>;
+  assignments: Record<string, string[]>;
+}
+
 export interface WorkerProfile {
   id: string;
   label: string;
@@ -103,6 +129,7 @@ export interface RotoxyConfig {
     profiles: Record<string, WorkerProfile>;
     pools: Record<string, WorkerPool>;
   };
+  mcp: McpRegistryConfig;
 }
 
 export interface RouteDecision {

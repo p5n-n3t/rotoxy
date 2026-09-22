@@ -14,6 +14,8 @@ Client ── ROTOXY token ─► gateway :2025
 
 Providers own destination URLs, wire protocols, authentication rules, account lists, and policies. Provider pools rotate accounts. Federated pools rotate provider/model targets.
 
+MCP servers live in a separate tool registry. Remote HTTP MCPs can be relayed through `/mcp/SERVER_ID`; stdio MCPs are launched through a ROTOXY wrapper that resolves their secret environment at runtime.
+
 ## Control plane
 
 ```text
@@ -47,3 +49,13 @@ Providers declare a wire type such as `openai`, `anthropic`, `ollama`, or `googl
 ## Agent workers
 
 Worker delegation is outside the inference data plane. ROTOXY launches supported CLIs in non-interactive/headless mode and returns their terminal result. A subscription OAuth session is treated as a worker identity, not as an API key.
+
+## MCP tool plane
+
+```text
+Agent MCP client
+   ├─ HTTP → ROTOXY /mcp/SERVER → upstream HTTP MCP
+   └─ stdio → rotoxy mcp stdio SERVER → local MCP process
+```
+
+The MCP tool plane is deliberately independent from model routing. A model provider answers inference requests; an MCP server exposes tools/resources/prompts.

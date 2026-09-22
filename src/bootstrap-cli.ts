@@ -73,7 +73,8 @@ async function main(){
     workers:{
       profiles,
       pools:{subscriptions:{id:"subscriptions",label:"OAuth/subscription CLI workers",strategy:"round-robin",workers:Object.keys(profiles)}}
-    }
+    },
+    mcp:{servers:{},assignments:{}}
   };
   saveConfig(config);
 

@@ -57,3 +57,7 @@ This is useful for independent reviews, research branches, code audits, or long-
 Use Tailscale Serve to keep the endpoint inside the Tailnet while retaining a stable HTTPS endpoint and ROTOXY's own client token.
 
 Use Funnel only when the client cannot join the Tailnet and a public endpoint is actually necessary.
+
+## Shared MCP tools across local agents
+
+Register Mem0, Exa, Firecrawl, or a custom MCP server once in ROTOXY, test its tool catalog, then assign/sync it to Codex, Claude Code or Copilot. Remote API keys remain in the ROTOXY secret store instead of being copied into every agent configuration.
