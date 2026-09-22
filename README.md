@@ -11,7 +11,6 @@
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-3c873a?style=for-the-badge&logo=node.js&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178c6?style=for-the-badge&logo=typescript&logoColor=white">
   <img alt="Tailscale" src="https://img.shields.io/badge/Tailscale-Serve%20%7C%20Funnel-black?style=for-the-badge&logo=tailscale">
-  <img alt="CI" src="https://github.com/p5n-n3t/rotoxy/actions/workflows/ci.yml/badge.svg">
   <img alt="Tests" src="https://img.shields.io/badge/tests-8%2F8%20passing-22c55e?style=for-the-badge">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-8b5cf6?style=for-the-badge">
 </p>
