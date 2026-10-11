@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-labelledby="title">
+  <title id="title">Token2OAuth relay gate mark</title>
+  <g fill="none" stroke="#16191d" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 41V13a4 4 0 0 1 4-4h22a4 4 0 0 1 4 4v28"/>
+    <path d="M16 41V28a5 5 0 0 1 5-5M32 41V28a5 5 0 0 0-5-5M24 41V30"/>
+  </g>
+  <circle cx="24" cy="23" r="4.2" fill="#0f7b6c"/>
+</svg>
