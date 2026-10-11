@@ -266,6 +266,10 @@ class JobRegistry:
                   id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL,
                   emergency_stop INTEGER NOT NULL, revision INTEGER NOT NULL, max_workers INTEGER NOT NULL DEFAULT 3);
                 INSERT OR IGNORE INTO bridge_control(id,paused,emergency_stop,revision,max_workers) VALUES(1,0,0,1,3);
+                CREATE TABLE IF NOT EXISTS project_controls(
+                  project TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0,
+                  emergency_stop INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1,
+                  max_workers INTEGER NOT NULL DEFAULT 3, updated_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS scheduler_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
                 INSERT OR IGNORE INTO scheduler_meta(key,value) VALUES('round_robin',0);
                 CREATE TABLE IF NOT EXISTS registered_accounts(account_id TEXT PRIMARY KEY, data TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, updated_at REAL NOT NULL);
@@ -597,6 +601,59 @@ class JobRegistry:
             db.execute(f"UPDATE bridge_control SET {field}=?,revision=revision+1 WHERE id=1", (int(value),))
             return {"action": action, "value": value, "revision": expected_revision + 1}
 
+    @staticmethod
+    def _project_control_row(db, project, now):
+        _text(project, "projectId")
+        global_control = db.execute("SELECT max_workers FROM bridge_control WHERE id=1").fetchone()
+        db.execute("INSERT OR IGNORE INTO project_controls(project,paused,emergency_stop,revision,max_workers,updated_at) VALUES(?,0,0,1,?,?)",
+                   (project, global_control["max_workers"], now))
+        return db.execute("SELECT * FROM project_controls WHERE project=?", (project,)).fetchone()
+
+    @staticmethod
+    def _project_control_dto(row, active_tasks=0):
+        state = "emergency_stopped" if row["emergency_stop"] else "paused" if row["paused"] else "running"
+        return {"projectId": row["project"], "state": state, "paused": bool(row["paused"]),
+                "emergencyStop": bool(row["emergency_stop"]), "maxConcurrency": row["max_workers"],
+                "activeTaskCount": active_tasks, "revision": row["revision"], "updatedAt": row["updated_at"]}
+
+    def get_project_control(self, project):
+        with self.connection(write=True) as db:
+            row = self._project_control_row(db, project, time.time())
+            active = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
+                                "WHERE a.project=? AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')",
+                                (project,)).fetchone()[0]
+            return self._project_control_dto(row, active)
+
+    def set_project_control(self, project, action, value, expected_revision, now=None):
+        _text(project, "projectId")
+        boolean_actions = {"pause_dispatch", "resume_dispatch", "emergency_stop"}
+        if action in boolean_actions and value is not None:
+            raise ValueError("Project dispatch controls do not accept a value")
+        if action == "set_concurrency" and (type(value) is not int or not 1 <= value <= 32):
+            raise ValueError("Concurrency must be an integer from 1 to 32")
+        if action not in boolean_actions | {"set_concurrency"}:
+            raise ValueError("Invalid project control action")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expectedRevision must be a non-negative integer")
+        when = time.time() if now is None else now
+        with self.connection(write=True) as db:
+            row = self._project_control_row(db, project, when)
+            if row["revision"] != expected_revision:
+                raise RuntimeError("Stale project control revision")
+            if action == "pause_dispatch":
+                db.execute("UPDATE project_controls SET paused=1,revision=revision+1,updated_at=? WHERE project=?", (when, project))
+            elif action == "resume_dispatch":
+                db.execute("UPDATE project_controls SET paused=0,emergency_stop=0,revision=revision+1,updated_at=? WHERE project=?", (when, project))
+            elif action == "emergency_stop":
+                db.execute("UPDATE project_controls SET emergency_stop=1,revision=revision+1,updated_at=? WHERE project=?", (when, project))
+            else:
+                db.execute("UPDATE project_controls SET max_workers=?,revision=revision+1,updated_at=? WHERE project=?", (value, when, project))
+            updated = db.execute("SELECT * FROM project_controls WHERE project=?", (project,)).fetchone()
+            active = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
+                                "WHERE a.project=? AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')",
+                                (project,)).fetchone()[0]
+            return self._project_control_dto(updated, active)
+
     def events(self, after=0, limit=100):
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= MAX_PAGE:
             raise ValueError("Invalid event cursor/page size")
@@ -655,9 +712,18 @@ class JobRegistry:
                                "custom": policy.get("maxConcurrency", 1)}[profile]
             max_workers = min(job_body.get("maxWorkers", 32), profile_ceiling,
                               control_row["max_workers"], local_ceiling)
+            project_control = self._project_control_row(db, row["project"], now)
+            if project_control["paused"] or project_control["emergency_stop"]:
+                continue
+            max_workers = min(max_workers, project_control["max_workers"])
             active_count = db.execute("SELECT COUNT(*) FROM job_tasks WHERE state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')").fetchone()[0]
             job_active = db.execute("SELECT COUNT(*) FROM job_tasks WHERE assignment=? AND state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')", (row["id"],)).fetchone()[0]
             if active_count >= control_row["max_workers"] or job_active >= max_workers:
+                continue
+            project_active = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
+                                        "WHERE a.project=? AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')",
+                                        (row["project"],)).fetchone()[0]
+            if project_active >= project_control["max_workers"]:
                 continue
             available = []
             for candidate in accounts:
@@ -778,9 +844,16 @@ class JobRegistry:
                 db.execute("UPDATE operations SET state='rejected',error_class='StaleGeneration' WHERE id=? AND state='queued'", (op["id"],))
                 return None
             control = db.execute("SELECT paused,emergency_stop FROM bridge_control WHERE id=1").fetchone()
-            if control["paused"] or control["emergency_stop"] or assignment["state"] != "queued":
+            project_control = self._project_control_row(db, assignment["project"], when)
+            if control["paused"] or control["emergency_stop"] or project_control["paused"] or project_control["emergency_stop"] or assignment["state"] != "queued":
                 return None
             task_spec = json.loads(task_row["body"])
+            active_in_project = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
+                                           "WHERE a.project=? AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending') "
+                                           "AND NOT (t.assignment=? AND t.task_id=?)",
+                                           (assignment["project"], op["assignment"], op["task_id"])).fetchone()[0]
+            if active_in_project >= project_control["max_workers"]:
+                return None
             account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"])
             occupied = db.execute("SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) AND state IN (?,?,?,?,?,?)",
                                   (op["account"], op["assignment"], op["task_id"], *ACTIVE_TASK_STATES)).fetchone()[0]

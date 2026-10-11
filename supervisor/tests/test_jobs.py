@@ -345,6 +345,52 @@ class JobRegistryTests(unittest.TestCase):
         self.registry.set_control("pause_dispatch", False, expected_revision=2)
         self.assertEqual(self.registry.claim_operation("node-1", now=3)["kind"], "chat_session")
 
+    def test_project_controls_are_isolated_revision_fenced_and_persisted(self):
+        self.register("account-b")
+        self.registry.submit(assignment("project-a-job", "project-a-key", project="project-a"), now=1)
+        self.registry.submit(assignment("project-b-job", "project-b-key", accounts=["account-b"],
+                                         tasks=[task("task-b", account="account-b")], project="project-b"), now=2)
+        initial = self.registry.get_project_control("project-a")
+        self.assertEqual((initial["state"], initial["revision"]), ("running", 1))
+        paused = self.registry.set_project_control("project-a", "pause_dispatch", None, 1, now=3)
+        self.assertEqual((paused["state"], paused["revision"]), ("paused", 2))
+        operation = self.registry.claim_operation("worker", now=4)
+        self.assertEqual(operation["selectedAccountId"], "account-b", "project A pause must not pause project B")
+        self.assertIsNone(self.registry.claim_operation("worker-2", now=5))
+
+        reopened = JobRegistry(self.db)
+        self.assertEqual(reopened.get_project_control("project-a")["state"], "paused")
+        with self.assertRaisesRegex(RuntimeError, "Stale project control revision"):
+            reopened.set_project_control("project-a", "resume_dispatch", None, 1, now=6)
+        resumed = reopened.set_project_control("project-a", "resume_dispatch", None, 2, now=7)
+        self.assertEqual((resumed["state"], resumed["revision"]), ("running", 3))
+        stopped = reopened.set_project_control("project-a", "emergency_stop", None, 3, now=8)
+        self.assertEqual((stopped["state"], stopped["revision"]), ("emergency_stopped", 4))
+        self.assertIsNone(reopened.claim_operation("worker-3", now=9))
+        self.assertEqual(reopened.set_project_control("project-a", "resume_dispatch", None, 4, now=10)["state"], "running")
+        self.assertEqual(reopened.claim_operation("worker-4", now=11)["selectedAccountId"], "account-a")
+
+    def test_project_pause_and_concurrency_updates_do_not_cancel_active_provider_operations(self):
+        self.register("account-b")
+        tasks = [task("active-a"), task("active-b", account="account-b")]
+        self.registry.submit(assignment("active-job", "active-key", tasks, accounts=["account-a", "account-b"],
+            max_workers=3, project="active-project") | {"scheduling": {"profile": "throughput"}}, now=1)
+        active = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(active["kind"], "chat_session")
+        configured = self.registry.set_project_control("active-project", "set_concurrency", 1, 1, now=3)
+        self.assertEqual(configured["activeTaskCount"], 1)
+        self.assertIsNone(self.registry.claim_operation("worker-2", now=3.5), "reduced concurrency holds additional task dispatch")
+        paused = self.registry.set_project_control("active-project", "pause_dispatch", None, 2, now=4)
+        self.assertEqual(paused["activeTaskCount"], 1)
+        with self.registry.connection() as db:
+            self.assertEqual(db.execute("SELECT state FROM operations WHERE id=?", (active["operationId"],)).fetchone()[0], "claimed")
+        self.assertIsNone(self.registry.claim_operation("worker-2", now=5))
+        with self.registry.connection() as db:
+            self.assertEqual(db.execute("SELECT state FROM operations WHERE id=?", (active["operationId"],)).fetchone()[0], "claimed")
+        reopened = JobRegistry(self.db)
+        self.assertEqual(reopened.get_project_control("active-project")["maxConcurrency"], 1)
+        self.assertEqual(reopened.get_project_control("active-project")["activeTaskCount"], 1)
+
     def test_profiles_bound_dispatch_by_local_capacity_and_persist_across_restart(self):
         self.register("account-b")
         self.registry.set_control("set_concurrency", 8, expected_revision=1)

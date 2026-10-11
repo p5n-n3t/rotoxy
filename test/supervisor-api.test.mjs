@@ -109,6 +109,14 @@ test("existing revision-fenced admin control still rejects missing CSRF and dele
   const accepted = await post(f.csrf, request);
   assert.equal(accepted.status, 200);
   assert.deepEqual(calls, [request]);
+  const invalidConcurrency = await post(f.csrf, { projectId: "project-e", action: "set_concurrency", value: 33, expectedRevision: 4 });
+  assert.equal(invalidConcurrency.status, 400);
+  const concurrency = { projectId: "project-e", action: "set_concurrency", value: 2, expectedRevision: 4 };
+  const concurrencyResponse = await post(f.csrf, concurrency);
+  assert.equal(concurrencyResponse.status, 200);
+  assert.deepEqual(calls[1], concurrency);
+  const unexpectedValue = await post(f.csrf, { ...request, value: true });
+  assert.equal(unexpectedValue.status, 400);
 });
 
 test("supervision inbox requires admin auth, bounds pages, and CSRF-protects project event acknowledgments", async (t) => {
