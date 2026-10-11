@@ -15,6 +15,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from .credit_ledger import CreditDenied
 
 MAX_TASKS = 100
 MAX_INSTRUCTIONS = 16 * 1024
@@ -204,8 +205,9 @@ def validate_assignment(body):
 class JobRegistry:
     """Single-host durable registry; SQLite transactions fence every claim/result."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, credit_admission=None):
         self.path = Path(path)
+        self.credit_admission = credit_admission
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.path.parent, 0o700)
         self.repository = None
@@ -758,6 +760,25 @@ class JobRegistry:
                     return None
             if self._has_scope_conflict(db, assignment["project"], task_spec["scopeKeys"], op["assignment"], op["task_id"]):
                 return None
+            # A session message can spend provider quota. Reserve against its
+            # durable operation ID before a worker can receive the mutation.
+            # If the process dies after reservation but before the job DB commit,
+            # retrying this claim is an idempotent replay of the same hold.
+            if op["kind"] == "chat_session" and self.credit_admission is not None:
+                try:
+                    self.credit_admission.reserve(operation_id=op["id"], account_id=op["account"])
+                except CreditDenied:
+                    db.execute("UPDATE operations SET state='rejected',error_class='CreditAdmissionDenied' WHERE id=? AND state='queued'", (op["id"],))
+                    db.execute("UPDATE job_tasks SET state='blocked',released_at=? WHERE assignment=? AND task_id=? AND generation=?",
+                               (when, op["assignment"], op["task_id"], op["generation"]))
+                    if self.repository is not None:
+                        db.execute("UPDATE attempts SET state='blocked',released_at=? WHERE id=? AND released_at IS NULL",
+                                   (when, op["attempt_id"]))
+                    db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
+                    self._event(db, op["assignment"], "credit_admission_denied", {
+                        "taskId": op["task_id"], "generation": op["generation"], "operationId": op["id"]
+                    }, when)
+                    return None
             db.execute("UPDATE operations SET state='claimed',worker=?,lease_until=? WHERE id=? AND state='queued'",
                        (worker_id, when + lease_seconds, op["id"]))
             return {"operationId": op["id"], "attemptId": op["attempt_id"], "generation": op["generation"],
@@ -775,13 +796,24 @@ class JobRegistry:
         result = body.get("result", {})
         if not isinstance(result, dict) or len(json.dumps(result, separators=(",", ":")).encode()) > 32768:
             raise ValueError("Result must be a bounded object")
-        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "usage"}
+        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "usage", "creditDebit"}
         if set(result) - allowed_result:
             raise ValueError("Unsupported operation result fields")
         for key, value in result.items():
             if key == "usage":
                 if value is not None:
                     _validate_usage(value)
+                continue
+            if key == "creditDebit":
+                required = {"unit", "amount", "source", "verified"}
+                if not isinstance(value, dict) or set(value) != required:
+                    raise ValueError("Invalid provider credit debit evidence")
+                _text(value["unit"], "creditDebit.unit", 64)
+                if type(value["amount"]) is not int or value["amount"] < 0:
+                    raise ValueError("Invalid provider credit debit amount")
+                _text(value["source"], "creditDebit.source", 512)
+                if type(value["verified"]) is not bool:
+                    raise ValueError("Invalid provider credit debit verification")
                 continue
             if isinstance(value, str):
                 _text(value, key, 2048)
@@ -817,6 +849,14 @@ class JobRegistry:
                 raise RuntimeError("Conflicting operation result")
             if op["state"] != "claimed" or op["worker"] != worker:
                 raise RuntimeError("Operation is not owned by this worker")
+            debit = result.get("creditDebit")
+            if debit is not None:
+                if self.credit_admission is None or op["kind"] != "chat_session" or outcome != "accepted":
+                    raise ValueError("Provider debit cannot be reconciled for this operation")
+                self.credit_admission.settle_verified_debit(
+                    operation_id=op["id"], unit=debit["unit"], amount=debit["amount"],
+                    source=debit["source"], verified=debit["verified"],
+                )
             db.execute("UPDATE operations SET state=?,result=?,error_class=?,lease_until=NULL WHERE id=? AND state='claimed' AND worker=?",
                        (outcome, encoded, body.get("errorClass"), operation_id, worker))
             task = db.execute("SELECT * FROM job_tasks WHERE assignment=? AND task_id=?", (op["assignment"], op["task_id"])).fetchone()
@@ -867,6 +907,8 @@ class JobRegistry:
                 db.execute("UPDATE job_tasks SET released_at=? WHERE assignment=? AND task_id=? AND generation=? AND released_at IS NULL",
                            (when, op["assignment"], op["task_id"], op["generation"]))
                 db.execute("UPDATE attempts SET released_at=? WHERE id=? AND released_at IS NULL", (when, op["attempt_id"]))
+                if self.credit_admission is not None:
+                    self.credit_admission.release_known_refusal(op["id"], known_preexecution_refusal=True)
             db.execute("UPDATE job_tasks SET state=? WHERE assignment=? AND task_id=? AND generation=?",
                        (state, op["assignment"], op["task_id"], op["generation"]))
             if state == "complete":

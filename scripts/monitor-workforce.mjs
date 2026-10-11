@@ -54,8 +54,13 @@ async function observation(worker,state){
 }
 async function check(){
   const state=await store.load();let checked=0,errors=0;
-  for(let i=0;i<cfg.workers.length&&!stopping;i+=3){
-    await Promise.all(cfg.workers.slice(i,i+3).map(async worker=>{
+  const registered=await python('registrations');
+  const workers=[...cfg.workers,...(Array.isArray(registered?.workers)?registered.workers.filter(w=>
+    ['id','project','owner','account_id','session_id'].every(k=>safe(w[k]))
+  ).map(w=>({id:w.id,projectId:w.project,owner:w.owner,accountId:w.account_id,sessionId:w.session_id,job:w.project})):[])];
+  const unique=[...new Map(workers.map(w=>[`${w.owner}:${w.job}:${w.sessionId}`,w])).values()];
+  for(let i=0;i<unique.length&&!stopping;i+=3){
+    await Promise.all(unique.slice(i,i+3).map(async worker=>{
       let o;try{o=await observation(worker,state);}catch{o={state:'unavailable'};errors++;}
       await python('observe',{worker:worker.id,observation:o,owner:worker.owner,job:worker.job});checked++;
     }));

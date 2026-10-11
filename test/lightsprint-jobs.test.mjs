@@ -317,3 +317,23 @@ test("wire response above the existing byte limit returns an explicit bounded er
   assert.equal(result.reason, "response_too_large");
   assert.equal(requests, 3);
 });
+
+
+test("live gateway tool policy also fences internal job adapter mutations", async () => {
+  const backing = store();
+  let policy; let calls = 0;
+  const guarded = { ...backing, load: async () => ({ ...await backing.load(), config: { toolPolicy: policy } }) };
+  const adapter = new LightSprintJobsAdapter(guarded, ACCOUNT_ID, { clientFactory: clientFactory(async () => { calls++; return ok({ accepted: true }); }) });
+  assert.equal((await adapter.sendMessage(SESSION_ID, "one", "allowed-first")).classification, "accepted");
+  policy = { endpoints: [{ tool: "lightsprint_api", rules: [
+    { methods: ["GET"], path: "/api/agent-sessions/{sessionId}/status" },
+    { methods: ["POST"], path: "/api/agent-sessions/{sessionId}/cancel" },
+  ] }] };
+  const blocked = await adapter.sendMessage(SESSION_ID, "two", "denied-second");
+  assert.equal(blocked.classification, "rejected");
+  assert.equal(blocked.reason, "policy_denied");
+  assert.equal(calls, 1);
+  assert.equal((await adapter.sessionStatus(SESSION_ID)).classification, "accepted");
+  assert.equal((await adapter.cancelTurn(SESSION_ID)).classification, "accepted");
+  assert.equal(calls, 3);
+});

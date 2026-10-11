@@ -1,3 +1,4 @@
+import { OracleTools } from "./oracle-tools.js";
 import express from "express";
 import { fileURLToPath } from "node:url";
 import { AdminSessions } from "./admin-session.js";
@@ -16,9 +17,11 @@ export interface ServerOptions {
   supervisorBackend?: SupervisorBackend;
   /** Opt-in path to a private supervisor runtime JSON policy file. */
   supervisorConfigPath?: string;
+  oracleTools?: OracleTools;
+  oraclePool?: boolean;
 }
 
-export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend"> = {}) {
+export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "oracleTools"> = {}) {
   await store.init();
   const state = await store.load();
   const sessions = new AdminSessions();
@@ -28,7 +31,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   pool.telemetry = telemetry;
   const oauth = new OAuthService(store, sessions);
   const supervisor = new SupervisorApi(options.supervisorBackend);
-  const proxy = new McpProxy(store, pool, telemetry, supervisor);
+  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools);
   const ui = new (await import("./ui.js")).AdminUi(store, pool, sessions, { oauth, telemetry });
 
   const app = express();
@@ -74,7 +77,7 @@ export async function startServer(options: ServerOptions = {}) {
     supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)),
     store,
   }) : undefined;
-  const { app } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime });
+  const { app } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined) });
   const host = options.host || process.env.TOKEN2OAUTH_HOST || "127.0.0.1";
   const port = options.port || Number(process.env.TOKEN2OAUTH_PORT || 2030);
 

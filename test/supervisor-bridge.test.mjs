@@ -282,3 +282,10 @@ test("marks an unexpected child crash failed and removes only its recorded socke
     await f.cleanup();
   }
 });
+
+
+test("credit admission diagnostics allow only the exact private read route", () => {
+  assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/credit-admission"), true);
+  assert.equal(isAllowedSupervisorRoute("POST", "/admin/api/v1/credit-admission"), false);
+  assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/credit-admission?accountId=other"), false);
+});

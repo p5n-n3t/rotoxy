@@ -110,3 +110,22 @@ test("existing revision-fenced admin control still rejects missing CSRF and dele
   assert.equal(accepted.status, 200);
   assert.deepEqual(calls, [request]);
 });
+
+test("supervision inbox requires admin auth, bounds pages, and CSRF-protects project event acknowledgments", async (t) => {
+  const reads = [];
+  const acks = [];
+  const f = await fixture(t, { callTool: async () => ({}), readSupervision: async (...args) => { reads.push(args); return { project: args[0], events: [], models: [] }; }, acknowledgeSupervision: async (...args) => { acks.push(args); return { acknowledged: true, eventId: args[1] }; } });
+  const url = f.base + "/admin/api/v1/supervisor/project-s/inbox";
+  assert.equal((await fetch(url)).status, 401);
+  assert.equal((await fetch(url + "?after=-1", { headers: headers(f.cookie) })).status, 400);
+  const page = await fetch(url + "?after=12&limit=4", { headers: headers(f.cookie) });
+  assert.equal(page.status, 200);
+  assert.deepEqual(reads, [["project-s", 12, 4]]);
+  const ackUrl = url + "/7/ack";
+  const body = { method: "POST", headers: { ...headers(f.cookie), "content-type": "application/json" }, body: "{}" };
+  assert.equal((await fetch(ackUrl, body)).status, 403);
+  assert.deepEqual(acks, []);
+  const accepted = await fetch(ackUrl, { ...body, headers: { ...body.headers, "x-csrf-token": f.csrf } });
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(acks, [["project-s", 7]]);
+});

@@ -124,6 +124,7 @@ export function isAllowedSupervisorRoute(method: string, route: string): boolean
   const path = parsed.pathname;
   let allowedQuery: string[] = [];
 
+  if (path === "/admin/api/v1/credit-admission" && method === "GET") return parsed.search === "";
   if (path === "/admin/api/v1/assignments" && method === "POST") return parsed.search === "";
   // MCP job submissions are already authorized by Token2OAuth before reaching
   // this private, bearer-authenticated Unix-socket boundary.

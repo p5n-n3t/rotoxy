@@ -176,3 +176,31 @@ test("job tools are scope-filtered and intercepted before upstream while ordinar
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("Oracle tools require explicit opt-in, enforce scopes, and pass the authenticated caller", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-oracle-gateway-"));
+  const previous = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.TOKEN2OAUTH_CONFIG_DIR = dir;
+  const calls = [];
+  const store = new StateStore();
+  await store.init({ adminPassword: ADMIN });
+  const built = await buildApp(store, { oracleTools: { call: async (name, args, caller) => { calls.push({name, args, caller}); return { jobId: args.jobId, state: "queued" }; } } });
+  const server = createHttpServer(built.app);
+  const address = await listen(server);
+  const base = `http://127.0.0.1:${address.port}`;
+  t.after(async () => { await close(server); await rm(dir, {recursive:true,force:true}); if(previous===undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR=previous; });
+  await store.update(state => { state.config.publicBaseUrl=base; state.config.basePath=""; state.config.upstreamUrl=""; });
+  const reader = await oauthToken(base, "mcp jobs:read");
+  const writer = await oauthToken(base, "mcp jobs:read jobs:write");
+  const list = await (await mcp(base, reader, {jsonrpc:"2.0",id:1,method:"tools/list"})).json();
+  assert.ok(list.result.tools.some(tool => tool.name === "oracle_catalog"));
+  assert.ok(!list.result.tools.some(tool => tool.name === "oracle_submit"));
+  const message = {jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"oracle_submit",arguments:{jobId:"sample",prompt:"Return OK"}}};
+  assert.equal((await mcp(base,reader,message)).status,403);
+  assert.equal(calls.length,0);
+  const response = await mcp(base,writer,message);
+  assert.equal(response.status,200);
+  assert.equal(calls[0].name,"oracle_submit");
+  assert.ok(calls[0].caller);
+  assert.equal(JSON.parse((await response.json()).result.content[0].text).state,"queued");
+});

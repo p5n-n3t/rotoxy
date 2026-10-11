@@ -13,6 +13,9 @@ const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "u
 const requiredPackageFiles = [
   "dist/cli.js",
   "dist/store.js",
+  "dist/oracle-tools.js",
+  "assets/brand/logo.svg",
+  "assets/brand/favicon.svg",
   "dist/jsonrpc-wire.js",
   "scripts/monitor-workforce.mjs",
   "supervisor/snooze/bridge.py",
@@ -22,6 +25,7 @@ const requiredPackageFiles = [
   "supervisor/snooze/guidance.py",
   "supervisor/snooze/oracle_pool.py",
   "supervisor/snooze/credit_ledger.py",
+  "supervisor/snooze/credit_admission.py",
   "supervisor/snooze/adapters/lightsprint.py",
   "supervisor/snooze/adapters/registered.py",
   "supervisor/snooze/static/index.html",
@@ -38,6 +42,7 @@ const pythonImports = [
   "snooze.guidance",
   "snooze.oracle_pool",
   "snooze.credit_ledger",
+  "snooze.credit_admission",
   "snooze.adapters.lightsprint",
   "snooze.adapters.registered",
 ];
@@ -52,7 +57,7 @@ async function run(file, args, { cwd, env, label, timeout = 120_000 } = {}) {
   } catch (error) {
     if (error?.code === "ENOENT") throw new Error(`${label ?? file} is required but was not found on PATH`);
     if (error?.killed) throw new Error(`${label ?? file} timed out`);
-    throw new Error(`${label ?? file} failed${Number.isInteger(error?.code) ? ` with exit ${error.code}` : ""}`);
+    throw new Error(`${label ?? file} failed${Number.isInteger(error?.code) ? ` with exit ${error.code}` : ""}${label === "temporary TypeScript build" ? `: ${String(error.stdout ?? "").slice(0, 4000)}` : ""}`);
   }
 }
 
@@ -77,7 +82,7 @@ function safeRelative(root, path) {
 function parsePackJson(text) {
   let parsed;
   try { parsed = JSON.parse(text); } catch { throw new Error("npm pack did not return JSON metadata"); }
-  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  const rows = Array.isArray(parsed) ? parsed : [parsed, ...Object.values(parsed ?? {})];
   return rows.find((row) => row && typeof row.filename === "string" && Array.isArray(row.files));
 }
 
@@ -99,18 +104,20 @@ try {
   const packDir = join(scratch, "pack");
   const extractDir = join(scratch, "extract");
   const npmConfig = join(scratch, "empty.npmrc");
+  const npmGlobalConfig = join(scratch, "empty-global.npmrc");
   await Promise.all([
     mkdir(home, { mode: 0o700 }),
     mkdir(stage, { mode: 0o700 }),
     mkdir(packDir, { mode: 0o700 }),
     mkdir(extractDir, { mode: 0o700 }),
     writeFile(npmConfig, "", { mode: 0o600 }),
+    writeFile(npmGlobalConfig, "", { mode: 0o600 }),
   ]);
 
   // Stage only the public package inputs and TypeScript build inputs. Never copy .git,
   // node_modules, private configs, or generated output from the working checkout.
   const stagePaths = [
-    "package.json", "tsconfig.json", "src", "docs", "supervisor/snooze",
+    "package.json", "tsconfig.json", "src", "docs", "assets/brand", "supervisor/snooze",
     "supervisor/LICENSE", "supervisor/THIRD_PARTY_NOTICES.md", "supervisor/SECURITY.md",
     "supervisor/UPSTREAM.md", "supervisor/install.sh", "scripts/monitor-workforce.mjs",
     "install.sh", "uninstall.sh", "LICENSE", "README.md", "SECURITY.md", "CHANGELOG.md",
@@ -127,7 +134,7 @@ try {
     HOME: home,
     TMPDIR: scratch,
     NPM_CONFIG_USERCONFIG: npmConfig,
-    NPM_CONFIG_GLOBALCONFIG: npmConfig,
+    NPM_CONFIG_GLOBALCONFIG: npmGlobalConfig,
     NPM_CONFIG_CACHE: join(scratch, "npm-cache"),
     npm_config_offline: "true",
     ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),

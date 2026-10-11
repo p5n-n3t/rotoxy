@@ -1,3 +1,4 @@
+import { OracleTools, OracleToolError, ORACLE_TOOL_DEFINITIONS, isOracleToolName, oracleToolRequiredScope } from "./oracle-tools.js";
 import { Readable, Transform, pipeline } from "node:stream";
 import type { Request, Response } from "express";
 import type { AccessClaims, GatewayConfig, UpstreamAccount } from "./types.js";
@@ -161,6 +162,7 @@ export class McpProxy {
     private readonly pool: CredentialPool,
     private readonly telemetry?: TelemetryRecorder,
     private readonly supervisor = new SupervisorApi(),
+    private readonly oracle?: OracleTools,
   ) {}
 
   handler = async (req: Request, res: Response) => {
@@ -188,7 +190,7 @@ export class McpProxy {
     // policy/pool selection. Exact names never fall through to an upstream.
     if (await this.interceptJobCalls(req, res, rpc, claims, startedAt, record)) return;
     const localJobTools = this.availableJobTools(claims);
-    if (!state.config.upstreamUrl && this.supervisor.enabled && localJobTools.length > 0 &&
+    if (!state.config.upstreamUrl && (this.supervisor.enabled || this.oracle) && localJobTools.length > 0 &&
         await this.serveLocalJobDiscovery(req, res, rpc, localJobTools, record)) return;
     if (!state.config.upstreamUrl) {
       record({ status: 503, attempts: 0, errorClass: "upstream-not-configured" });
@@ -548,9 +550,9 @@ export class McpProxy {
   }
 
   private availableJobTools(claims: AccessClaims | undefined): Record<string, unknown>[] {
-    if (!this.supervisor.enabled || !claims) return [];
+    if ((!this.supervisor.enabled && !this.oracle) || !claims) return [];
     const scopes = new Set(claims.scope.split(/\s+/));
-    return JOB_TOOL_DEFINITIONS.filter((definition) => scopes.has(requiredJobScope(definition.name))).map((definition) => ({ ...definition }));
+    return [...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : [])].map((definition) => ({ ...definition }));
   }
 
   /** Serve only OAuth-authorized local job tools when no general upstream exists. */
@@ -598,7 +600,7 @@ export class McpProxy {
     record: (input: { status?: number; attempts: number; errorClass?: string; message?: string }) => void,
   ): Promise<boolean> {
     if (req.method !== "POST" || !rpc) return false;
-    const local = rpc.messages.filter((message) => message.method === "tools/call" && isJobToolName(message.params?.name));
+    const local = rpc.messages.filter((message) => message.method === "tools/call" && (isJobToolName(message.params?.name) || isOracleToolName(message.params?.name)));
     if (!local.length) return false;
     const mixed = rpc.messages.some((message) => !local.includes(message));
     if (mixed) {
@@ -607,15 +609,15 @@ export class McpProxy {
       return true;
     }
     const scopeSet = new Set(claims?.scope.split(/\s+/) || []);
-    const missing = local.find((message) => !scopeSet.has(requiredJobScope(message.params!.name as JobToolName)));
+    const missing = local.find((message) => !scopeSet.has((isOracleToolName(message.params!.name) ? oracleToolRequiredScope(message.params!.name) : requiredJobScope(message.params!.name as JobToolName))));
     if (missing || !claims) {
-      const responses = local.filter((message) => message.id !== undefined).map((message) => rpcError(message.id, -32003, "insufficient_scope", { requiredScope: requiredJobScope(message.params!.name as JobToolName) }));
+      const responses = local.filter((message) => message.id !== undefined).map((message) => rpcError(message.id, -32003, "insufficient_scope", { requiredScope: (isOracleToolName(message.params!.name) ? oracleToolRequiredScope(message.params!.name) : requiredJobScope(message.params!.name as JobToolName)) }));
       record({ status: 403, attempts: 0, errorClass: "insufficient-scope" });
       if (!responses.length) return res.status(403).json({ error: "insufficient_scope" }), true;
       res.status(403).json(rpc.batch ? responses : responses[0]);
       return true;
     }
-    if (!this.supervisor.enabled) {
+    if (local.some((message) => isOracleToolName(message.params?.name) ? !this.oracle : !this.supervisor.enabled)) {
       const responses = local.filter((message) => message.id !== undefined).map((message) => rpcError(message.id, -32000, "durable supervisor is not configured"));
       record({ status: 503, attempts: 0, errorClass: "supervisor-unavailable" });
       if (!responses.length) return res.status(202).end(), true;
@@ -627,12 +629,16 @@ export class McpProxy {
     for (const message of local) {
       try {
         const name = message.params!.name as JobToolName;
-        const value = await this.supervisor.callTool(name, message.params?.arguments ?? {}, claims.client_id);
+        const value = isOracleToolName(name)
+          ? await this.oracle!.call(name, message.params?.arguments ?? {}, claims.client_id)
+          : await this.supervisor.callTool(name, message.params?.arguments ?? {}, claims.client_id);
         const text = JSON.stringify(value ?? null);
         if (Buffer.byteLength(text) > 1_048_576) throw new Error("result too large");
         if (message.id !== undefined) responses.push({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }] } });
       } catch (error) {
-        if (error instanceof JobInputError) {
+        if (error instanceof OracleToolError) {
+          if (message.id !== undefined) responses.push(rpcError(message.id, -32000, error.code));
+        } else if (error instanceof JobInputError) {
           if (message.id !== undefined) responses.push(rpcError(message.id, -32602, error.message));
         } else if (error instanceof SupervisorUnavailable) {
           status = 503;

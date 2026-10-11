@@ -64,5 +64,32 @@ class GuidanceTests(unittest.TestCase):
         self.assertEqual(GuidanceInbox(self.path).dispatch_guidance(pool),1)
         self.assertEqual(len(pool.jobs),1)
 
+    def test_monitor_registration_is_stable_and_project_scoped(self):
+        self.inbox.register(worker='worker-hash',project='project-a',owner='oauth-client:client-a',account='acct-a',session='session-a',model='gpt-6-luna')
+        self.inbox.register(worker='worker-hash',project='project-a',owner='oauth-client:client-a',account='acct-a',session='session-a',model='gpt-6-luna')
+        self.assertEqual(self.inbox.registrations(),[{'id':'worker-hash','project':'project-a','owner':'oauth-client:client-a','account_id':'acct-a','session_id':'session-a','model':'gpt-6-luna'}])
+        roster=self.inbox.project_workers(project='project-a',owners=['oauth-client:client-a'])
+        self.assertEqual(roster[0]['state'],'unobserved')
+        self.assertEqual(roster[0]['modelSource'],'registered')
+        self.assertEqual(self.inbox.project_workers(project='project-a',owners=['oauth-client:other']),[])
+        with self.assertRaisesRegex(ValueError,'worker_registration_conflict'):
+            self.inbox.register(worker='worker-hash',project='project-b',owner='oauth-client:client-a',account='acct-a',session='session-a',model='gpt-6-luna')
+
+    def test_project_sync_removes_sessions_no_longer_registered(self):
+        self.inbox.sync_project('project-a',[{'worker':'worker-old','owner':'client-a','account':'acct-a','session':'session-old','model':'gpt-6-luna'}])
+        self.inbox.sync_project('project-a',[{'worker':'worker-new','owner':'client-a','account':'acct-a','session':'session-new','model':'claude-opus-5-5'}])
+        self.inbox.sync_project('project-b',[{'worker':'worker-b','owner':'client-a','account':'acct-b','session':'session-b','model':'qwen3.5:9b'}])
+        self.assertEqual([row['id'] for row in self.inbox.registrations()],['worker-new','worker-b'])
+        self.assertEqual(self.inbox.project_workers(project='project-a',owners=['client-a'])[0]['sessionId'],'session-new')
+
+    def test_project_inbox_and_ack_cannot_cross_job_even_for_same_owner(self):
+        self.inbox.observe('worker-a',{'state':'failed','model':'qwen3.5:9b'},owner='client-a',job='project-a')
+        self.inbox.observe('worker-b',{'state':'failed','model':'qwen3.5:9b'},owner='client-a',job='project-b')
+        self.assertEqual(len(self.inbox.inbox(owner='client-a',job='project-a')),1)
+        with self.assertRaisesRegex(ValueError,'event_not_owned'):
+            self.inbox.acknowledge(1,owner='client-a',job='project-b')
+        self.inbox.acknowledge_project(1,owners=['client-b','client-a'],project='project-a')
+        self.assertIsNotNone(self.inbox.inbox(owner='client-a',job='project-a')[0]['ack_at'])
+
 
 if __name__=='__main__':unittest.main()

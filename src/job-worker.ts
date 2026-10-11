@@ -186,7 +186,9 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
       !Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs >= leaseSeconds * 1_000 ||
       !Number.isInteger(adapterTimeoutMs) || adapterTimeoutMs < 1 || adapterTimeoutMs > 120_000 ||
       adapterTimeoutMs + requestTimeoutMs >= leaseSeconds * 1_000 ||
-      !options.allowedModels.includes(MODEL)) throw new TypeError("Invalid job worker configuration");
+      (!Array.isArray(options.allowedModels) || options.allowedModels.length < 1 || options.allowedModels.length > 100 ||
+       options.allowedModels.some(model => typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/.test(model)) ||
+       new Set(options.allowedModels).size !== options.allowedModels.length)) throw new TypeError("Invalid job worker configuration");
 
   let running = false;
   let stopped = false;
@@ -246,9 +248,10 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
         const checked = await checkSession(adapter, sessionId);
         const status = checked.status;
         const registeredModel = field(status, "registeredModel", "model", "reportedModel");
+        const expectedModel = input.model === undefined ? MODEL : text(input.model, 128);
         const state = field(status, "sessionStatus", "status", "state");
         if (!status || checked.result.classification !== "accepted" || field(status, "isOwner") !== true ||
-            field(status, "canSendMessage") !== true || registeredModel !== MODEL || !options.allowedModels.includes(String(registeredModel)) ||
+            field(status, "canSendMessage") !== true || !expectedModel || registeredModel !== expectedModel || !options.allowedModels.includes(String(registeredModel)) ||
             typeof state !== "string" || state.toLowerCase() !== "idle") {
           errorClass = checked.result.classification === "ambiguous" ? "session_preflight_ambiguous" : "session_not_sendable";
           return await submit(op, checked.result.classification === "ambiguous" ? "ambiguous" : "rejected", {}, errorClass);
@@ -352,7 +355,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           result = outcome === "accepted" ? { providerTaskId: taskId!, status: "instructions_verified" } : {};
           return await submit(op, outcome, result, errorClass);
         }
-        if (op.kind === "launch_task" && adapter.launchTaskWithModel && adapter.readTask && text(input.provider, 32) &&
+        if (op.kind === "launch_task" && options.allowedModels.includes(MODEL) && adapter.launchTaskWithModel && adapter.readTask && text(input.provider, 32) &&
             (leaseDeadlines.get(op.operationId) ?? 0) - now() > adapterTimeoutMs + requestTimeoutMs &&
             await options.isAccountEligible(op.selectedAccountId)) {
           const readback = await adapter.readTask(taskId!);

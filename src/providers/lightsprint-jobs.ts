@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { evaluateToolCall } from "../tool-policy.js";
 import { PROVIDER_PROFILES } from "../provider-capabilities.js";
 import { readBodyLimited, serverMessages } from "../jsonrpc-wire.js";
 import type { StateStore } from "../store.js";
@@ -6,7 +7,7 @@ import type { UpstreamAccount } from "../types.js";
 
 export type JobProvider = "claude" | "codex" | "auto" | "pi";
 export type JobClassification = "accepted" | "rejected" | "ambiguous";
-export type JobReason = "auth" | "quota" | "rate_limit" | "not_found" | "account_unavailable" | "provider_mismatch" | "endpoint_mismatch" | "tool_error" | "protocol_error" | "transport_ambiguous" | "identity_mismatch" | "instructions_mismatch" | "response_too_large";
+export type JobReason = "auth" | "quota" | "rate_limit" | "not_found" | "account_unavailable" | "provider_mismatch" | "endpoint_mismatch" | "tool_error" | "protocol_error" | "transport_ambiguous" | "identity_mismatch" | "instructions_mismatch" | "response_too_large" | "policy_denied";
 
 export interface JobResult<T = unknown> {
   classification: JobClassification;
@@ -471,6 +472,10 @@ export class LightSprintJobsAdapter {
   private async api<T = unknown>(method: string, path: string, body?: Record<string, unknown>, transcript = false): Promise<JobResult<T>> {
     let raw: unknown;
     try {
+      const state = await this.store.load();
+      if (!evaluateToolCall(state.config?.toolPolicy, { name: "lightsprint_api", arguments: { method, path, ...(body === undefined ? {} : { body }) } }).allowed) {
+        return rejected<T>(this.accountId, "policy_denied");
+      }
       const client = await this.client();
       raw = await client.request("tools/call", {
         name: "lightsprint_api",

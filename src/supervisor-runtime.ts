@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { PROVIDER_PROFILES } from "./provider-capabilities.js";
 import { createJobWorker, type JobBridge, type JobWorkerOptions, type PinnedJobsAdapter } from "./job-worker.js";
@@ -13,10 +14,10 @@ import { SupervisorBridge, type SupervisorBridgeOptions } from "./supervisor-bri
 import type { SupervisorBackend, SupervisorCaller } from "./supervisor-api.js";
 import type { SupervisorAccountUsage, SupervisorEvent, SupervisorJob, SupervisorSnapshot, SupervisorTask, SupervisorUsage, SupervisorWorker } from "./supervisor-ui.js";
 
-const MODEL = "gpt-6-luna";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const MAX_CONFIG = 64 * 1024;
-type RegisteredSession = { sessionId: string; accountId: string; model: typeof MODEL; workspaceId: string };
+type RegisteredSession = { sessionId: string; accountId: string; model: string; workspaceId: string };
 type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[] };
 export interface SupervisorRuntimeConfig {
   version: 1;
@@ -29,6 +30,10 @@ export interface SupervisorRuntimeOptions {
   configPath: string;
   configDir: string;
   supervisorCwd?: string;
+  /** Private local database shared with the persistent read-only workforce monitor. */
+  supervisionDbPath?: string;
+  oracleConfigPath?: string;
+  oracleDbPath?: string;
   store: StateStore;
   bridgeOptions?: Partial<SupervisorBridgeOptions>;
   /** Injection seam for deterministic tests; production defaults to the pinned LightSprint adapter. */
@@ -118,15 +123,16 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     if (!object(candidate)) throw new Error("Invalid project policy");
     assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions"], "project");
     const projectId = candidate.projectId, rawClientIds = candidate.clientIds, rawAccountIds = candidate.accountIds, rawSessions = candidate.registeredSessions;
-    if (!safeId(projectId) || !Array.isArray(rawClientIds) || !rawClientIds.length || !rawClientIds.every(safeId) || new Set(rawClientIds).size !== rawClientIds.length ||
+    if (!safeId(projectId) || !Array.isArray(rawClientIds) || !rawClientIds.length || rawClientIds.length > 50 || !rawClientIds.every(safeId) || new Set(rawClientIds).size !== rawClientIds.length ||
         !Array.isArray(rawAccountIds) || !rawAccountIds.length || rawAccountIds.length > 50 || !rawAccountIds.every(safeId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
     const accountIds = rawAccountIds as string[];
     const registeredSessions: RegisteredSession[] = rawSessions.map((item: unknown): RegisteredSession => {
       if (!object(item)) throw new Error("Invalid registered session");
       assertKeys(item, ["sessionId", "accountId", "model", "workspaceId"], "registeredSession");
-      if (!safeId(item.sessionId) || !safeId(item.accountId) || !accountIds.includes(item.accountId) || item.model !== MODEL || !safeId(item.workspaceId)) throw new Error("Registered sessions must be bound to an eligible account, workspace, and gpt-6-luna");
-      return { sessionId: item.sessionId, accountId: item.accountId, model: MODEL, workspaceId: item.workspaceId };
+      if (!safeId(item.sessionId) || !safeId(item.accountId) || !accountIds.includes(item.accountId) || typeof item.model !== "string" || !MODEL_ID.test(item.model) || !safeId(item.workspaceId)) throw new Error("Registered sessions must be bound to an eligible account, workspace, and declared model");
+      return { sessionId: item.sessionId, accountId: item.accountId, model: item.model, workspaceId: item.workspaceId };
     });
+    if (registeredSessions.length * rawClientIds.length > 1000) throw new Error("Project has too many registered monitoring bindings");
     if (new Set(registeredSessions.map((item) => item.sessionId)).size !== registeredSessions.length) throw new Error("Duplicate registered session");
     return { projectId, clientIds: rawClientIds as string[], accountIds, registeredSessions };
   });
@@ -150,14 +156,68 @@ export class SupervisorRuntime implements SupervisorBackend {
   private started = false;
   private readonly adapterCache = new Map<string, PinnedJobsAdapter>();
   private readonly owner = (caller: SupervisorCaller) => ({ ownerPrincipalId: `oauth-client:${caller.clientId}`, clientId: caller.clientId });
+  private readonly supervisorCwd: string;
+  private readonly supervisionDbPath: string;
+  private readonly monitorRegistrationByProject = new Map<string, { expected: number; registered: number; failed: number }>();
 
   constructor(private readonly config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
+    this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
+    this.supervisionDbPath = options.supervisionDbPath ?? resolve(homedir(), ".local/state/token2oauth/supervision/inbox.sqlite");
     const spawnChild = options.bridgeOptions?.spawnChild ?? ((function (command: string, args?: readonly string[], spawnOptions?: any) {
       if (!args || args[0] !== "-m" || args[1] !== "snooze.bridge") throw new Error("Unexpected supervisor command");
       const code = "import os,runpy,sys; os.umask(0o177); sys.argv=['snooze.bridge',*sys.argv[1:]]; runpy.run_module('snooze.bridge',run_name='__main__')";
       return nodeSpawn(command, ["-c", code, ...args.slice(2)], spawnOptions);
     }) as typeof nodeSpawn);
-    this.bridge = new SupervisorBridge({ enabled: true, configDir: options.configDir, supervisorCwd: options.supervisorCwd ?? resolve(process.cwd(), "supervisor"), ...options.bridgeOptions, spawnChild });
+    this.bridge = new SupervisorBridge({ enabled: true, configDir: options.configDir, supervisorCwd: this.supervisorCwd, ...options.bridgeOptions, spawnChild });
+  }
+
+  private async guidanceCommand(command: string, payload?: unknown, extra: string[] = []): Promise<unknown> {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const python = process.env.PYTHON ?? "/usr/bin/python3";
+      const child = nodeSpawn(python, ["-m", "snooze.guidance", "--db", this.supervisionDbPath, ...extra, command], {
+        cwd: this.supervisorCwd,
+        env: { ...process.env, PYTHONPATH: this.supervisorCwd },
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+      const chunks: Buffer[] = [];
+      let size = 0;
+      const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+      child.stdout.on("data", (chunk: Buffer | string) => {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += bytes.length;
+        if (size > 512 * 1024) child.kill("SIGKILL"); else chunks.push(bytes);
+      });
+      child.once("error", () => { clearTimeout(timer); rejectPromise(new Error("guidance_unavailable")); });
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0) return rejectPromise(new Error("guidance_unavailable"));
+        try {
+          const value: unknown = JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+          resolvePromise(value);
+        } catch { rejectPromise(new Error("guidance_unavailable")); }
+      });
+      child.stdin.on("error", () => {});
+      child.stdin.end(payload === undefined ? "" : JSON.stringify(payload));
+    });
+  }
+
+  private async registerMonitoredSessions(): Promise<void> {
+    this.monitorRegistrationByProject.clear();
+    for (const project of this.config.projects) {
+      const registration = { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 };
+      this.monitorRegistrationByProject.set(project.projectId, registration);
+      const workers = project.clientIds.flatMap((clientId) => project.registeredSessions.map((session) => ({
+        worker: `worker:${createHash("sha256").update(`${project.projectId}\0${clientId}\0${session.sessionId}`).digest("hex").slice(0, 40)}`,
+        owner: `oauth-client:${clientId}`, account: session.accountId, session: session.sessionId, model: session.model,
+      })));
+      try {
+        await this.guidanceCommand("sync-project", { project: project.projectId, workers });
+        registration.registered = workers.length;
+      } catch {
+        // Monitoring registration is best-effort; it never blocks task dispatch or changes provider state.
+        registration.failed = workers.length;
+      }
+    }
   }
 
   async start(): Promise<void> {
@@ -215,10 +275,11 @@ export class SupervisorRuntime implements SupervisorBackend {
           return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
         },
         workerId: `token2oauth-${createHash("sha256").update(this.options.configDir).digest("hex").slice(0, 12)}`,
-        allowedModels: [MODEL], maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.accountIds)).size)),
+        allowedModels: [...new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.model)))], maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.accountIds)).size)),
         allowFreshOperations: false, ...this.options.workerOptions,
       });
       this.worker.start();
+      await this.registerMonitoredSessions();
       this.started = true;
     } catch (error) {
       await this.bridge.close();
@@ -409,10 +470,42 @@ export class SupervisorRuntime implements SupervisorBackend {
       .map((event) => ({ id: String(event.id ?? ""), at: typeof event.at === "string" || typeof event.at === "number" ? event.at : undefined,
         severity: typeof event.kind === "string" && /error|fail|ambiguous/i.test(event.kind) ? "warning" : "info", source: "supervisor",
         message: typeof event.kind === "string" ? event.kind.slice(0, 120) : "event" }));
+    let supervision: unknown;
+    try {
+      supervision = await this.guidanceCommand("project-snapshot", { owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`) },
+        ["--project", project.projectId, "--after", "0", "--limit", "20", "--pool-config", this.options.oracleConfigPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
+          "--pool-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")]);
+    } catch { supervision = { available: false, workers: [], events: [], models: [], error: "supervision_unavailable" }; }
+    if (object(supervision)) supervision = { ...supervision, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 }) } };
+    const rawCredit = parseJson(await this.bridge.request("GET", "/admin/api/v1/credit-admission"));
+    const creditAdmission = { mode: rawCredit.mode === "strict" ? "strict" : "legacy", accounts: (Array.isArray(rawCredit.accounts) ? rawCredit.accounts.filter(object) : [])
+      .filter(account => accountIds.includes(String(account.accountId)))
+      .map(account => ({ accountId: account.accountId, unit: typeof account.unit === "string" ? redactString(account.unit, 64) : "unknown",
+        available: typeof account.available === "number" && Number.isSafeInteger(account.available) && account.available >= 0 ? account.available : null,
+        operationUpperBound: typeof account.operationUpperBound === "number" && Number.isSafeInteger(account.operationUpperBound) && account.operationUpperBound > 0 ? account.operationUpperBound : null,
+        boundVerified: account.boundVerified === true })) };
     const snapshot: SupervisorSnapshot = { observedAt, state: "ready", providers, jobs, tasks, workers, events,
       supervisor: { status: this.bridge.status().state, observedAt },
-      orchestrator: { status: "unknown", detail: "Originating client heartbeat is not registered.", observedAt } };
+      orchestrator: { status: "unknown", detail: "Originating client heartbeat is not registered.", observedAt },
+      supervision, creditAdmission } as SupervisorSnapshot & { supervision: unknown; creditAdmission: unknown };
     return boundedJson(snapshot);
+  }
+  async readSupervision(projectId: string, after = 0, limit = 20): Promise<unknown> {
+    const project = this.config.projects.find((item) => item.projectId === projectId);
+    if (!project || !Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 20) throw new JobInputError("invalid supervision request");
+    let value: unknown;
+    try {
+      value = await this.guidanceCommand("project-snapshot", { owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`) },
+        ["--project", project.projectId, "--after", String(after), "--limit", String(limit), "--pool-config", this.options.oracleConfigPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
+          "--pool-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")]);
+    } catch { value = { available: false, project: project.projectId, workers: [], events: [], models: [], error: "supervision_unavailable" }; }
+    return boundedJson(object(value) ? { ...value, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 }) } } : value);
+  }
+  async acknowledgeSupervision(projectId: string, eventId: number): Promise<unknown> {
+    const project = this.config.projects.find((item) => item.projectId === projectId);
+    if (!project || !Number.isSafeInteger(eventId) || eventId < 1) throw new JobInputError("invalid supervision acknowledgment");
+    return boundedJson(await this.guidanceCommand("ack-project", { project: project.projectId, eventId,
+      owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`) }));
   }
   async controlAdmin(): Promise<unknown> { throw new Error("project-scoped supervisor controls are unavailable"); }
   async close(): Promise<void> {

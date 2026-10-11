@@ -12,10 +12,28 @@ import stat
 import urllib.parse
 from pathlib import Path
 
+from .credit_admission import CreditAdmission
 from .jobs import JobRegistry
 from .job_inbox import InboxUnavailable, JobInbox
 
 MAX_BODY = 1024 * 1024
+
+
+def create_job_registry(state_dir):
+    """Construct the registry with strict credit admission only when opted in.
+
+    Missing config preserves the existing runtime mode. A present but invalid
+    config fails startup, so a broken strict-mode file cannot silently disable
+    the spending guard.
+    """
+    state_dir = Path(state_dir)
+    config_path = state_dir / "credit-admission.json"
+    admission = None
+    if config_path.exists() or config_path.is_symlink():
+        admission = CreditAdmission.from_private_config(
+            config_path, state_dir / "credit-reservations.sqlite3",
+        )
+    return JobRegistry(state_dir / "snooze.sqlite3", credit_admission=admission)
 
 
 def read_auth_fd(fd=3):
@@ -222,6 +240,10 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 limit = int(query.get("limit", ["100"])[0])
                 self._reply(200, registry.events(after=after, limit=limit))
                 return
+            if self.command == "GET" and route == "/admin/api/v1/credit-admission":
+                admission = registry.credit_admission
+                self._reply(200, admission.status() if admission is not None else {"mode": "legacy", "accounts": []})
+                return
             if self.command == "POST" and route == "/admin/api/v1/control":
                 body = self._body()
                 if set(body) != {"action", "value", "expectedRevision"}:
@@ -271,7 +293,7 @@ def main(argv=None):
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(state_dir, 0o700)
     bearer = read_auth_fd(args.auth_fd)
-    registry = JobRegistry(state_dir / "snooze.sqlite3")
+    registry = create_job_registry(state_dir)
     server = PrivateHTTPServer(args.socket, registry, bearer)
     try:
         server.serve_forever()

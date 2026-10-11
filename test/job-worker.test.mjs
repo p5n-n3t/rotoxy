@@ -323,3 +323,29 @@ test("malformed usage and model metadata are omitted instead of defaulted or ech
   assert.equal("usage" in posted.result, false);
   assert.doesNotMatch(JSON.stringify(posted.result), /private-model|private-user|secret-ref|fundingSource/);
 });
+
+
+test("existing sessions use the registered model and refuse changed or unapproved models", async () => {
+  for (const [reported, allowed, accepted] of [
+    ["claude-opus-5-5", ["claude-opus-5-5"], true],
+    ["gpt-6-luna", ["claude-opus-5-5", "gpt-6-luna"], false],
+    ["claude-opus-5-5", ["gpt-6-luna"], false],
+  ]) {
+    let sends = 0;
+    const item = op("model-bound", "account-a", { input: {
+      instructions: "bounded approved design", clientMessageId: "model-bound", model: "claude-opus-5-5",
+    } });
+    const { worker, resultBodies } = harness([item], {
+      allowedModels: allowed,
+      adapterFactory: id => adapter(id, {
+        sessionStatus: async () => ok(id, { status: { sessionStatus: "idle", isOwner: true, canSendMessage: true, model: reported } }),
+        sendMessage: async () => { sends++; return ok("account-a"); },
+      }),
+    });
+    worker.start();
+    try { await until(() => resultBodies.length === 1); } finally { await worker.stop(); }
+    assert.equal(sends, accepted ? 1 : 0);
+    assert.equal(resultBodies[0].outcome, accepted ? "accepted" : "rejected");
+    if (accepted) assert.equal(resultBodies[0].result.reportedModel, "claude-opus-5-5");
+  }
+});

@@ -210,7 +210,7 @@ test("brand system, snapshot ledger, and project-scoped supervision inbox are re
   assert.match(html, /data-endpoint="\/admin\/api\/v1\/supervisor\/project-7\/inbox\?after=0&amp;limit=20"/);
   assert.match(html, /data-project-id="project-7"/);
   assert.match(html, /X-CSRF-Token/);
-  assert.match(html, /body:JSON\.stringify\(\{projectId\}\)/);
+  assert.match(html, /body:JSON\.stringify\(\{\}\)/);
   assert.match(html, /Inbox unavailable; retry when supervision service is available/);
   assert.match(html, /prefers-reduced-motion:reduce/);
   assert.match(html, /@media\(max-width:520px\)/);
@@ -241,7 +241,7 @@ test("inbox normalizer bounds event and model inventory fields and rejects unkno
   assert.equal(inbox.models[0].error.length, 240);
 });
 
-test("inbox acknowledgment sends same-origin CSRF header and selected project body", async () => {
+test("inbox acknowledgment sends same-origin CSRF header and project-scoped endpoint", async () => {
   const html = renderSupervisorDashboard({}, { nonce: "n", csrfToken: "csrf-token", liveFeedUrl: "/admin/api/v1/supervisor/project-7/live" });
   const script = [...html.matchAll(/<script nonce="n">([\s\S]*?)<\/script>/g)].map((match) => match[1]).find((value) => value.includes('getElementById("supervision-feed")'));
   assert.ok(script);
@@ -264,7 +264,7 @@ test("inbox acknowledgment sends same-origin CSRF header and selected project bo
     fetch: async (url, options = {}) => {
       requests.push({ url: String(url), options });
       if (options.method === "POST") return { ok: true };
-      return new Response(JSON.stringify({ available: true, events: [{ id: "row-1", eventId: "evt/1", kind: "job.done", at: "2026-10-12T00:00:00Z" }], models: [] }), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ available: true, events: [{ id: 17, kind: "job.done", at: "2026-10-12T00:00:00Z" }], models: [] }), { headers: { "Content-Type": "application/json" } });
     },
     URL, TextDecoder, Uint8Array, JSON, Date, encodeURIComponent,
   };
@@ -275,7 +275,12 @@ test("inbox acknowledgment sends same-origin CSRF header and selected project bo
   assert.ok(acknowledge);
   await acknowledge.listeners.click();
   assert.equal(requests[1].options.method, "POST");
-  assert.equal(new URL(requests[1].url).pathname, "/admin/api/v1/supervisor/project-7/inbox/evt%2F1/ack");
+  assert.equal(new URL(requests[1].url).pathname, "/admin/api/v1/supervisor/project-7/inbox/17/ack");
   assert.equal(requests[1].options.headers["X-CSRF-Token"], "csrf-token");
-  assert.deepEqual(JSON.parse(requests[1].options.body), { projectId: "project-7" });
+  assert.deepEqual(JSON.parse(requests[1].options.body), {});
+});
+
+ test("numeric durable event IDs survive normalization", () => {
+  const inbox = normalizeSupervisionInbox({ available: true, events: [{ id: 17, kind: "finished" }], models: [] });
+  assert.equal(inbox.events[0].id, "17");
 });

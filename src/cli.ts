@@ -96,6 +96,7 @@ program
   .option("--base-path <path>", "override saved path prefix")
   .option("--upstream-url <url>", "override saved upstream MCP endpoint")
   .option("--strategy <strategy>", "override pool strategy")
+  .option("--oracle-pool", "enable scoped tools for the configured private Oracle queue")
   .option("--supervisor-config <path>", "explicitly enable the durable supervisor using a private JSON config")
   .action(async (opts) => {
     const s = await ensureStore();
@@ -107,7 +108,7 @@ program
         if (opts.strategy) state.config.strategy = opts.strategy as PoolStrategy;
       });
     }
-    await startServer({ host: opts.host, port: opts.port, supervisorConfigPath: opts.supervisorConfig });
+    await startServer({ host: opts.host, port: opts.port, supervisorConfigPath: opts.supervisorConfig, oraclePool: opts.oraclePool });
   });
 
 const account = program.command("account").description("Manage encrypted upstream credentials");

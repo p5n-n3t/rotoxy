@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "scripts/monitor-workforce.mjs",
+    "assets/brand/*.svg",
     "docs",
     "supervisor/snooze/*.py",
     "supervisor/snooze/adapters/*.py",

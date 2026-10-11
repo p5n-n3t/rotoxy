@@ -76,7 +76,7 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/assignments/job-one/../../other"), false);
 
   const adapters = new Map();
-  const options = { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), store,
+  const options = { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store,
     adapterFactory: (accountId) => { if (!adapters.has(accountId)) adapters.set(accountId, fakeAdapter(accountId)); return adapters.get(accountId); },
     workerOptions: { pollIntervalMs: 20, adapterTimeoutMs: 1000 } };
   const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
@@ -105,6 +105,10 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   await assert.rejects(runtime.callTool("job_results", { projectId: "project-a", jobId: "job-one" }, { clientId: "client-b", projectId: "project-a" }));
   const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
   assert.equal(workers.workers.length, 2);
+  const supervision = await runtime.readSupervision("project-a", 0, 10);
+  assert.equal(supervision.project, "project-a");
+  assert.ok(Array.isArray(supervision.events));
+  assert.ok(Array.isArray(supervision.models));
   currentState.accounts.find((account) => account.id === "acct-b").stats.state = "auth-failed";
   const narrowed = await runtime.callTool("job_submit", { ...submission, jobId: "job-two", idempotencyKey: "idem-two", tasks: [submission.tasks[0]] }, caller);
   assert.equal(narrowed.assignmentId, "job-two");
@@ -145,7 +149,7 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
   t.after(() => rm(dir, { recursive: true, force: true }));
   const configPath = join(dir, "runtime.json");
   await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
-  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), store });
+  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store });
   const usage = (delta, observedAt) => ({ reportedSessionCostUsd: 1.5, reportedCostDeltaUsd: delta, promptCountDelta: 2, budgetUsed: 4, maxBudget: 10,
     fundingSource: "shared", sandboxTier: "standard", observedAt, source: "lightsprint-session-status", provisional: true, budgetUnit: "unknown" });
   const assignment = { assignmentId: "job-usage", projectId: "project-a", state: "running", tasks: [
@@ -157,6 +161,7 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
     if (path.startsWith("/admin/api/v1/assignments?")) return { assignments: [{ assignmentId: "job-usage" }] };
     if (path === "/admin/api/v1/assignments/job-usage") return assignment;
     if (path === "/admin/api/v1/events?after=0&limit=50") return { events: [] };
+    if (path === "/admin/api/v1/credit-admission") return { mode: "legacy", accounts: [] };
     throw new Error(`unexpected readAdmin request: ${path}`);
   };
   runtime.bridge.status = () => ({ state: "ready" });
@@ -192,6 +197,13 @@ test("runtime config rejects permissive fields, missing workspace bindings, and 
   delete missingWorkspace.projects[0].registeredSessions[0].workspaceId;
   await writeFile(path, JSON.stringify(missingWorkspace), { mode: 0o600 });
   await assert.rejects(readSupervisorRuntimeConfig(path));
+  const declaredModel = structuredClone(config);
+  declaredModel.projects[0].registeredSessions[0].model = "claude-opus-5-5";
+  await writeFile(path, JSON.stringify(declaredModel), { mode: 0o600 });
+  assert.equal((await readSupervisorRuntimeConfig(path)).projects[0].registeredSessions[0].model, "claude-opus-5-5");
+  declaredModel.projects[0].registeredSessions[0].model = "bad/model";
+  await writeFile(path, JSON.stringify(declaredModel), { mode: 0o600 });
+  await assert.rejects(readSupervisorRuntimeConfig(path), /declared model/);
   const duplicateSession = structuredClone(config);
   duplicateSession.projects[1].registeredSessions[0].sessionId = "session-a";
   await writeFile(path, JSON.stringify(duplicateSession), { mode: 0o600 });

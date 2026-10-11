@@ -18,6 +18,8 @@ export interface SupervisorBackend {
   /** Project-scoped authoritative admin snapshot. */
   readAdmin?(projectId: string): Promise<unknown>;
   controlAdmin?(input: { projectId: string; action: "pause_dispatch" | "resume_dispatch" | "emergency_stop"; expectedRevision: number }): Promise<unknown>;
+  readSupervision?(projectId: string, after: number, limit: number): Promise<unknown>;
+  acknowledgeSupervision?(projectId: string, eventId: number): Promise<unknown>;
 }
 
 export class SupervisorUnavailable extends Error {
@@ -180,6 +182,31 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
       orchestrator: normalized.orchestrator?.status ?? "unknown",
       observedAt: normalized.observedAt ?? null,
     });
+  });
+
+  router.get("/admin/api/v1/supervisor/:projectId/inbox", requireAdmin, async (req, res) => {
+    const projectId = req.params.projectId;
+    const afterRaw = queryValue(req, "after", 20) || "0";
+    const limitRaw = queryValue(req, "limit", 3) || "20";
+    if (typeof projectId !== "string" || !projectId || projectId.length > 200) return res.status(404).json({ error: "project_unavailable" });
+    if (!/^(?:0|[1-9][0-9]{0,15})$/.test(afterRaw) || !/^(?:[1-9]|1[0-9]|20)$/.test(limitRaw)) return res.status(400).json({ error: "invalid_inbox_query" });
+    if (!backend?.readSupervision) return res.status(503).json({ error: "supervisor_unavailable" });
+    try {
+      const result = safeAdminSnapshot(await backend.readSupervision(projectId, Number(afterRaw), Number(limitRaw)));
+      if (!result) return res.status(502).json({ error: "snapshot_unavailable" });
+      return res.json(result.value);
+    } catch { return res.status(404).json({ error: "project_unavailable" }); }
+  });
+
+  router.post("/admin/api/v1/supervisor/:projectId/inbox/:eventId/ack", express.json({ limit: "8kb" }), requireAdmin, requireCsrf, async (req, res) => {
+    const projectId = req.params.projectId;
+    const rawEventId = req.params.eventId;
+    if (typeof projectId !== "string" || !projectId || projectId.length > 200 || typeof rawEventId !== "string" || !/^[1-9][0-9]{0,18}$/.test(rawEventId) || Object.keys(req.body ?? {}).length !== 0) {
+      return res.status(400).json({ error: "invalid_supervision_ack" });
+    }
+    if (!backend?.acknowledgeSupervision) return res.status(503).json({ error: "supervisor_unavailable" });
+    try { return res.json(await backend.acknowledgeSupervision(projectId, Number(rawEventId))); }
+    catch { return res.status(404).json({ error: "event_unavailable" }); }
   });
 
   router.post("/admin/api/v1/supervisor/control", express.json({ limit: "16kb" }), requireAdmin, requireCsrf, async (req, res) => {
