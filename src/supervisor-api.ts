@@ -1,3 +1,5 @@
+import { page } from "./ui.js";
+import { esc, adminNav, withCsrf } from "./html.js";
 import { randomBytes } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { adminEpoch, parseCookies, AdminSessions } from "./admin-session.js";
@@ -16,6 +18,7 @@ export interface SupervisorCaller {
 export interface SupervisorBackend {
   callTool(name: JobToolName, args: unknown, caller: SupervisorCaller): Promise<unknown>;
   /** Project-scoped authoritative admin snapshot. */
+  listProjects?(): string[];
   readAdmin?(projectId: string): Promise<unknown>;
   controlAdmin?(input: { projectId: string; action: "pause_dispatch" | "resume_dispatch" | "emergency_stop"; expectedRevision: number }): Promise<unknown>;
   readSupervision?(projectId: string, after: number, limit: number): Promise<unknown>;
@@ -50,7 +53,7 @@ function setSecurityHeaders(_req: Request, res: Response, next: NextFunction): v
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
-  res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`);
+  res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`);
   next();
 }
 
@@ -136,6 +139,12 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
     }
     return safe.value;
   }
+
+  router.get("/admin/supervisor", requireAdminPage, (_req, res) => {
+    const projects = (backend?.listProjects?.() ?? []).filter(id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)).slice(0, 50);
+    const content = projects.length ? `<ul>${projects.map(id => `<li><a href="./supervisor/${encodeURIComponent(id)}">${esc(id)}</a></li>`).join("")}</ul>` : '<p class="muted">No supervised projects are configured. Configure the private supervisor runtime to connect this view.</p>';
+    res.type("html").send(page("Supervisor", withCsrf(`<main class="wrap">${adminNav("", "supervisor")}<section class="card full"><h1>Supervised projects</h1>${content}</section></main>`, res.locals.supervisorCsrf ?? "")));
+  });
 
   router.get("/admin/supervisor/:projectId", requireAdminPage, async (req, res) => {
     const projectId = req.params.projectId;

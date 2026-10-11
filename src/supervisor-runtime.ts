@@ -490,6 +490,8 @@ export class SupervisorRuntime implements SupervisorBackend {
       supervision, creditAdmission } as SupervisorSnapshot & { supervision: unknown; creditAdmission: unknown };
     return boundedJson(snapshot);
   }
+  listProjects(): string[] { return this.config.projects.map(project => project.projectId); }
+
   async readSupervision(projectId: string, after = 0, limit = 20): Promise<unknown> {
     const project = this.config.projects.find((item) => item.projectId === projectId);
     if (!project || !Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 20) throw new JobInputError("invalid supervision request");

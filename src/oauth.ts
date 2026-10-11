@@ -1,3 +1,4 @@
+import { page } from "./ui.js";
 import { createHash } from "node:crypto";
 import type { NextFunction, Request, Response, Router } from "express";
 import express from "express";
@@ -208,23 +209,13 @@ export class OAuthService {
       const hidden = ["client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state", "resource", "scope"]
         .map((name) => '<input type="hidden" name="' + name + '" value="' + esc((req.query as any)[name] || "") + '">')
         .join("");
-      res.type("html").send(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authorize · Token2OAuth</title><style>
-:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:#080a0f;color:#f7f8fb}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 10%,#17355b 0,transparent 34%),radial-gradient(circle at 85% 85%,#381b55 0,transparent 30%),#080a0f}
-.shell{width:min(92vw,520px)}.brand{display:flex;gap:12px;align-items:center;margin-bottom:18px}.logo{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#56ccf2,#7b61ff);box-shadow:0 12px 35px #6556ff44;font-weight:900}
-.card{background:#10131bbb;border:1px solid #ffffff18;backdrop-filter:blur(18px);border-radius:24px;padding:28px;box-shadow:0 30px 90px #0009}.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#8ea4c7}h1{font-size:28px;margin:8px 0 10px}.muted{color:#aab3c5;line-height:1.55}.pill{display:inline-flex;padding:7px 10px;border-radius:999px;background:#5f7cff18;border:1px solid #7790ff33;color:#b9c4ff;font-size:12px;margin:12px 0}
-label{display:block;font-size:13px;color:#c5ccda;margin:18px 0 7px}input{width:100%;padding:13px 14px;border-radius:12px;border:1px solid #ffffff1c;background:#080a0fcc;color:white;outline:none}input:focus{border-color:#7189ff;box-shadow:0 0 0 3px #7189ff22}
-button{width:100%;margin-top:18px;padding:13px 16px;border:0;border-radius:13px;color:white;font-weight:750;background:linear-gradient(135deg,#4cc9f0,#7657ff);cursor:pointer;box-shadow:0 12px 30px #615eff38}.foot{font-size:12px;color:#6f788c;margin-top:16px;text-align:center}
-</style></head><body><main class="shell"><div class="brand"><div class="logo">T2</div><div><strong>Token2OAuth</strong><div class="eyebrow">Secure MCP Gateway</div></div></div>
-<section class="card"><div class="eyebrow">Authorization request</div><h1>Connect this MCP to ChatGPT</h1>
-<p class="muted"><strong>${esc(validated.client.clientName || "OpenAI client")}</strong> is requesting access to the Token2OAuth MCP gateway. Upstream bearer credentials stay on this host and are never returned to the client.</p>
+      res.type("html").send(page("Authorize", `<main class="login"><section class="card"><div class="brand"><div class="logo">T2</div><strong>Token2OAuth</strong></div><div class="eyebrow">Authorization request</div><h1>Authorize gateway access</h1>
+<p class="muted"><strong>${esc(validated.client.clientName || "MCP client")}</strong> is requesting access to the Token2OAuth MCP gateway. Upstream bearer credentials stay on this host and are never returned to the client.</p>
 <div class="pill">scope · ${esc(validated.scope)}</div>
 <form method="post" action="./authorize">${hidden}
 ${loggedIn ? '<input type="hidden" name="session_authorized" value="1"><input type="hidden" name="_csrf" value="' + esc(csrf) + '">' : '<label>Gateway admin password</label><input type="password" name="admin_password" autocomplete="current-password" required>'}
 <button type="submit">Authorize connection →</button></form>
-<div class="foot">OAuth 2.1-style authorization code flow · PKCE S256 · resource-bound token</div></section></main></body></html>`);
+<div class="foot">OAuth 2.1-style authorization code flow · PKCE S256 · resource-bound token</div></section></main>`));
     } catch (error: any) {
       res.status(400).type("html").send("<h1>Invalid OAuth request</h1><p>" + esc(error.message) + "</p>");
     }

@@ -129,3 +129,15 @@ test("supervision inbox requires admin auth, bounds pages, and CSRF-protects pro
   assert.equal(accepted.status, 200);
   assert.deepEqual(acks, [["project-s", 7]]);
 });
+
+test("Supervisor entry requires admin auth and lists only safe configured project links", async (t) => {
+  const f = await fixture(t, { callTool: async () => ({}), listProjects: () => ["token2oauth", "<script>bad</script>"] });
+  const denied = await fetch(f.base + "/admin/supervisor", { redirect: "manual" });
+  assert.equal(denied.status, 302);
+  const response = await fetch(f.base + "/admin/supervisor", { headers: headers(f.cookie) });
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(html, /supervisor\/token2oauth/);
+  assert.doesNotMatch(html, /<script>bad/);
+  assert.match(response.headers.get("content-security-policy"), /img-src 'self' data:/);
+});
