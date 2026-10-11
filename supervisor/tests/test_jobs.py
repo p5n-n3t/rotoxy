@@ -5,15 +5,19 @@ import unittest
 from pathlib import Path
 
 from snooze.jobs import JobRegistry, validate_assignment
+from snooze.credit_ledger import CreditDenied
 
 
-def task(task_id="task-1", *, account="account-a", session_id=None, depends=None, scope=None):
-    return {
+def task(task_id="task-1", *, account="account-a", session_id=None, depends=None, scope=None, priority=None):
+    value = {
         "taskId": task_id, "dependsOn": depends or [], "scopeKeys": [scope or f"path:src/{task_id}.txt"],
         "instructions": f"Do bounded work for {task_id}",
         "execution": {"mode": "existing-session", "sessionId": session_id or f"session-{account}", "accountId": account},
         "output": {"kind": "text", "maxBytes": 1024, "format": "plain", "expectedMarker": "DONE"},
     }
+    if priority is not None:
+        value["priority"] = priority
+    return value
 
 
 def assignment(assignment_id="job-1", key="key-1", tasks=None, *, accounts=None, max_workers=3, project="project-a"):
@@ -340,6 +344,87 @@ class JobRegistryTests(unittest.TestCase):
         self.assertIsNone(self.registry.claim_operation("node-1", now=2))
         self.registry.set_control("pause_dispatch", False, expected_revision=2)
         self.assertEqual(self.registry.claim_operation("node-1", now=3)["kind"], "chat_session")
+
+    def test_profiles_bound_dispatch_by_local_capacity_and_persist_across_restart(self):
+        self.register("account-b")
+        self.registry.set_control("set_concurrency", 8, expected_revision=1)
+        tasks = [task("economy-a"), task("economy-b", account="account-b")]
+        self.registry.submit(assignment("economy", "economy-key", tasks, accounts=["account-a", "account-b"],
+                                         max_workers=32, project="economy-project") | {"scheduling": {"profile": "economy"}}, now=1)
+        first = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(first["kind"], "chat_session")
+        self.assertIsNone(self.registry.claim_operation("worker-2", now=3))
+
+        # Complete the first chat/output cycle so throughput starts without live work.
+        self.registry.record_result(first["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        observation = self.registry.claim_operation("worker", now=5)
+        self.registry.record_result(observation["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {
+            "status": "complete", "assistantText": "DONE", "assistantAt": 4, "sessionId": first["sessionId"]}}, now=6)
+        second_economy = self.registry.claim_operation("worker", now=7)
+        self.assertEqual(second_economy["kind"], "chat_session")
+        self.registry.record_result(second_economy["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=8)
+        observation = self.registry.claim_operation("worker", now=10)
+        self.registry.record_result(observation["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {
+            "status": "complete", "assistantText": "DONE", "assistantAt": 9, "sessionId": second_economy["sessionId"]}}, now=11)
+
+        throughput_tasks = [task("throughput-a"), task("throughput-b", account="account-b")]
+        self.registry.submit(assignment("throughput", "throughput-key", throughput_tasks,
+            accounts=["account-a", "account-b"], max_workers=32, project="throughput-project") |
+            {"scheduling": {"profile": "throughput"}}, now=12)
+        first = self.registry.claim_operation("worker-1", now=13)
+        second = self.registry.claim_operation("worker-2", now=14)
+        self.assertEqual({first["selectedAccountId"], second["selectedAccountId"]}, {"account-a", "account-b"})
+        self.assertIsNone(self.registry.claim_operation("worker-3", now=15))
+
+        restarted = JobRegistry(self.db)
+        self.assertEqual(restarted.get_assignment("throughput")["scheduling"], {"profile": "throughput"})
+        with restarted.connection() as db:
+            self.assertEqual(db.execute("SELECT max_workers FROM bridge_control WHERE id=1").fetchone()[0], 8)
+
+    def test_ready_task_priority_respects_dependencies(self):
+        self.register("account-b")
+        tasks = [task("low", priority=0), task("high", account="account-b", priority=10),
+                 task("dependent", depends=["low"], priority=100)]
+        self.registry.submit(assignment("priority", "priority-key", tasks, accounts=["account-a", "account-b"],
+            max_workers=3) | {"scheduling": {"profile": "throughput"}}, now=1)
+        first = self.registry.claim_operation("worker-1", now=2)
+        self.assertEqual(first["sessionId"], "session-account-b")
+        second = self.registry.claim_operation("worker-2", now=3)
+        self.assertEqual(second["sessionId"], "session-account-a")
+        self.assertEqual(self.registry.get_assignment("priority")["scheduling"]["profile"], "throughput")
+        self.assertEqual({item["taskId"]: item["priority"] for item in self.registry.get_assignment("priority")["tasks"]},
+                         {"low": 0, "high": 10, "dependent": 100})
+
+    def test_scheduler_policy_and_priority_reject_unknown_or_unsafe_fields(self):
+        body = assignment() | {"scheduling": {"profile": "custom", "maxConcurrency": 2}}
+        self.assertEqual(validate_assignment(body)["scheduling"]["maxConcurrency"], 2)
+        for bad in ({"profile": "fastest"}, {"profile": "custom"},
+                    {"profile": "economy", "maxConcurrency": 2},
+                    {"profile": "custom", "maxConcurrency": 33, "unbounded": True}):
+            with self.assertRaises(ValueError):
+                validate_assignment(assignment() | {"scheduling": bad})
+        for priority in (True, 101, -101, 1.5):
+            with self.assertRaises(ValueError):
+                validate_assignment(assignment(tasks=[task(priority=priority)]))
+        with self.assertRaises(ValueError):
+            self.registry.set_control("set_concurrency", 33, expected_revision=1)
+
+    def test_throughput_profile_still_obeys_strict_credit_reservation(self):
+        class DenyAdmission:
+            def reserve(self, **_kwargs):
+                raise CreditDenied("insufficient verified credit")
+
+            def release_known_refusal(self, *_args, **_kwargs):
+                raise AssertionError("credit-denied work was not dispatched")
+
+        self.registry.credit_admission = DenyAdmission()
+        body = assignment() | {"scheduling": {"profile": "throughput"}}
+        self.registry.submit(body, now=1)
+        self.assertIsNone(self.registry.claim_operation("worker", now=2))
+        self.assertEqual(self.registry.get_assignment("job-1")["state"], "held")
+        with self.registry.connection() as db:
+            self.assertEqual(db.execute("SELECT state FROM job_tasks WHERE assignment='job-1'").fetchone()[0], "blocked")
+            self.assertEqual(db.execute("SELECT state FROM operations WHERE assignment='job-1'").fetchone()[0], "rejected")
 
     def test_cancel_fences_generation_and_retains_remote_ownership(self):
         self.register("account-b", sessions=[{"id": "session-account-a", "model": "unknown", "workspace": "workspace-a"}], capacity=4)
