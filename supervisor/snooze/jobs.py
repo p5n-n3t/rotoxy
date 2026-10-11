@@ -32,9 +32,9 @@ SAFE_CHAT_PREFLIGHT_REJECTIONS = {
     "worker_stopping_or_lease_insufficient", "session_not_sendable", "account_unavailable_or_stopping",
 }
 ASSIGNMENT_KEYS = {"schemaVersion", "assignmentId", "idempotencyKey", "projectId", "eligibleAccountIds", "tasks"}
-ASSIGNMENT_OPTIONAL_KEYS = {"ownerPrincipalId", "clientId", "maxWorkers"}
+ASSIGNMENT_OPTIONAL_KEYS = {"ownerPrincipalId", "clientId", "maxWorkers", "scheduling"}
 TASK_KEYS = {"taskId", "dependsOn", "scopeKeys", "instructions", "execution", "output"}
-TASK_OPTIONAL_KEYS = {"inputRef", "inputSha256", "providerTaskId", "stackId", "provider"}
+TASK_OPTIONAL_KEYS = {"inputRef", "inputSha256", "providerTaskId", "stackId", "provider", "priority"}
 OUTPUT_KEYS = {
     "json-records": {"kind", "validator", "ids", "requiredFields"},
     "text": {"kind", "maxBytes", "format", "expectedMarker"},
@@ -107,6 +107,18 @@ def validate_assignment(body):
         if field == "maxWorkers":
             if type(body[field]) is not int or not 1 <= body[field] <= 32:
                 raise ValueError("maxWorkers must be between 1 and 32")
+        elif field == "scheduling":
+            policy = body[field]
+            if not isinstance(policy, dict) or set(policy) - {"profile", "maxConcurrency"} or "profile" not in policy:
+                raise ValueError("scheduling must contain a supported profile and no unknown fields")
+            profile = policy["profile"]
+            if not isinstance(profile, str) or profile not in {"economy", "balanced", "throughput", "custom"}:
+                raise ValueError("Unknown scheduling profile")
+            if profile == "custom":
+                if type(policy.get("maxConcurrency")) is not int or not 1 <= policy["maxConcurrency"] <= 32:
+                    raise ValueError("custom scheduling requires maxConcurrency from 1 to 32")
+            elif "maxConcurrency" in policy:
+                raise ValueError("maxConcurrency is only valid for the custom profile")
         else:
             _text(body[field], field, 256)
     tasks = body["tasks"]
@@ -119,6 +131,8 @@ def validate_assignment(body):
     for task in tasks:
         _allowed_object(task, TASK_KEYS, TASK_OPTIONAL_KEYS, "task")
         task_id = _text(task["taskId"], "taskId")
+        if "priority" in task and (type(task["priority"]) is not int or not -100 <= task["priority"] <= 100):
+            raise ValueError("priority must be an integer from -100 to 100")
         ids.append(task_id)
         dependencies = task["dependsOn"]
         if not isinstance(dependencies, list) or len(dependencies) > MAX_DEPENDENCIES or any(not isinstance(v, str) for v in dependencies):
@@ -199,7 +213,9 @@ def validate_assignment(body):
                 ready.append(child)
     if visited != len(normalized):
         raise ValueError("Task dependencies contain a cycle")
-    return {**body, "tasks": normalized}
+    # Materialize the legacy default so scheduler behavior is stable and
+    # observable after restart without requiring older clients to change.
+    return {**body, "scheduling": body.get("scheduling", {"profile": "balanced"}), "tasks": normalized}
 
 
 class JobRegistry:
@@ -525,6 +541,7 @@ class JobRegistry:
             for task in db.execute("SELECT * FROM job_tasks WHERE assignment=? ORDER BY rowid", (assignment_id,)):
                 spec = json.loads(task["body"])
                 dto = {"taskId": task["task_id"], "state": task["state"], "dependsOn": spec["dependsOn"],
+                              "priority": spec.get("priority", 0),
                               "attempt": task["attempt_id"], "generation": task["generation"],
                               "selectedAccountId": task["selected_account"], "providerTaskId": task["provider_task_id"],
                               "sessionId": task["session_id"], "dispatchAt": task["dispatch_at"], "releasedAt": task["released_at"],
@@ -534,7 +551,9 @@ class JobRegistry:
                 if usage is not None:
                     dto["usage"] = usage
                 tasks.append(dto)
-            return {"schemaVersion": 1, **self._receipt(row), "eligibleAccountIds": json.loads(row["eligible"]), "tasks": tasks}
+            policy = json.loads(row["body"]).get("scheduling", {"profile": "balanced"})
+            return {"schemaVersion": 1, **self._receipt(row), "eligibleAccountIds": json.loads(row["eligible"]),
+                    "scheduling": policy, "tasks": tasks}
 
     def list_assignments(self, project, *, offset=0, limit=50, owner_principal_id=None, client_id=None):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= MAX_PAGE:
@@ -563,13 +582,18 @@ class JobRegistry:
             return self._receipt(db.execute("SELECT * FROM assignments WHERE id=?", (assignment_id,)).fetchone())
 
     def set_control(self, action, value, expected_revision):
-        if action not in {"pause_dispatch", "emergency_stop"} or type(value) is not bool:
+        boolean_actions = {"pause_dispatch", "emergency_stop"}
+        if action in boolean_actions and type(value) is not bool:
+            raise ValueError("Invalid control action")
+        if action == "set_concurrency" and (type(value) is not int or not 1 <= value <= 32):
+            raise ValueError("Concurrency must be an integer from 1 to 32")
+        if action not in boolean_actions | {"set_concurrency"}:
             raise ValueError("Invalid control action")
         with self.connection(write=True) as db:
             row = db.execute("SELECT * FROM bridge_control WHERE id=1").fetchone()
             if row["revision"] != expected_revision:
                 raise RuntimeError("Stale control revision")
-            field = "paused" if action == "pause_dispatch" else "emergency_stop"
+            field = {"pause_dispatch": "paused", "emergency_stop": "emergency_stop", "set_concurrency": "max_workers"}[action]
             db.execute(f"UPDATE bridge_control SET {field}=?,revision=revision+1 WHERE id=1", (int(value),))
             return {"action": action, "value": value, "revision": expected_revision + 1}
 
@@ -599,10 +623,12 @@ class JobRegistry:
         control = db.execute("SELECT paused,emergency_stop FROM bridge_control WHERE id=1").fetchone()
         if control["paused"] or control["emergency_stop"]:
             return None
-        rows = db.execute("SELECT a.*,t.task_id,t.body AS task_body,t.state AS task_state,t.generation,t.selected_account,t.attempt_id "
+        rows = db.execute("SELECT a.*,t.rowid AS task_seq,t.task_id,t.body AS task_body,t.state AS task_state,t.generation,t.selected_account,t.attempt_id "
                           "FROM assignments a JOIN job_tasks t ON t.assignment=a.id "
                           "WHERE a.approved=1 AND a.state='queued' AND t.state IN ('queued','retry_due') "
                           "ORDER BY a.created_at,t.rowid").fetchall()
+        # Priority orders only currently eligible DAG nodes; dependencies still gate below.
+        rows = sorted(rows, key=lambda row: (-json.loads(row["task_body"]).get("priority", 0), row["created_at"], row["task_seq"]))
         for row in rows:
             spec = json.loads(row["task_body"])
             deps = spec["dependsOn"]
@@ -612,7 +638,23 @@ class JobRegistry:
                     continue
             accounts = json.loads(row["eligible"])
             control_row = db.execute("SELECT max_workers FROM bridge_control WHERE id=1").fetchone()
-            max_workers = min(json.loads(row["body"]).get("maxWorkers", control_row["max_workers"]), control_row["max_workers"])
+            job_body = json.loads(row["body"])
+            policy = job_body.get("scheduling", {"profile": "balanced"})
+            profile = policy.get("profile", "balanced")
+            # localCapacity is the operator/runtime's local guardrail, not a claim
+            # about remote provider slots. Session locks add a stricter live cap.
+            local_ceiling = 0
+            for candidate in accounts:
+                try:
+                    candidate_data, _ = self._account(db, candidate)
+                except RuntimeError:
+                    continue
+                local_ceiling += candidate_data["localCapacity"]
+            local_ceiling = min(32, local_ceiling)
+            profile_ceiling = {"economy": 1, "balanced": 3, "throughput": 32,
+                               "custom": policy.get("maxConcurrency", 1)}[profile]
+            max_workers = min(job_body.get("maxWorkers", 32), profile_ceiling,
+                              control_row["max_workers"], local_ceiling)
             active_count = db.execute("SELECT COUNT(*) FROM job_tasks WHERE state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')").fetchone()[0]
             job_active = db.execute("SELECT COUNT(*) FROM job_tasks WHERE assignment=? AND state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')", (row["id"],)).fetchone()[0]
             if active_count >= control_row["max_workers"] or job_active >= max_workers:

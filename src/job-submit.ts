@@ -8,6 +8,7 @@ export interface JobSubmission {
   idempotencyKey: string;
   projectId: string;
   eligibleAccountIds: string[];
+  scheduling?: { profile: "economy" | "balanced" | "throughput" | "custom"; maxConcurrency?: number };
   tasks: JobTaskInput[];
 }
 
@@ -20,6 +21,7 @@ export interface JobTaskInput {
   instructions: string;
   execution: { mode: "fresh"; provider: "claude" | "codex" | "auto" | "pi" } | { mode: "existing-session" };
   output: { kind: "text"; maxBytes: number; format: string; expectedMarker: string };
+  priority?: number;
 }
 
 export class JobInputError extends Error {
@@ -56,8 +58,13 @@ function scopeKey(value: unknown): string {
 
 function parseTask(raw: unknown): JobTaskInput {
   if (!object(raw)) throw new JobInputError("each task must be an object");
-  only(raw, ["taskId", "dependsOn", "scopeKeys", "inputRef", "inputSha256", "instructions", "execution", "output"], "task");
+  only(raw, ["taskId", "dependsOn", "scopeKeys", "inputRef", "inputSha256", "instructions", "execution", "output", "priority"], "task");
   const taskId = id(raw.taskId, "taskId");
+  let priority: number | undefined;
+  if (raw.priority !== undefined) {
+    if (!Number.isInteger(raw.priority) || Number(raw.priority) < -100 || Number(raw.priority) > 100) throw new JobInputError("priority must be an integer from -100 to 100");
+    priority = Number(raw.priority);
+  }
   if (!Array.isArray(raw.dependsOn) || raw.dependsOn.length > 8) throw new JobInputError("dependsOn must be an array of at most 8 task IDs");
   const dependsOn = raw.dependsOn.map((v) => id(v, "dependency"));
   if (new Set(dependsOn).size !== dependsOn.length || dependsOn.includes(taskId)) throw new JobInputError("dependencies must be unique and cannot include the task itself");
@@ -90,17 +97,32 @@ function parseTask(raw: unknown): JobTaskInput {
   const expectedMarker = str(raw.output.expectedMarker, "expectedMarker", 256);
   if (/[\r\n\0]/.test(expectedMarker) || expectedMarker !== expectedMarker.trim()) throw new JobInputError("expectedMarker must be a single exact, trimmed line of at most 256 characters");
   const output: JobTaskInput["output"] = { kind: "text", maxBytes: Number(raw.output.maxBytes), format: str(raw.output.format, "text format", 64), expectedMarker };
-  return { taskId, dependsOn, scopeKeys, inputRef, inputSha256, instructions, execution, output };
+  return { taskId, dependsOn, scopeKeys, inputRef, inputSha256, instructions, execution, output, priority };
 }
 
 export function validateJobSubmission(value: unknown): JobSubmission {
   if (!object(value)) throw new JobInputError("job submission must be an object");
-  only(value, ["schemaVersion", "jobId", "idempotencyKey", "projectId", "eligibleAccountIds", "tasks"], "job submission");
+  only(value, ["schemaVersion", "jobId", "idempotencyKey", "projectId", "eligibleAccountIds", "scheduling", "tasks"], "job submission");
   if (value.schemaVersion !== 1) throw new JobInputError("schemaVersion must be 1");
   if (JSON.stringify(value).length > 1_048_576) throw new JobInputError("job submission exceeds 1 MiB");
   if (!Array.isArray(value.eligibleAccountIds) || value.eligibleAccountIds.length < 1 || value.eligibleAccountIds.length > 50) throw new JobInputError("eligibleAccountIds must contain 1–50 configured account IDs");
   const eligibleAccountIds = value.eligibleAccountIds.map((v) => id(v, "eligible account ID"));
   if (new Set(eligibleAccountIds).size !== eligibleAccountIds.length) throw new JobInputError("eligibleAccountIds must be unique");
+  let scheduling: JobSubmission["scheduling"];
+  if (value.scheduling !== undefined) {
+    if (!object(value.scheduling)) throw new JobInputError("scheduling must be an object");
+    only(value.scheduling, ["profile", "maxConcurrency"], "scheduling");
+    const profile = value.scheduling.profile;
+    if (typeof profile !== "string" || !["economy", "balanced", "throughput", "custom"].includes(profile)) throw new JobInputError("unsupported scheduling profile");
+    const normalizedProfile = profile as NonNullable<JobSubmission["scheduling"]>["profile"];
+    if (normalizedProfile === "custom") {
+      if (!Number.isInteger(value.scheduling.maxConcurrency) || Number(value.scheduling.maxConcurrency) < 1 || Number(value.scheduling.maxConcurrency) > 32) throw new JobInputError("custom scheduling requires maxConcurrency from 1 to 32");
+      scheduling = { profile: normalizedProfile, maxConcurrency: Number(value.scheduling.maxConcurrency) };
+    } else {
+      if (value.scheduling.maxConcurrency !== undefined) throw new JobInputError("maxConcurrency is only valid for the custom profile");
+      scheduling = { profile: normalizedProfile };
+    }
+  }
   if (!Array.isArray(value.tasks) || value.tasks.length < 1 || value.tasks.length > 100) throw new JobInputError("tasks must contain 1–100 DAG nodes");
   const tasks = value.tasks.map(parseTask);
   const taskIds = new Set(tasks.map((task) => task.taskId));
@@ -122,6 +144,7 @@ export function validateJobSubmission(value: unknown): JobSubmission {
     idempotencyKey: id(value.idempotencyKey, "idempotencyKey"),
     projectId: id(value.projectId, "projectId"),
     eligibleAccountIds,
+    scheduling,
     tasks,
   };
 }
@@ -134,11 +157,15 @@ const jobKey = { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" 
 export const JOB_TOOL_DEFINITIONS = [
   tool("job_submit", "Submit one explicitly authorized bounded task DAG for durable multi-account execution.", {
     schemaVersion: { type: "integer", const: 1 }, jobId: jobKey, idempotencyKey: jobKey, projectId: jobKey,
+    scheduling: { type: "object", additionalProperties: false, required: ["profile"], properties: {
+      profile: { type: "string", enum: ["economy", "balanced", "throughput", "custom"] },
+      maxConcurrency: { type: "integer", minimum: 1, maximum: 32 },
+    } },
     eligibleAccountIds: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: jobKey },
     tasks: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false,
       required: ["taskId", "dependsOn", "scopeKeys", "instructions", "execution", "output"],
       properties: {
-        taskId: jobKey, dependsOn: { type: "array", maxItems: 8, items: jobKey }, scopeKeys: { type: "array", minItems: 1, maxItems: 32, uniqueItems: true, items: { type: "string", maxLength: 512 } },
+        taskId: jobKey, dependsOn: { type: "array", maxItems: 8, items: jobKey }, priority: { type: "integer", minimum: -100, maximum: 100 }, scopeKeys: { type: "array", minItems: 1, maxItems: 32, uniqueItems: true, items: { type: "string", maxLength: 512 } },
         inputRef: { type: "string", minLength: 1, maxLength: 2048 }, inputSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
         instructions: { type: "string", minLength: 1, maxLength: 16384 },
         execution: { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { const: "existing-session" } } },
