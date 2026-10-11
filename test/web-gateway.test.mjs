@@ -14,8 +14,12 @@ const close = (server) => new Promise((resolve) => server.close(resolve));
 
 test("private web binding is opt-in, caller-scoped, provider-identified, and never retries a paid request", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "t2o-web-gateway-"));
+  const previous = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.TOKEN2OAUTH_CONFIG_DIR = dir;
+  t.after(() => { if (previous === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = previous; });
   t.after(() => rm(dir, { recursive: true, force: true }));
   const store = new StateStore();
+  assert.equal(store.dir, dir, "test accounts must use the temporary store");
   await store.init({ adminPassword: "correct-horse-battery-staple" });
   const account = await store.addAccount({ label: "temporary mock", provider: "exa", token: "mock-only-secret" });
   assert.equal(await loadWebToolsConfig(undefined, store), undefined);
@@ -55,6 +59,8 @@ test("private web binding is opt-in, caller-scoped, provider-identified, and nev
 
 test("OAuth advertises and enforces separate web scopes for local MCP discovery and calls", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "t2o-web-oauth-"));
+  const previous = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  t.after(() => { if (previous === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = previous; });
   t.after(() => rm(dir, { recursive: true, force: true }));
   process.env.TOKEN2OAUTH_CONFIG_DIR = dir;
   const store = new StateStore();
