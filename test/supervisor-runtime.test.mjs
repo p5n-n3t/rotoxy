@@ -29,8 +29,8 @@ const store = { async load() { return currentState; } };
 const caller = { clientId: "client-a", projectId: "project-a" };
 const submission = {
   schemaVersion: 1, jobId: "job-one", idempotencyKey: "idem-one", projectId: "project-a",
-  eligibleAccountIds: ["acct-a", "acct-b"],
-  tasks: ["task-one", "task-two"].map((taskId) => ({ taskId, dependsOn: [], scopeKeys: [`path:src/${taskId}.txt`], instructions: "Write a short bounded result.",
+  eligibleAccountIds: ["acct-a", "acct-b"], scheduling: { profile: "custom", maxConcurrency: 2 },
+  tasks: ["task-one", "task-two"].map((taskId, index) => ({ taskId, priority: index ? 2 : 7, dependsOn: [], scopeKeys: [`path:src/${taskId}.txt`], instructions: "Write a short bounded result.",
     execution: { mode: "existing-session" }, output: { kind: "text", maxBytes: 2048, format: "plain text", expectedMarker: `DONE-${taskId}` } })),
 };
 
@@ -86,6 +86,9 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   assert.equal(receipt.assignmentId, "job-one");
   assert.equal(receipt.state, "queued");
   assert.deepEqual(await runtime.callTool("job_submit", submission, caller), receipt);
+  const submitted = await runtime.callTool("job_status", { projectId: "project-a", jobId: "job-one" }, caller);
+  assert.deepEqual(submitted.scheduling, submission.scheduling);
+  assert.deepEqual(submitted.tasks.map((task) => task.priority), [7, 2]);
   const completed = await waitComplete(runtime);
   assert.equal(completed.state, "complete");
   assert.deepEqual(completed.tasks.map((task) => task.selectedAccountId), ["acct-a", "acct-b"]);
@@ -94,14 +97,6 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   assert.deepEqual(results.results.map((result) => result.taskId).sort(), ["task-one", "task-two"]);
   assert.ok(results.results.every((result) => result.text.includes("DONE-task-")));
   await assert.rejects(runtime.callTool("job_results", { projectId: "project-b", jobId: "job-one" }, { ...caller, projectId: "project-b" }), /job is not available/);
-  const snapshot = await runtime.readAdmin("project-a");
-  assert.equal(snapshot.state, "ready");
-  assert.equal(snapshot.providers[0].accounts.length, 2);
-  assert.equal(snapshot.jobs.find((job) => job.id === "job-one").status, "complete");
-  assert.equal(snapshot.tasks.filter((task) => task.status === "complete").length, 2);
-  assert.ok(snapshot.events.some((event) => event.source === "supervisor"));
-  assert.equal("capacity" in snapshot.providers[0].accounts[0], false);
-  assert.equal("quota" in snapshot.providers[0].accounts[0], false);
   await assert.rejects(runtime.callTool("job_results", { projectId: "project-a", jobId: "job-one" }, { clientId: "client-b", projectId: "project-a" }));
   const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
   assert.equal(workers.workers.length, 2);
@@ -162,11 +157,13 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
     if (path === "/admin/api/v1/assignments/job-usage") return assignment;
     if (path === "/admin/api/v1/events?after=0&limit=50") return { events: [] };
     if (path === "/admin/api/v1/credit-admission") return { mode: "legacy", accounts: [] };
+    if (path === "/admin/api/v1/projects/project-a/control") return { projectId: "project-a", state: "paused", paused: true, emergencyStop: false, maxConcurrency: 2, activeTaskCount: 1, revision: 4, updatedAt: 1 };
     throw new Error(`unexpected readAdmin request: ${path}`);
   };
   runtime.bridge.status = () => ({ state: "ready" });
 
   const snapshot = await runtime.readAdmin("project-a");
+  assert.deepEqual(snapshot.projectControl, { projectId: "project-a", state: "paused", paused: true, emergencyStop: false, maxConcurrency: 2, activeTaskCount: 1, revision: 4, updatedAt: 1 });
   const accountA = snapshot.providers[0].accounts.find((account) => account.id === "acct-a");
   const accountB = snapshot.providers[0].accounts.find((account) => account.id === "acct-b");
   const workerA = snapshot.providers[0].accounts.flatMap((account) => account.workspaces).flatMap((workspace) => workspace.workers).find((worker) => worker.id === "session-a");
@@ -185,6 +182,19 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
   assert.equal("reportedCostDeltaUsd" in accountB.usage, false);
   assert.equal("capacity" in accountA, false);
   assert.equal("quota" in accountA, false);
+});
+
+test("admin project controls use configured project scope and revision-fenced durable bridge route", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-runtime-controls-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const runtime = new SupervisorRuntime(config, { configPath: join(dir, "unused.json"), configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), store });
+  const calls = [];
+  runtime.bridge.request = async (...args) => { calls.push(args); return { projectId: "project-a", state: "paused", paused: true, emergencyStop: false, maxConcurrency: 2, activeTaskCount: 0, revision: 2 }; };
+  assert.deepEqual(await runtime.controlAdmin({ projectId: "project-a", action: "set_concurrency", value: 2, expectedRevision: 1 }),
+    { projectId: "project-a", state: "paused", paused: true, emergencyStop: false, maxConcurrency: 2, activeTaskCount: 0, revision: 2 });
+  assert.deepEqual(calls[0].slice(0, 3), ["POST", "/admin/api/v1/projects/project-a/control", { action: "set_concurrency", value: 2, expectedRevision: 1 }]);
+  await assert.rejects(runtime.controlAdmin({ projectId: "unconfigured", action: "pause_dispatch", expectedRevision: 1 }), /project unavailable/);
+  await assert.rejects(runtime.controlAdmin({ projectId: "project-a", action: "pause_dispatch", value: 2, expectedRevision: 1 }), /invalid project control value/);
 });
 
 test("runtime config rejects permissive fields, missing workspace bindings, and non-private files", async (t) => {

@@ -14,13 +14,21 @@ export interface SupervisorCaller {
   projectId: string;
 }
 
+export type SupervisorControlAction = "pause_dispatch" | "resume_dispatch" | "emergency_stop" | "set_concurrency";
+export interface SupervisorControlInput {
+  projectId: string;
+  action: SupervisorControlAction;
+  expectedRevision: number;
+  value?: number;
+}
+
 /** Semantic injection seam. A concrete adapter delegates to the durable supervisor bridge. */
 export interface SupervisorBackend {
   callTool(name: JobToolName, args: unknown, caller: SupervisorCaller): Promise<unknown>;
   /** Project-scoped authoritative admin snapshot. */
   listProjects?(): string[];
   readAdmin?(projectId: string): Promise<unknown>;
-  controlAdmin?(input: { projectId: string; action: "pause_dispatch" | "resume_dispatch" | "emergency_stop"; expectedRevision: number }): Promise<unknown>;
+  controlAdmin?(input: SupervisorControlInput): Promise<unknown>;
   readSupervision?(projectId: string, after: number, limit: number): Promise<unknown>;
   acknowledgeSupervision?(projectId: string, eventId: number): Promise<unknown>;
 }
@@ -221,11 +229,16 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
   router.post("/admin/api/v1/supervisor/control", express.json({ limit: "16kb" }), requireAdmin, requireCsrf, async (req, res) => {
     const body = req.body as Record<string, unknown>;
     if (!backend?.controlAdmin) return res.status(503).json({ error: "supervisor_unavailable" });
-    if (!body || typeof body.projectId !== "string" || body.projectId.length < 1 || body.projectId.length > 200 || !["pause_dispatch", "resume_dispatch", "emergency_stop"].includes(String(body.action)) || !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0) {
+    const booleanAction = body?.action === "pause_dispatch" || body?.action === "resume_dispatch" || body?.action === "emergency_stop";
+    const concurrencyAction = body?.action === "set_concurrency";
+    if (!body || Object.keys(body).some((key) => !["projectId", "action", "expectedRevision", "value"].includes(key)) ||
+        typeof body.projectId !== "string" || body.projectId.length < 1 || body.projectId.length > 200 || (!booleanAction && !concurrencyAction) || !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0 ||
+        (concurrencyAction && (!Number.isInteger(body.value) || Number(body.value) < 1 || Number(body.value) > 32)) ||
+        (booleanAction && body.value !== undefined)) {
       return res.status(400).json({ error: "invalid_control_request" });
     }
     try {
-      const result = await backend.controlAdmin(body as { projectId: string; action: "pause_dispatch" | "resume_dispatch" | "emergency_stop"; expectedRevision: number });
+      const result = await backend.controlAdmin(body as SupervisorControlInput);
       return res.json(result);
     } catch { return res.status(409).json({ error: "control_conflict" }); }
   });

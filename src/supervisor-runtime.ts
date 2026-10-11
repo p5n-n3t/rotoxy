@@ -319,7 +319,8 @@ export class SupervisorRuntime implements SupervisorBackend {
           execution: { mode: "existing-session", accountId: session.accountId, sessionId: session.sessionId } };
       });
       const assignment = { schemaVersion: 1, assignmentId: args.jobId, idempotencyKey: args.idempotencyKey,
-        projectId: project.projectId, eligibleAccountIds: eligible, maxWorkers: this.config.maxWorkers, tasks };
+        projectId: project.projectId, eligibleAccountIds: eligible, maxWorkers: this.config.maxWorkers,
+        ...(args.scheduling ? { scheduling: args.scheduling } : {}), tasks };
       if (Buffer.byteLength(JSON.stringify(assignment)) > this.config.localLimits.maxJobBytes) throw new JobInputError("job exceeds the configured supervisor byte limit");
       return boundedJson(await this.bridge.request("POST", "/v1/assignments", assignment, owner));
     }
@@ -484,10 +485,20 @@ export class SupervisorRuntime implements SupervisorBackend {
         available: typeof account.available === "number" && Number.isSafeInteger(account.available) && account.available >= 0 ? account.available : null,
         operationUpperBound: typeof account.operationUpperBound === "number" && Number.isSafeInteger(account.operationUpperBound) && account.operationUpperBound > 0 ? account.operationUpperBound : null,
         boundVerified: account.boundVerified === true })) };
+    const rawControl = parseJson(await this.bridge.request("GET", `/admin/api/v1/projects/${encodeURIComponent(project.projectId)}/control`));
+    if (rawControl.projectId !== project.projectId || !Number.isSafeInteger(rawControl.revision) || Number(rawControl.revision) < 1 ||
+        !Number.isInteger(rawControl.maxConcurrency) || Number(rawControl.maxConcurrency) < 1 || Number(rawControl.maxConcurrency) > 32 ||
+        !Number.isSafeInteger(rawControl.activeTaskCount) || Number(rawControl.activeTaskCount) < 0 ||
+        typeof rawControl.paused !== "boolean" || typeof rawControl.emergencyStop !== "boolean" ||
+        !["running", "paused", "emergency_stopped"].includes(String(rawControl.state))) throw new Error("project controls unavailable");
+    const projectControl = { projectId: project.projectId, state: rawControl.state, paused: rawControl.paused,
+      emergencyStop: rawControl.emergencyStop, maxConcurrency: rawControl.maxConcurrency,
+      activeTaskCount: rawControl.activeTaskCount, revision: rawControl.revision,
+      ...(typeof rawControl.updatedAt === "number" && Number.isFinite(rawControl.updatedAt) ? { updatedAt: rawControl.updatedAt } : {}) };
     const snapshot: SupervisorSnapshot = { observedAt, state: "ready", providers, jobs, tasks, workers, events,
       supervisor: { status: this.bridge.status().state, observedAt },
       orchestrator: { status: "unknown", detail: "Originating client heartbeat is not registered.", observedAt },
-      supervision, creditAdmission } as SupervisorSnapshot & { supervision: unknown; creditAdmission: unknown };
+      supervision, creditAdmission, projectControl } as SupervisorSnapshot & { supervision: unknown; creditAdmission: unknown; projectControl: typeof projectControl };
     return boundedJson(snapshot);
   }
   listProjects(): string[] { return this.config.projects.map(project => project.projectId); }
@@ -509,7 +520,16 @@ export class SupervisorRuntime implements SupervisorBackend {
     return boundedJson(await this.guidanceCommand("ack-project", { project: project.projectId, eventId,
       owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`) }));
   }
-  async controlAdmin(): Promise<unknown> { throw new Error("project-scoped supervisor controls are unavailable"); }
+  async controlAdmin(input: { projectId: string; action: "pause_dispatch" | "resume_dispatch" | "emergency_stop" | "set_concurrency"; expectedRevision: number; value?: number }): Promise<unknown> {
+    if (!this.config.projects.some((project) => project.projectId === input.projectId)) throw new Error("project unavailable");
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) throw new JobInputError("invalid project control revision");
+    if (input.action === "set_concurrency" ? !Number.isInteger(input.value) || input.value! < 1 || input.value! > 32 : input.value !== undefined) {
+      throw new JobInputError("invalid project control value");
+    }
+    return boundedJson(await this.bridge.request("POST", `/admin/api/v1/projects/${encodeURIComponent(input.projectId)}/control`, {
+      action: input.action, ...(input.value !== undefined ? { value: input.value } : {}), expectedRevision: input.expectedRevision,
+    }));
+  }
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
