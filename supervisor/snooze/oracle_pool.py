@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ DEFAULT_MODEL = "qwen3.5:9b"
 MAX_TEXT_CHARS = 4000
 MAX_RESULT_BYTES = 16 * 1024
 MAX_PENDING = 100
+MAX_BATCH = 12
 MAX_RETAINED = 10_000
 MAX_EVENTS = 10_000
 MAX_CATALOG_MODELS = 64
@@ -49,6 +51,15 @@ BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 
 class PoolError(RuntimeError):
     """An expected, safe-to-display pool error."""
+
+
+@dataclass(frozen=True)
+class HostCapability:
+    """Last-known model capability plus current catalog health for one fixed host."""
+
+    host_id: str
+    models: frozenset[str]
+    healthy: bool
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -305,34 +316,84 @@ class OraclePool:
 
     def submit(self, text: str, *, model: str = DEFAULT_MODEL, job_id: str | None = None,
                source: str | None = None) -> dict[str, Any]:
-        self._validate_task(text, model, job_id, source)
-        job_id = job_id or str(uuid.uuid4())
+        return self.submit_batch([{"text": text, "model": model, "job_id": job_id,
+                                   "source": source}])[0]
+
+    def submit_batch(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Atomically enqueue up to MAX_BATCH independent prompts.
+
+        Each list entry is one indivisible task; this method never segments or
+        rewrites prompts. Repeating an existing ID is accepted only when its
+        content, model, and source are identical, matching ``submit`` semantics.
+        """
+        if type(tasks) is not list or not 1 <= len(tasks) <= MAX_BATCH:
+            raise ValueError(f"Batch must contain 1 to {MAX_BATCH} independent tasks")
         import hashlib
-        digest = hashlib.sha256(json.dumps([text, model, source], ensure_ascii=False,
-                                           separators=(",", ":")).encode("utf-8")).hexdigest()
+
+        normalized = []
+        seen_ids = set()
+        for item in tasks:
+            if type(item) is not dict or set(item) - {"text", "model", "job_id", "source"}:
+                raise ValueError("Invalid batch task fields")
+            text = item.get("text")
+            model = item.get("model", DEFAULT_MODEL)
+            job_id = item.get("job_id") or str(uuid.uuid4())
+            source = item.get("source")
+            self._validate_task(text, model, job_id, source)
+            if job_id in seen_ids:
+                raise ValueError("Duplicate task ID in batch")
+            seen_ids.add(job_id)
+            digest = hashlib.sha256(json.dumps([text, model, source], ensure_ascii=False,
+                                               separators=(",", ":")).encode("utf-8")).hexdigest()
+            normalized.append({"id": job_id, "text": text, "model": model,
+                               "source": source, "digest": digest})
         now = time.time()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            prior = db.execute("SELECT id,text_hash FROM pool_tasks WHERE id=?", (job_id,)).fetchone()
-            if prior:
-                if prior["text_hash"] != digest:
-                    db.rollback()
-                    raise ValueError("Task ID already exists with different content")
-                db.commit()
-                return self.status(job_id)
+            inserts = []
+            for task in normalized:
+                prior = db.execute("SELECT text_hash FROM pool_tasks WHERE id=?", (task["id"],)).fetchone()
+                if prior:
+                    if prior["text_hash"] != task["digest"]:
+                        raise ValueError("Task ID already exists with different content")
+                else:
+                    inserts.append(task)
             pending = db.execute("SELECT COUNT(*) FROM pool_tasks WHERE status='queued'").fetchone()[0]
             retained = db.execute("SELECT COUNT(*) FROM pool_tasks").fetchone()[0]
-            if pending >= MAX_PENDING:
-                db.rollback()
+            if pending + len(inserts) > MAX_PENDING:
                 raise PoolError("queue_full")
-            if retained >= MAX_RETAINED:
-                db.rollback()
+            if retained + len(inserts) > MAX_RETAINED:
                 raise PoolError("retention_full_run_cleanup")
-            db.execute("INSERT INTO pool_tasks(id,text,text_hash,source,model,status,created,updated) VALUES(?,?,?,?,?,'queued',?,?)",
-                       (job_id, text, digest, source, model, now, now))
-            self._event(db, job_id, "queued", {"status": "queued", "model": model, "source": source}, now)
+            for task in inserts:
+                db.execute("INSERT INTO pool_tasks(id,text,text_hash,source,model,status,created,updated) VALUES(?,?,?,?,?,'queued',?,?)",
+                           (task["id"], task["text"], task["digest"], task["source"], task["model"], now, now))
+                self._event(db, task["id"], "queued", {"status": "queued", "model": task["model"],
+                            "source": task["source"]}, now)
             db.commit()
-        return self.status(job_id)
+            rows = [db.execute("SELECT * FROM pool_tasks WHERE id=?", (task["id"],)).fetchone()
+                    for task in normalized]
+            return [self._public_task(row) for row in rows]
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        """Cancel queued work only; a dispatched inference cannot be safely recalled."""
+        if not isinstance(job_id, str) or not TASK_ID_RE.fullmatch(job_id):
+            raise ValueError("Invalid task ID")
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status,model,source FROM pool_tasks WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError("task_not_found")
+            if row["status"] == "running":
+                raise PoolError("task_inference_not_cancellable")
+            if row["status"] == "queued":
+                db.execute("UPDATE pool_tasks SET status='cancelled',updated=? WHERE id=? AND status='queued'",
+                           (now, job_id))
+                self._event(db, job_id, "cancelled", {"status": "cancelled", "model": row["model"],
+                            "source": row["source"]}, now)
+            db.commit()
+        status = self.status(job_id)["status"]
+        return {"id": job_id, "status": status, "cancelled": status == "cancelled"}
 
     def _public_task(self, row: sqlite3.Row) -> dict[str, Any]:
         return {key: row[key] for key in ("id", "status", "model", "source", "created", "updated",
@@ -408,8 +469,10 @@ class OraclePool:
             if capacity <= 0:
                 db.commit()
                 return []
-            host_rows = db.execute("SELECT id,models,assigned FROM pool_hosts").fetchall()
-            host_map = {row["id"]: row for row in host_rows}
+            host_rows = db.execute("SELECT id,models,assigned,error_code FROM pool_hosts").fetchall()
+            host_map = {row["id"]: HostCapability(row["id"], frozenset(json.loads(row["models"])),
+                         row["error_code"] is None) for row in host_rows}
+            assigned_map = {row["id"]: row["assigned"] for row in host_rows}
             candidates = db.execute("SELECT id,text,model,source FROM pool_tasks WHERE status='queued' ORDER BY created,id LIMIT ?", (MAX_PENDING,)).fetchall()
             cursor_row = db.execute("SELECT value FROM pool_meta WHERE key='round_robin_cursor'").fetchone()
             cursor = cursor_row[0] if cursor_row else HOSTS[-1]["id"]
@@ -423,16 +486,18 @@ class OraclePool:
                     order = order[pivot + 1:] + order[:pivot + 1]
                 except ValueError:
                     pass
-                eligible = [h for h in order if h not in busy and task["model"] in json.loads(host_map[h]["models"])]
+                eligible = [h for h in order if h not in busy and host_map[h].healthy
+                            and task["model"] in host_map[h].models]
                 if not eligible:
                     continue
                 # Assigned count is the durable fair-share score; round-robin order
                 # deterministically breaks ties across worker processes.
-                host_id = min(eligible, key=lambda h: (host_map[h]["assigned"], order.index(h)))
+                host_id = min(eligible, key=lambda h: (assigned_map[h], order.index(h)))
                 token = secrets.token_urlsafe(18)
                 db.execute("UPDATE pool_tasks SET status='running',assigned_host=?,claim_token=?,claim_pid=?,claim_boot=?,claim_start=?,attempts=attempts+1,updated=? WHERE id=? AND status='queued'",
                            (host_id, token, pid, boot, start, now, task["id"]))
                 db.execute("UPDATE pool_hosts SET assigned=assigned+1 WHERE id=?", (host_id,))
+                assigned_map[host_id] += 1
                 self._event(db, task["id"], "running", {"status": "running", "model": task["model"], "host": host_id, "source": task["source"]}, now)
                 claimed.append({"id": task["id"], "text": task["text"], "model": task["model"],
                                 "host": host_id, "token": token, "source": task["source"]})
@@ -503,10 +568,10 @@ class OraclePool:
         if type(older_than_seconds) is not int or not 86400 <= older_than_seconds <= 3650 * 86400:
             raise ValueError("Cleanup age must be between 1 and 3650 days")
         cutoff = time.time() - older_than_seconds
-        terminal = ("complete", "failed", "ambiguous")
+        terminal = ("complete", "failed", "ambiguous", "cancelled")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            ids = [row[0] for row in db.execute("SELECT id FROM pool_tasks WHERE status IN (?,?,?) AND updated<?",
+            ids = [row[0] for row in db.execute("SELECT id FROM pool_tasks WHERE status IN (?,?,?,?) AND updated<?",
                                                 (*terminal, cutoff))]
             if ids:
                 db.executemany("DELETE FROM pool_events WHERE task_id=?", ((task_id,) for task_id in ids))
