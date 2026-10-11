@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "scripts/monitor-workforce.mjs",
     "docs",
     "supervisor/snooze/*.py",
     "supervisor/snooze/adapters/*.py",
