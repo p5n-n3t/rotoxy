@@ -30,3 +30,13 @@ At widths below 850px the rail becomes a horizontally scrollable top navigation 
 - `assets/brand/social-banner.svg` — 1200 × 630 share banner.
 
 The dashboard embeds the original mark as inline SVG to inherit its theme-aware stroke, and uses a compact SVG data favicon. These assets are authored from the same geometry and palette.
+
+## Primary admin console (`src/ui.ts`)
+
+The admin console (pool, tools, diagnostics, security, login and gateway landing) now uses the same token set as the supervisor desk. Earlier it had a separate dark-only neon theme with gradients and frosted glass; that theme is retired.
+
+- **Composition.** Hairline rules divide the page instead of floating cards. `.card` is a column on the 12-column grid that ends in a bottom rule, not a raised tile. The navigation bar sits above a single rule. Wide content uses 8 of the 12 columns and summaries use 4. On screens 850px and narrower everything stacks, and the action navigation scrolls sideways rather than wrapping.
+- **Type.** Body text uses the system sans font at 15/1.55. Metrics, pills, table headers and labels use the system mono font with tabular figures. The smallest text is 11px uppercase mono labels; body copy is never smaller than 12.5px.
+- **Controls.** The primary button is ink-filled and turns signal-coloured on hover. Secondary buttons are outlined. Danger buttons are red on a soft red background. Disabled controls are drawn at 50% opacity with a not-allowed cursor. Focus shows a 2px amber/copper ring with a 2px offset.
+- **Mark.** `page()` swaps the legacy `<div class="logo">T2</div>` badge for the inline relay-gate SVG. That badge is also emitted by `html.ts#adminNav` and the login page. Every admin page links the SVG favicon as a data URI.
+- **Contrast.** These ratios were checked by calculation. Light theme: muted text on paper 6.1:1, signal 4.65:1, amber 5.2:1. Dark theme: muted 7.9:1, signal 10.2:1.
