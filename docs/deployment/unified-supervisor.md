@@ -1,38 +1,59 @@
-# Unified Snooze supervisor package
+# Unified supervisor deployment
 
-Token2OAuth includes Snooze's Python source, static dashboard assets, and license notices in its npm package. This is packaging support for the opt-in runtime; it does not start Snooze during package installation. Node starts the Python bridge only when the operator explicitly passes `--supervisor-config` to `serve`.
+Token2OAuth packages Snooze's Python supervisor source, dashboard assets, and notices with its Node gateway. Supervisor execution is opt-in: only `token2oauth serve --supervisor-config /absolute/path/to/supervisor.json` starts the Python bridge and Node job worker. A normal `serve` does not start either. This describes the implementation at the current integration revision; it is not a production rollout record.
 
-## Current boundary
+## Runtime behavior and limits
 
-The runtime option is implemented as `token2oauth serve --supervisor-config /absolute/path/to/supervisor.json`. Without the option, the server does not start the Python child. The runtime resolves its embedded source from the installed package's `supervisor/` directory and invokes `python3`; Python 3.11 or newer is required. Snooze's bridge and modules use Python's standard library at runtime; no Python package installation step is needed for this source launch.
+The config must be an owner-owned, non-symlink regular file with mode `0600` (or stricter), no group/world permissions, and at most 64 KiB. Its version is `1`; unknown root, project, session, and limit fields are rejected. Keep it out of source control. It contains identifiers and policy, not provider credentials; credentials remain in Token2OAuth's encrypted account store.
 
-The private config format is version 1. It binds project IDs to OAuth client IDs, Token2OAuth account IDs, and registered existing sessions, and declares worker and local size limits. The current parser accepts only `gpt-6-luna`, requires `allowUnknownQuota: true`, caps work at 100 tasks / 1 MiB per job / 32 KiB per text output, and rejects symlinks, non-owner files, group/world permissions, and files over 64 KiB. Keep the file outside source control and set mode `0600` before starting the service. Do not put provider credentials in it; credentials stay in Token2OAuth's encrypted account store.
+Each `registeredSessions` entry requires `sessionId`, `accountId`, `model: "gpt-6-luna"`, and `workspaceId`. Sessions must be unique and bound to a listed account. The project binds `projectId`, OAuth `clientIds`, `accountIds`, and those registered sessions. The root requires `allowUnknownQuota: true`, `maxWorkers` from 1 to 8, and `localLimits`: `maxTasks` 1–100, `maxJobBytes` 1,024–1,048,576, and `maxOutputBytes` 1–32,768. The runtime uses the lower of `maxWorkers` and the number of distinct configured accounts as its worker concurrency ceiling; local account capacity is one. These are local limits, not provider capacity claims.
 
-```json
-{
-  "version": 1,
-  "projects": [{
-    "projectId": "project-one",
-    "clientIds": ["oauth-client-id"],
-    "accountIds": ["account-id"],
-    "registeredSessions": [{
-      "sessionId": "existing-session-id",
-      "accountId": "account-id",
-      "model": "gpt-6-luna"
-    }]
-  }],
-  "maxWorkers": 3,
-  "allowUnknownQuota": true,
-  "localLimits": { "maxTasks": 100, "maxJobBytes": 1048576, "maxOutputBytes": 32768 }
-}
+Only enabled, authorized, healthy eligible accounts with a registered session are used. The adapter is restricted to the LightSprint provider, or a generic bearer account whose upstream URL exactly matches the configured native LightSprint endpoint. Unknown quota is accepted only because this format requires explicit acknowledgement; it does not establish available balance, remaining credits, or a spending ceiling. Fresh operations are disabled. Existing registered sessions are used for bounded text jobs. A `429` is treated as an unknown quota signal, not proof that credits are depleted.
+
+The runtime is implemented and the opt-in dispatcher reports `dispatchEnabled: true` when available. Prior deployment text claiming fanout was disabled is stale. This does not establish production readiness: the strongest current direct overlap evidence is two observed running sessions. There is no verified 24- or 35-worker run, provider slot maximum, remaining-credit value, or provider-wide concurrency guarantee. See [release verification](../RELEASE-VERIFICATION.md) and the dated evidence it cites.
+
+The package contains the `scripts/monitor-workforce.mjs` observer and the compiled Node modules it imports. That separate monitor requires a private owner-only config and makes read-only status requests to its explicitly configured LightSprint sessions; it is not started by the supervisor flag. Its local guidance mode uses the packaged Python module. Packaging the program does not configure, enable, or start an OS service.
+
+## Backup and rollback
+
+No live deployment, upgrade, backup, or rollback was performed for this release audit. For a future controlled rollout, record the exact tested `.tgz` and service command, stop the service cleanly, then save the artifact, supervisor config, and complete Token2OAuth config directory. The directory includes the encryption key/account state and `supervisor-state/`; protect the backup as credential material. Stopping before copying preserves SQLite WAL state.
+
+For an installation managed by global npm, the following sequence is reproducible after setting the paths and adapting the two service-manager commands to the actual host. Do not run the copy while the service is active.
+
+```sh
+set -eu
+umask 077
+CONFIG_DIR="${TOKEN2OAUTH_CONFIG_DIR:-$HOME/.config/token2oauth}"
+SUPERVISOR_CONFIG="/absolute/path/to/supervisor.json"
+RELEASE_TGZ="/absolute/path/to/token2oauth-0.2.0.tgz"
+BACKUP_DIR="$HOME/.local/state/token2oauth-backups/0.2.0"
+
+# Stop using the service manager that actually owns this installation.
+mkdir -p "$(dirname "$BACKUP_DIR")"
+mkdir "$BACKUP_DIR"  # Fails if this release backup already exists.
+cp -a "$RELEASE_TGZ" "$BACKUP_DIR/"
+cp -a "$SUPERVISOR_CONFIG" "$BACKUP_DIR/supervisor.json"
+cp -a "$CONFIG_DIR" "$BACKUP_DIR/config"
+
+# Install the saved release only after the backup is complete.
+npm install --global "$RELEASE_TGZ"
+# Start the service with its recorded command, including --supervisor-config.
 ```
 
-The private config and actual assignment/dispatch policy are being aligned with the R30 runtime work. At this revision the bridge can start, but the Node worker/fanout is deliberately not started; queued assignments do not mean provider work ran. Treat the example as a description of the current parser, not a production enablement recipe. Actual fanout and end-to-end operational verification remain pending.
+Rollback restores the saved artifact and full state after a clean stop. Preserve the current failed state separately before replacing anything; do not combine SQLite files from different runs.
 
-## Backup and rollback planning
+```sh
+set -eu
+umask 077
+CONFIG_DIR="${TOKEN2OAUTH_CONFIG_DIR:-$HOME/.config/token2oauth}"
+BACKUP_DIR="$HOME/.local/state/token2oauth-backups/0.2.0"
+test ! -e "${CONFIG_DIR}.pre-rollback"
 
-Before a future controlled rollout, record the exact npm artifact/version and back up the owner-only config plus the Token2OAuth config directory. The supervisor SQLite state is kept separately at `<Token2OAuth config directory>/supervisor-state/`; preserve it with the deployment record. Stop the service cleanly before copying its SQLite state so WAL contents are not missed. Keep the prior application artifact and config together; a rollback restores that artifact and config and restarts the service. To disable the optional child, restart without `--supervisor-config`; leave supervisor state intact for later investigation. No live upgrade or rollback was performed for this package verification.
+# Stop the service cleanly with its actual service manager.
+npm install --global "$BACKUP_DIR/token2oauth-0.2.0.tgz"
+mv "$CONFIG_DIR" "${CONFIG_DIR}.pre-rollback"
+cp -a "$BACKUP_DIR/config" "$CONFIG_DIR"
+# Restart with the recorded prior command and verify locally before reopening traffic.
+```
 
-## Package verification scope
-
-The package audit checks the generated tarball's actual file list, including Python bridge/modules, nested static assets, and Snooze license notices, and checks that frontend development sources, caches, `node_modules`, and private config files are absent. Normal `npm pack` runs the existing `prepack` TypeScript build to generate `dist/`; the verification environment lacked the local TypeScript compiler, so the smoke-test tarball was created with lifecycle scripts suppressed and does not contain `dist/`. That archive is valid evidence for the Snooze payload only, not a complete Token2OAuth release artifact. The check extracts it under a temporary directory and invokes the bundled module's help/import path with `PYTHONPATH=supervisor`; it does not install the npm package or Python project, contact a provider, or run the service.
+To disable the supervisor, restart the gateway without `--supervisor-config`; retain its state directory for investigation. This flag does not manage the separately installed workforce monitor service. Do not use these examples as an unreviewed production change: service names, exact prior artifact, paths, and health checks must first be recorded for the target host.
