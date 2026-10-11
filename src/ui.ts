@@ -8,7 +8,7 @@ import { StateStore } from "./store.js";
 import type { PoolStrategy } from "./types.js";
 import { strategyHelp, parameterHelp } from "./dashboard-help.js";
 import type { OAuthService } from "./oauth.js";
-import { TelemetryRecorder, type GatewaySummary } from "./telemetry.js";
+import { TelemetryRecorder, type GatewayEvent, type GatewaySummary } from "./telemetry.js";
 import { renderDiagnosticsPage, renderSecurityPage, renderToolsPage, renderRotatedPage } from "./ui-pages.js";
 import { refreshAccountCapabilities, toolCatalog } from "./capabilities.js";
 import { collectDoctorSnapshot } from "./doctor-runtime.js";
@@ -93,6 +93,28 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--sunk);border-ra
 .login .card{width:min(420px,100%);grid-column:auto;padding:28px;border:1px solid var(--line);background:var(--surface);border-radius:6px}
 @media(max-width:850px){.card,.card.wide{grid-column:1/-1}.row{grid-template-columns:1fr}.hide-sm{display:none}nav.actions{width:100%;overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}nav.actions>*{flex:0 0 auto}}
 @media(max-width:520px){.metric{font-size:25px}.hero h1{font-size:30px}th,td{font-size:13px}}
+.ops-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;padding-bottom:18px;border-bottom:1px solid var(--line)}
+.ops-head h1{font-size:clamp(26px,4vw,40px);line-height:1.08;letter-spacing:-.035em;margin:6px 0 4px}
+.ops-head .verdict{display:flex;gap:8px;align-items:center;font-weight:600}
+.ledger{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));border-bottom:1px solid var(--line);margin:0}
+.ledger div{padding:16px 16px 16px 0;min-width:0}.ledger div+div{padding-left:16px;border-left:1px solid var(--rule)}
+.ledger dt{font:600 11px/1.2 var(--mono);text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.ledger dd{margin:6px 0 0;font:620 28px/1.1 var(--mono);font-variant-numeric:tabular-nums}
+.ledger dd.unknown{font:italic 500 15px/1.4 inherit;color:var(--muted);padding-top:8px}
+.ledger dd.attn{color:var(--amber)}.ledger dd.bad{color:var(--red)}
+.ledger small{display:block;margin-top:3px;font:400 12.5px/1.35 ui-sans-serif,system-ui,sans-serif;color:var(--muted)}
+.bar{display:flex;height:8px;margin-top:10px;background:var(--sunk);border-radius:1px;overflow:hidden}.bar i{display:block;height:100%}
+.bar .ok{background:var(--signal)}.bar .warn{background:var(--amber)}.bar .bad{background:var(--red)}.bar .off{background:var(--muted);opacity:.45}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:12.5px;color:var(--muted)}.legend span{display:inline-flex;gap:6px;align-items:center}
+.narrative{font-size:15px;line-height:1.7;max-width:62ch;margin:6px 0 0}
+.narrative strong{font-weight:620}
+.reqs{list-style:none;margin:0;padding:0}.reqs li{display:grid;grid-template-columns:78px minmax(0,1fr) auto;gap:4px 12px;padding:8px 0;border-bottom:1px solid var(--rule);font-size:13.5px;align-items:baseline}
+.reqs time,.reqs .lat{font-family:var(--mono);font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.reqs .what{min-width:0;overflow-wrap:anywhere}.reqs .err{color:var(--red)}
+details.settings{border-top:1px solid var(--line);padding:4px 0}details.settings>summary{padding:16px 0;font-weight:620;font-size:17px;list-style-position:outside}
+details.settings>summary .tiny{font-weight:400;margin-left:8px}
+.empty{padding:14px 16px;background:var(--sunk);color:var(--muted);border-radius:4px;font-size:14px}
+@media(max-width:520px){.ledger{grid-template-columns:repeat(2,minmax(0,1fr))}.ledger div,.ledger div+div{padding:12px 10px 12px 0;border-left:0;border-bottom:1px solid var(--rule)}.ledger dd{font-size:23px}.reqs li{grid-template-columns:64px minmax(0,1fr)}.reqs .lat{grid-column:2}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 `;
 
@@ -270,13 +292,17 @@ export class AdminUi {
     const strategyOptions = strategies.map((s) => '<option value="' + e(s) + '"' + (state.config.strategy === s ? " selected" : "") + ">" + e(s) + "</option>").join("");
 
     this.sendAdmin(res, "Admin", `<main class="wrap">${adminNav(base, "pool")}
-${message}<section class="grid">
-<div class="card full"><div class="eyebrow">Connection</div><h2>ChatGPT MCP endpoint</h2><div class="copy">${e(base)}/mcp</div><p class="muted tiny">Add this single URL to ChatGPT. Token2OAuth handles OAuth; you do not create one MCP connection per upstream account.</p></div>
+${message}${renderOverview({ base, strategy: state.config.strategy, upstreamUrl: state.config.upstreamUrl, maxFailoverAttempts: state.config.maxFailoverAttempts, accounts, summary: this.deps.telemetry?.summary(), recent: this.deps.telemetry?.recent({ limit: 40 }) })}<section class="grid">
+<div class="card full"><div class="eyebrow">Connection</div><h2>One MCP endpoint for every compatible client</h2><div class="copy">${e(base)}/mcp</div><p class="muted tiny">Add this single URL to ChatGPT, Claude, Codex or any MCP client that supports OAuth. Token2OAuth handles sign-in and pooling; you do not create one connection per upstream account.</p></div>
+<div class="card full" id="accounts"><div class="eyebrow">Credential pool</div><h2>Upstream accounts</h2><p class="muted tiny">New tokens are <code>unknown</code> until used. Test credentials sends one authenticated MCP <code>initialize</code> request to each selected account; it does not create a ChatGPT OAuth connection or reveal a token.</p>${rows ? `<div class="actions" style="margin:12px 0"><form class="inline" method="post" action="${e(base)}/admin/accounts/probe-all"><button type="submit">Test all enabled credentials</button></form></div><div style="overflow:auto"><table><thead><tr><th>Account</th><th>State</th><th>Success</th><th>Last HTTP</th><th>Probe</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">No bearer credentials have been added yet.</p>'}</div>
+</section>
+<details class="settings" id="settings"><summary>Routing &amp; upstream settings <span class="tiny muted">${e(state.config.strategy)} · ${e(state.config.upstreamUrl || "no upstream set")}</span></summary><section class="grid">
 <div class="card wide"><div class="eyebrow">Upstream</div><h2>MCP target & routing</h2><form method="post" action="${e(base)}/admin/config"><label>Upstream MCP URL</label><input name="upstreamUrl" value="${e(state.config.upstreamUrl)}" placeholder="https://provider.example.com/mcp" required><div class="row"><div><label>Pool strategy</label><select id="pool-strategy" name="strategy" aria-describedby="strategy-definition strategy-example">${strategyOptions}</select></div><div><label for="maxFailoverAttempts">Max failover attempts <span title="${e(parameterHelp.maxFailoverAttempts)}" tabindex="0" aria-label="Help for Max failover attempts">ⓘ</span></label><input type="number" min="1" max="20" id="maxFailoverAttempts" title="${e(parameterHelp.maxFailoverAttempts)}" aria-describedby="maxFailoverAttempts-help" name="maxFailoverAttempts" value="${e(state.config.maxFailoverAttempts)}"><details class="tiny muted"><summary>What does this control?</summary><p id="maxFailoverAttempts-help">${e(parameterHelp.maxFailoverAttempts)}</p></details></div></div><div class="row"><div><label for="quotaCooldownSeconds">Quota cooldown (seconds) <span title="${e(parameterHelp.quotaCooldownSeconds)}" tabindex="0" aria-label="Help for Quota cooldown (seconds)">ⓘ</span></label><input type="number" min="1" id="quotaCooldownSeconds" title="${e(parameterHelp.quotaCooldownSeconds)}" aria-describedby="quotaCooldownSeconds-help" name="quotaCooldownSeconds" value="${e(state.config.quotaCooldownSeconds)}"><details class="tiny muted"><summary>What does this control?</summary><p id="quotaCooldownSeconds-help">${e(parameterHelp.quotaCooldownSeconds)}</p></details></div><div><label for="requestTimeoutMs">Request timeout (ms) <span title="${e(parameterHelp.requestTimeoutMs)}" tabindex="0" aria-label="Help for Request timeout (ms)">ⓘ</span></label><input type="number" min="1000" id="requestTimeoutMs" title="${e(parameterHelp.requestTimeoutMs)}" aria-describedby="requestTimeoutMs-help" name="requestTimeoutMs" value="${e(state.config.requestTimeoutMs)}"><details class="tiny muted"><summary>What does this control?</summary><p id="requestTimeoutMs-help">${e(parameterHelp.requestTimeoutMs)}</p></details></div></div><button type="submit">Save gateway settings</button></form></div>
 <div class="card" aria-live="polite"><div class="eyebrow">Selected strategy</div><h3 id="strategy-title">${e(strategyHelp[state.config.strategy].title)}</h3><p class="muted tiny" id="strategy-definition">${e(strategyHelp[state.config.strategy].definition)}</p><strong class="tiny">Example use case</strong><p class="muted tiny" id="strategy-example">${e(strategyHelp[state.config.strategy].example)}</p><p class="muted tiny">Every strategy keeps an established MCP session, and tasks it started, on the credential that created them.</p></div>
-<div class="card full"><div class="eyebrow">Credential pool</div><h2>Upstream accounts</h2><p class="muted tiny">New tokens are <code>unknown</code> until used. Test credentials sends one authenticated MCP <code>initialize</code> request to each selected account; it does not create a ChatGPT OAuth connection or reveal a token.</p>${rows ? `<div class="actions" style="margin:12px 0"><form class="inline" method="post" action="${e(base)}/admin/accounts/probe-all"><button type="submit">Test all enabled credentials</button></form></div><div style="overflow:auto"><table><thead><tr><th>Account</th><th>State</th><th>Success</th><th>Last HTTP</th><th>Probe</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">No bearer credentials have been added yet.</p>'}</div>
+</section></details>
+<details class="settings" id="add-credential"${accounts.length ? "" : " open"}><summary>Add an upstream credential <span class="tiny muted">encrypted at rest</span></summary><section class="grid">
 <div class="card full"><div class="eyebrow">Add credential</div><h2>Add an upstream bearer token</h2><p class="muted tiny">The token is AES-256-GCM encrypted before it is written to disk. It is never rendered back into this page.</p><form method="post" action="${e(base)}/admin/accounts"><div class="row"><div><label>Label</label><input name="label" placeholder="LightSprint Pro #1" required></div><div><label>Provider / preset</label><input name="provider" value="generic-bearer-mcp"></div></div><label>Bearer token</label><input type="password" name="token" autocomplete="off" required><div class="row"><div><label>Weight</label><input type="number" step="0.1" min="0.1" name="weight" value="1"></div><div><label>Priority (lower first)</label><input type="number" name="priority" value="100"></div></div><button type="submit">Encrypt & add credential</button></form></div>
-</section><script>
+</section></details><script>
 const help = ${JSON.stringify(strategyHelp).replaceAll("<", "\\u003c")};
 const strategySelect = document.getElementById("pool-strategy");
 strategySelect.addEventListener("change", () => {
@@ -502,6 +528,81 @@ strategySelect.addEventListener("change", () => {
     res.setHeader("Set-Cookie", this.sessionCookie(state.config.publicBaseUrl, "", 0));
     res.type("html").send(page("New admin password", renderRotatedPage(base, password, revokeConnections)));
   };
+}
+
+export interface OverviewAccount { id: string; label: string; provider?: string; enabled: boolean; state: string; requests: number; successes: number; failures: number; active?: number; cooldownUntil?: number }
+
+export interface OverviewInput {
+  base: string;
+  strategy: string;
+  upstreamUrl: string;
+  maxFailoverAttempts: number;
+  accounts: readonly OverviewAccount[];
+  summary?: GatewaySummary;
+  recent?: readonly GatewayEvent[];
+  now?: number;
+}
+
+/** Bucket pool snapshot rows into operator-facing states. Disabled wins over health. */
+export function accountBuckets(accounts: readonly OverviewAccount[]) {
+  const b = { healthy: 0, depleted: 0, failing: 0, disabled: 0, unknown: 0 };
+  for (const a of accounts) {
+    if (!a.enabled || a.state === "disabled") b.disabled += 1;
+    else if (a.state === "healthy" || a.state === "ready") b.healthy += 1;
+    else if (a.state === "exhausted" || a.state === "cooldown") b.depleted += 1;
+    else if (a.state === "auth-failed") b.failing += 1;
+    else b.unknown += 1;
+  }
+  return b;
+}
+
+function ago(at: number, now: number): string {
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return new Date(at).toISOString().slice(0, 10);
+}
+
+const strategyPhrase: Record<string, string> = {
+  "adaptive-sticky": "scores eligible credentials by load and recent failures, then keeps each MCP session on the credential that started it",
+  "round-robin": "rotates new sessions through eligible credentials in order",
+  "least-used": "sends new sessions to the credential with the fewest weighted requests",
+  "weighted-random": "picks eligible credentials at random in proportion to their weight",
+  random: "picks any eligible credential uniformly",
+  priority: "uses the lowest-priority-number eligible credential first",
+};
+
+/** Operational overview for the primary admin page. Every figure comes from the pool snapshot or gateway telemetry; absent data is labelled, never zero-filled. */
+export function renderOverview(input: OverviewInput): string {
+  const now = input.now ?? Date.now();
+  const accounts = input.accounts;
+  const b = accountBuckets(accounts);
+  const total = accounts.length;
+  const usable = b.healthy + b.unknown;
+  const verdict = total === 0 ? ["warn", "No credentials in the pool"]
+    : usable === 0 ? ["bad", "No credential can take new sessions"]
+    : b.depleted + b.failing > 0 ? ["warn", `${usable} of ${total} credentials can route; ${b.depleted + b.failing} need attention`]
+    : ["", `${usable} of ${total} credentials can route`];
+  const tel = input.summary?.total;
+  const observed = tel && tel.count > 0 ? tel : undefined;
+  const reqs = input.summary?.by?.kind?.request;
+  const pct = (n: number) => `${(n / total * 100).toFixed(2)}%`;
+  const bar = total ? `<div class="bar" role="img" aria-label="${b.healthy} healthy, ${b.unknown} untested, ${b.depleted} depleted or cooling down, ${b.failing} auth failed, ${b.disabled} disabled of ${total}">${[["ok", b.healthy], ["off", b.unknown], ["warn", b.depleted], ["bad", b.failing], ["off", b.disabled]].filter(([, n]) => n).map(([c, n]) => `<i class="${c}" style="width:${pct(n as number)}"></i>`).join("")}</div><div class="legend"><span><span class="dot"></span>${b.healthy} healthy</span><span>${b.unknown} untested</span><span><span class="dot warn"></span>${b.depleted} depleted / cooldown</span><span><span class="dot bad"></span>${b.failing} auth failed</span><span>${b.disabled} disabled</span></div>` : "";
+  const cell = (label: string, value: string, note: string, cls = "") => `<div><dt>${label}</dt><dd class="${cls}">${value}</dd><small>${note}</small></div>`;
+  const ledger = `<dl class="ledger" aria-label="Gateway status">${
+    cell("Routable", total ? `${usable}<span class="muted" style="font-size:.55em"> / ${total}</span>` : "None", "healthy or untested, enabled", usable === 0 ? "bad" : "")}${
+    cell("Needs attention", String(b.depleted + b.failing), "depleted, cooling down or auth failed", b.depleted + b.failing ? "attn" : "")}${
+    cell("Requests seen", observed ? String(reqs?.count ?? observed.count) : "Not observed yet", observed ? `in this process, since ${input.summary?.window.from ? ago(input.summary.window.from, now) : "start"}` : "telemetry starts at process start")}${
+    observed ? cell("Success", `${((1 - observed.errorRate) * 100).toFixed(1)}%`, `${observed.success} ok · ${observed.error} errors · ${observed.retries} retries`, observed.errorRate > .1 ? "attn" : "") : cell("Success", "Not observed", "no completed requests", "unknown")}${
+    observed && observed.latency.p50 !== null ? cell("Latency p50 / p95", `${Math.round(observed.latency.p50)}<span class="muted" style="font-size:.55em"> / ${Math.round(observed.latency.p95 ?? observed.latency.p50)} ms</span>`, `${observed.latency.count} timed requests`) : cell("Latency", "Not observed", "no timed requests yet", "unknown")}${
+    cell("Quota / capacity", "Unknown", "providers report no remaining quota; only 402/429 signals", "unknown")}</dl>`;
+  const host = (() => { try { return new URL(input.upstreamUrl).host; } catch { return input.upstreamUrl || "an unconfigured upstream"; } })();
+  const narrative = `<p class="narrative">A client opens <strong>one MCP connection</strong> at <code>${e(input.base)}/mcp</code> and signs in with OAuth. The gateway forwards to <strong>${e(host)}</strong> and ${e(strategyPhrase[input.strategy] ?? `uses the ${input.strategy} strategy`)}. ${total ? `It can choose among <strong>${usable}</strong> routable credential${usable === 1 ? "" : "s"}` : "It has no credentials to choose from yet"}${b.depleted ? `; <strong>${b.depleted}</strong> ${b.depleted === 1 ? "is" : "are"} waiting out a quota cooldown` : ""}. A failed request may retry on another credential up to <strong>${e(input.maxFailoverAttempts)}</strong> time${input.maxFailoverAttempts === 1 ? "" : "s"}; established sessions do not move.</p>`;
+  const label = new Map(accounts.map((a) => [a.id, a.label]));
+  const recent = (input.recent ?? []).filter((ev) => ev.kind === "request" || ev.kind === "attempt").slice(0, 8);
+  const list = recent.length ? `<ol class="reqs">${recent.map((ev) => `<li><time datetime="${new Date(ev.at).toISOString()}">${ago(ev.at, now)}</time><span class="what"><strong>${e(ev.tool || ev.method || ev.kind)}</strong>${ev.accountId ? ` <span class="muted">via ${e(label.get(ev.accountId) ?? ev.accountId)}</span>` : ""}${ev.outcome === "error" ? ` <span class="err">${e(ev.status ?? ev.errorClass ?? "error")}</span>` : ev.status ? ` <span class="muted">${e(ev.status)}</span>` : ""}${ev.retries ? ` <span class="muted">· ${ev.retries} retr${ev.retries === 1 ? "y" : "ies"}</span>` : ""}</span><span class="lat">${ev.latencyMs !== undefined ? `${Math.round(ev.latencyMs)} ms` : ""}</span></li>`).join("")}</ol>` : `<p class="empty">No requests observed since this gateway process started.</p>`;
+  return `<header class="ops-head"><div><div class="eyebrow">Gateway overview</div><h1>Credential gateway</h1><div class="verdict"><span class="dot ${verdict[0]}"></span>${e(verdict[1])}</div></div><div class="actions"><a class="btn" href="${e(input.base)}/admin/supervisor">Open supervisor</a><a class="btn secondary" href="#accounts">Accounts</a><a class="btn secondary" href="#settings">Routing settings</a></div></header>${ledger}<section class="grid"><div class="card wide"><div class="eyebrow">Routing, as configured now</div>${narrative}${bar}</div><div class="card"><div class="eyebrow">Recent requests</div>${list}</div></section>`;
 }
 
 function emptySummary(): GatewaySummary {
