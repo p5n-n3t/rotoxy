@@ -17,6 +17,7 @@ const safe=x=>typeof x==='string'&&/^[A-Za-z0-9_.:-]{1,160}$/.test(x);
 if(!Array.isArray(cfg.workers)||cfg.workers.length>1000||!cfg.workers.every(w=>['id','accountId','sessionId','owner','job'].every(k=>safe(w[k])))||
     new Set(cfg.workers.map(w=>w.id)).size!==cfg.workers.length||!Number.isInteger(cfg.intervalSeconds)||cfg.intervalSeconds<60||cfg.intervalSeconds>3600)throw Error('invalid_config');
 for(const k of ['inboxDb','poolConfig','poolDb'])if(typeof cfg[k]!=='string'||!cfg[k].startsWith('/'))throw Error('absolute_private_paths_required');
+if(cfg.recoveryServiceConfig!==undefined&&(typeof cfg.recoveryServiceConfig!=='string'||!cfg.recoveryServiceConfig.startsWith('/')))throw Error('absolute_private_paths_required');
 const store=new StateStore();
 let stopping=false;
 process.on('SIGTERM',()=>{stopping=true;});process.on('SIGINT',()=>{stopping=true;});
@@ -29,6 +30,14 @@ function python(command,item){return new Promise((yes,no)=>{
   p.on('error',()=>{clearTimeout(timer);no(Error('guidance_unavailable'));});
   p.on('exit',code=>{clearTimeout(timer);if(code!==0)no(Error('guidance_failed'));else{try{yes(JSON.parse(out));}catch{no(Error('guidance_invalid_receipt'));}}});
   p.stdin.on('error',()=>{});p.stdin.end(item?JSON.stringify(item):'');
+});}
+function recoveryOnce(){return new Promise((yes,no)=>{
+  const p=spawn('/usr/bin/python3',['-m','snooze.recovery_service','--config',cfg.recoveryServiceConfig,'--once'],
+    {cwd:root,env:{...process.env,PYTHONPATH:resolve(root,'supervisor')},stdio:['ignore','pipe','ignore']});
+  let out='',size=0;const timer=setTimeout(()=>p.kill('SIGKILL'),30000);
+  p.stdout.on('data',b=>{size+=b.length;if(size>16384)p.kill('SIGKILL');else out+=b;});
+  p.on('error',()=>{clearTimeout(timer);no(Error('recovery_service_unavailable'));});
+  p.on('exit',code=>{clearTimeout(timer);if(code!==0)no(Error('recovery_service_failed'));else{try{yes(JSON.parse(out));}catch{no(Error('recovery_service_invalid_receipt'));}}});
 });}
 async function observation(worker,state){
   const account=state.accounts.find(a=>a.id===worker.accountId);
@@ -58,15 +67,21 @@ async function check(){
   const workers=[...cfg.workers,...(Array.isArray(registered?.workers)?registered.workers.filter(w=>
     ['id','project','owner','account_id','session_id'].every(k=>safe(w[k]))
   ).map(w=>({id:w.id,projectId:w.project,owner:w.owner,accountId:w.account_id,sessionId:w.session_id,job:w.project})):[])];
-  const unique=[...new Map(workers.map(w=>[`${w.owner}:${w.job}:${w.sessionId}`,w])).values()];
+  // One provider status read per account/session; each owner still receives a
+  // separately scoped inbox observation after the shared result is fetched.
+  const groups=new Map();
+  for(const worker of workers){const key=JSON.stringify([worker.accountId,worker.sessionId]);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(worker);}
+  const unique=[...groups.values()];
   for(let i=0;i<unique.length&&!stopping;i+=3){
-    await Promise.all(unique.slice(i,i+3).map(async worker=>{
-      let o;try{o=await observation(worker,state);}catch{o={state:'unavailable'};errors++;}
-      await python('observe',{worker:worker.id,observation:o,owner:worker.owner,job:worker.job});checked++;
+    await Promise.all(unique.slice(i,i+3).map(async group=>{
+      const representative=group[0];let o;try{o=await observation(representative,state);}catch{o={state:'unavailable'};errors++;}
+      await Promise.all(group.map(worker=>python('observe',{worker:worker.id,observation:o,owner:worker.owner,job:worker.job})));
+      checked+=group.length;
     }));
   }
   const guide=cfg.guide===true?await python('guide'):undefined;
-  console.log(JSON.stringify({at:new Date().toISOString(),checked,statusErrors:errors,guidanceSubmitted:guide?.submitted??0}));
+  const recovery=cfg.recoveryServiceConfig?await recoveryOnce():undefined;
+  console.log(JSON.stringify({at:new Date().toISOString(),checked,statusErrors:errors,guidanceSubmitted:guide?.submitted??0,recoveryProcessed:recovery?.processed??0}));
 }
 do{
   try{await check();}catch{console.error(JSON.stringify({at:new Date().toISOString(),error:'monitor_check_failed'}));if(process.argv.includes('--once'))process.exitCode=1;}
