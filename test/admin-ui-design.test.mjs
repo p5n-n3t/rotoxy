@@ -43,3 +43,51 @@ test("mobile rules keep forms single-column and nav scrollable without hiding ov
   // No sub-12px body text.
   for (const m of css.matchAll(/font-size:(\d+(?:\.\d+)?)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
 });
+
+import { renderOverview, accountBuckets } from "../dist/ui.js";
+import { TelemetryRecorder } from "../dist/telemetry.js";
+
+const acct = (id, state, enabled = true, extra = {}) => ({ id, label: `Acct ${id}`, enabled, state, requests: 0, successes: 0, failures: 0, ...extra });
+const base = { base: "https://gw.example", strategy: "adaptive-sticky", upstreamUrl: "https://mcp.provider.example/mcp", maxFailoverAttempts: 3, now: 1_000_000 };
+
+test("account buckets: disabled wins, ready counts healthy, exhausted/cooldown are depleted", () => {
+  assert.deepEqual(accountBuckets([acct("a", "healthy"), acct("b", "ready"), acct("c", "exhausted"), acct("d", "cooldown"), acct("e", "auth-failed"), acct("f", "healthy", false), acct("g", "unknown")]),
+    { healthy: 2, depleted: 2, failing: 1, disabled: 1, unknown: 1 });
+});
+
+test("overview leads with operational verdict and keeps unobserved telemetry and quota unknown, never zero", () => {
+  const html = renderOverview({ ...base, accounts: [acct("a", "healthy"), acct("b", "cooldown")] });
+  assert.match(html, /<h1>Credential gateway<\/h1>/);
+  assert.match(html, /1 of 2 credentials can route; 1 need attention/);
+  assert.match(html, /href="https:\/\/gw\.example\/admin\/supervisor"/);
+  assert.match(html, /Requests seen<\/dt><dd class="">Not observed yet/);
+  assert.match(html, /Latency<\/dt><dd class="unknown">Not observed/);
+  assert.match(html, /Quota \/ capacity<\/dt><dd class="unknown">Unknown/);
+  assert.match(html, /No requests observed since this gateway process started/);
+  assert.match(html, /one MCP connection<\/strong>/);
+  assert.match(html, /mcp\.provider\.example/);
+  assert.match(html, /1<\/strong> is waiting out a quota cooldown/);
+  assert.doesNotMatch(html, />0(\.0)?%|>0 ms/);
+});
+
+test("overview with no credentials says so instead of drawing an empty bar", () => {
+  const html = renderOverview({ ...base, accounts: [] });
+  assert.match(html, /No credentials in the pool/);
+  assert.match(html, /Routable<\/dt><dd class="bad">None/);
+  assert.doesNotMatch(html, /class="bar"/);
+});
+
+test("overview uses real telemetry: success rate, latency percentiles and recent requests with account labels", () => {
+  const t = new TelemetryRecorder();
+  t.recordGateway({ kind: "request", at: 999_000, method: "tools/call", tool: "web_search_exa", accountId: "a", status: 200, latencyMs: 120 });
+  t.recordGateway({ kind: "request", at: 999_500, method: "tools/call", tool: "<b>x</b>", accountId: "a", status: 429, latencyMs: 300, retries: 1 });
+  const html = renderOverview({ ...base, accounts: [acct("a", "healthy")], summary: t.summary(), recent: t.recent({ limit: 10 }) });
+  assert.match(html, /Requests seen<\/dt><dd class="">2</);
+  assert.match(html, /50\.0%/);
+  assert.match(html, /1 ok · 1 errors · 1 retries/);
+  assert.match(html, /Latency p50 \/ p95<\/dt><dd class="">120/);
+  assert.match(html, /<strong>web_search_exa<\/strong> <span class="muted">via Acct a<\/span>/);
+  assert.match(html, /class="err">429/);
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
+  assert.doesNotMatch(html, /<b>x<\/b>/);
+});
