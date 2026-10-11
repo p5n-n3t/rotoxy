@@ -1,0 +1,238 @@
+{
+  "verifiedAt": "2026-10-12",
+  "scope": "controlled authorized development batch",
+  "workers": [
+    {
+      "assignmentId": "T2O-W2-UI",
+      "branch": "codex/t2o-w2-ui-opus-20261012",
+      "model": "claude-opus-5-5",
+      "actualModel": "claude-opus-5-5",
+      "status": "stopped",
+      "seenRunning": true,
+      "observedCostDeltaUsd": 2.0198220000000005
+    },
+    {
+      "assignmentId": "T2O-W2-ORACLE",
+      "branch": "codex/t2o-w2-oracle-pool-20261012",
+      "model": "gpt-6-luna",
+      "actualModel": "gpt-6-luna",
+      "status": "idle-needs-review",
+      "seenRunning": true,
+      "observedCostDeltaUsd": 0.06816200000000006
+    },
+    {
+      "assignmentId": "T2O-W2-SUPERVISION",
+      "branch": "codex/t2o-w2-supervision-recovery-20261012",
+      "model": "gpt-6-luna",
+      "actualModel": "gpt-6-luna",
+      "status": "returned-unvalidated",
+      "seenRunning": true,
+      "observedCostDeltaUsd": 0.10328700000000002
+    },
+    {
+      "assignmentId": "T2O-W2-CLIENTS",
+      "branch": "codex/t2o-w2-client-setup-20261012",
+      "model": "gpt-6-luna",
+      "actualModel": "gpt-6-luna",
+      "status": "idle-needs-review",
+      "seenRunning": true,
+      "observedCostDeltaUsd": 0.10828000000000004
+    },
+    {
+      "assignmentId": "T2O-W2-SCHEDULER",
+      "branch": "codex/t2o-w2-scheduler-controls-20261012",
+      "model": "gpt-6-luna",
+      "actualModel": "gpt-6-luna",
+      "status": "idle-needs-review",
+      "seenRunning": true,
+      "observedCostDeltaUsd": 0.08368200000000003
+    },
+    {
+      "assignmentId": "T2O-W2-ANALYTICS",
+      "branch": "codex/t2o-w2-analytics-20261012",
+      "model": "gpt-6-luna",
+      "actualModel": "gpt-6-luna",
+      "status": "idle-needs-review",
+      "seenRunning": true,
+      "observedCostDeltaUsd": 0.162215
+    },
+    {
+      "assignmentId": "T2O-W2-PROVIDERS",
+      "branch": "codex/t2o-w2-search-tools-20261012",
+      "model": "gpt-6-luna",
+      "actualModel": "gpt-6-luna",
+      "status": "returned-unvalidated",
+      "seenRunning": true,
+      "observedCostDeltaUsd": 0.12307200000000001
+    },
+    {
+      "assignmentId": "T2O-W2-RELEASE",
+      "branch": "codex/t2o-w2-release-review-20261012",
+      "model": "gpt-6-luna",
+      "actualModel": "gpt-6-luna",
+      "status": "returned-unvalidated",
+      "seenRunning": true,
+      "observedCostDeltaUsd": 0.110368
+    }
+  ],
+  "observedOverlap": 8,
+  "distinctAccounts": 4,
+  "sessionsPerAccountObserved": 2,
+  "capacityClaim": false,
+  "limitations": [
+    "Eight observed running sessions is not the provider concurrency ceiling.",
+    "24 and 35 workers not tested.",
+    "Provisional provider USD costs are not native credit debits.",
+    "Returned commits were reviewed and integrated separately."
+  ],
+  "oracleGateway": {
+    "test": "real OAuth MCP-to-Oracle completion; ephemeral isolated gateway auth store",
+    "startedAt": "2026-10-11T23:38:39.639Z",
+    "jobs": [
+      {
+        "jobId": "T2O-W2-ORACLE-E2E-0",
+        "submitted": {
+          "jobId": "T2O-W2-ORACLE-E2E-0",
+          "state": "queued",
+          "model": "qwen3.5:9b",
+          "attempts": 0,
+          "createdAt": 1791761921.3288817,
+          "updatedAt": 1791761921.3288817
+        },
+        "status": {
+          "jobId": "T2O-W2-ORACLE-E2E-0",
+          "state": "complete",
+          "model": "qwen3.5:9b",
+          "host": "ora3",
+          "actualModel": "qwen3.5:9b",
+          "attempts": 1,
+          "promptTokens": 25,
+          "evalTokens": 8,
+          "createdAt": 1791761921.3288817,
+          "updatedAt": 1791761942.561376,
+          "remoteSeconds": 13.351469214,
+          "elapsedSeconds": 19.789813670999138
+        },
+        "result": {
+          "jobId": "T2O-W2-ORACLE-E2E-0",
+          "state": "complete",
+          "model": "qwen3.5:9b",
+          "host": "ora3",
+          "actualModel": "qwen3.5:9b",
+          "attempts": 1,
+          "promptTokens": 25,
+          "evalTokens": 8,
+          "createdAt": 1791761921.3288817,
+          "updatedAt": 1791761942.561376,
+          "remoteSeconds": 13.351469214,
+          "elapsedSeconds": 19.789813670999138,
+          "result": "ORACLE_GATEWAY_OK_0"
+        }
+      },
+      {
+        "jobId": "T2O-W2-ORACLE-E2E-1",
+        "submitted": {
+          "jobId": "T2O-W2-ORACLE-E2E-1",
+          "state": "queued",
+          "model": "qwen3.5:9b",
+          "attempts": 0,
+          "createdAt": 1791761923.0042083,
+          "updatedAt": 1791761923.0042083
+        },
+        "status": {
+          "jobId": "T2O-W2-ORACLE-E2E-1",
+          "state": "complete",
+          "model": "qwen3.5:9b",
+          "host": "ora5",
+          "actualModel": "qwen3.5:9b",
+          "attempts": 1,
+          "promptTokens": 25,
+          "evalTokens": 8,
+          "createdAt": 1791761923.0042083,
+          "updatedAt": 1791761962.5113227,
+          "remoteSeconds": 14.551397434,
+          "elapsedSeconds": 19.911309160997916
+        },
+        "result": {
+          "jobId": "T2O-W2-ORACLE-E2E-1",
+          "state": "complete",
+          "model": "qwen3.5:9b",
+          "host": "ora5",
+          "actualModel": "qwen3.5:9b",
+          "attempts": 1,
+          "promptTokens": 25,
+          "evalTokens": 8,
+          "createdAt": 1791761923.0042083,
+          "updatedAt": 1791761962.5113227,
+          "remoteSeconds": 14.551397434,
+          "elapsedSeconds": 19.911309160997916,
+          "result": "ORACLE_GATEWAY_OK_1"
+        }
+      },
+      {
+        "jobId": "T2O-W2-ORACLE-E2E-2",
+        "submitted": {
+          "jobId": "T2O-W2-ORACLE-E2E-2",
+          "state": "queued",
+          "model": "qwen3.5:9b",
+          "attempts": 0,
+          "createdAt": 1791761925.0425854,
+          "updatedAt": 1791761925.0425854
+        },
+        "status": {
+          "jobId": "T2O-W2-ORACLE-E2E-2",
+          "state": "complete",
+          "model": "qwen3.5:9b",
+          "host": "ora1",
+          "actualModel": "qwen3.5:9b",
+          "attempts": 1,
+          "promptTokens": 25,
+          "evalTokens": 8,
+          "createdAt": 1791761925.0425854,
+          "updatedAt": 1791761960.0504942,
+          "remoteSeconds": 13.690400982,
+          "elapsedSeconds": 17.337445526005467
+        },
+        "result": {
+          "jobId": "T2O-W2-ORACLE-E2E-2",
+          "state": "complete",
+          "model": "qwen3.5:9b",
+          "host": "ora1",
+          "actualModel": "qwen3.5:9b",
+          "attempts": 1,
+          "promptTokens": 25,
+          "evalTokens": 8,
+          "createdAt": 1791761925.0425854,
+          "updatedAt": 1791761960.0504942,
+          "remoteSeconds": 13.690400982,
+          "elapsedSeconds": 17.337445526005467,
+          "result": "ORACLE_GATEWAY_OK_2"
+        }
+      }
+    ],
+    "initialize": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+        "tools": {
+          "listChanged": false
+        }
+      },
+      "serverInfo": {
+        "name": "Token2OAuth",
+        "version": "0.2.0"
+      }
+    },
+    "tools": [
+      "oracle_catalog",
+      "oracle_submit",
+      "oracle_status",
+      "oracle_result"
+    ],
+    "crossCaller": {
+      "error": -32000,
+      "message": "command_failed"
+    },
+    "ok": true,
+    "finishedAt": "2026-10-11T23:39:34.187Z"
+  }
+}

@@ -193,7 +193,7 @@ export class McpProxy {
     // policy/pool selection. Exact names never fall through to an upstream.
     if (await this.interceptJobCalls(req, res, rpc, claims, startedAt, record)) return;
     const localJobTools = await this.availableJobTools(claims);
-    if (!state.config.upstreamUrl && (this.supervisor.enabled || this.oracle || this.webTools) &&
+    if (!state.config.upstreamUrl && (localJobTools.length > 0 || this.webTools) && (this.supervisor.enabled || this.oracle || this.webTools) &&
         await this.serveLocalJobDiscovery(req, res, rpc, localJobTools, record)) return;
     if (!state.config.upstreamUrl) {
       record({ status: 503, attempts: 0, errorClass: "upstream-not-configured" });

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, chmod, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, chmod, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore } from "../dist/store.js";
@@ -22,6 +22,9 @@ test("private web binding is opt-in, caller-scoped, provider-identified, and nev
   const path = join(dir, "web-tools.json");
   await writeFile(path, JSON.stringify({ providers: { exa: { enabled: true, accountId: account.id, features: { search: "supported", extract: "unknown" } }, tavily: { enabled: false, features: { search: "supported" } } }, permissions: { clients: { "oauth-a": ["web_search"] } } }), { mode: 0o600 });
   await chmod(path, 0o600);
+  const linked = join(dir, "linked.json");
+  await symlink(path, linked);
+  await assert.rejects(loadWebToolsConfig(linked, store), /owner-private/);
   let calls = 0;
   let revealed = 0;
   const configured = await loadWebToolsConfig(path, {

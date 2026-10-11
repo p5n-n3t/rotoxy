@@ -12,6 +12,14 @@ import {
   isAllowedSupervisorRoute,
 } from "../dist/supervisor-bridge.js";
 
+test("project control routes permit exact IDs without traversal or queries", () => {
+  for (const method of ["GET", "POST"]) {
+    assert.equal(isAllowedSupervisorRoute(method, "/admin/api/v1/projects/project-a/control"), true);
+    assert.equal(isAllowedSupervisorRoute(method, "/admin/api/v1/projects/project-a/control?global=true"), false);
+    assert.equal(isAllowedSupervisorRoute(method, "/admin/api/v1/projects/../control"), false);
+  }
+});
+
 async function fixture({ handler, httpClient, startupTimeoutMs = 300 } = {}) {
   const configDir = await mkdtemp(join(tmpdir(), "t2o-supervisor-"));
   const supervisorCwd = join(configDir, "supervisor");

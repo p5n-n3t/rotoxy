@@ -17,7 +17,9 @@ test("published tarball includes install, runtime, and rollback guidance", async
     readFile(new URL("package.json", root), "utf8").then(JSON.parse),
     Promise.resolve(execFileSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], { encoding: "utf8" })).then(JSON.parse),
   ]);
-  const metadata = Array.isArray(packed) ? packed[0] : packed;
+  const metadata = (Array.isArray(packed) ? packed : [packed, ...Object.values(packed ?? {})])
+    .find((row) => row && Array.isArray(row.files));
+  assert.ok(metadata, "npm pack must provide a file inventory");
   assert.equal(manifest.bin.token2oauth, "dist/cli.js");
   const files = new Set(metadata.files.map((file) => file.path));
   for (const required of [

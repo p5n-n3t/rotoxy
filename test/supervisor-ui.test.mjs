@@ -4,6 +4,16 @@ import vm from "node:vm";
 import { normalizeSupervisorSnapshot, renderSupervisorDashboard } from "../dist/supervisor-ui.js";
 import { normalizeSupervisionInbox } from "../dist/admin.js";
 
+test("dispatch controls retain mounted paths and render only authoritative revision data", () => {
+  const snapshot = normalizeSupervisorSnapshot({ projectControl: { projectId: "project-a", state: "paused", revision: 4, maxConcurrency: 3, activeTaskCount: 1 } });
+  const html = renderSupervisorDashboard(snapshot, { nonce: "n", csrfToken: "csrf", liveFeedUrl: "/token2oauth/admin/api/v1/supervisor/project-a/live" });
+  assert.match(html, /data-endpoint="\/token2oauth\/admin\/api\/v1\/supervisor\/control"/);
+  assert.match(html, /data-revision="4"/);
+  assert.match(html, /\/token2oauth\/admin\/api\/v1\/supervisor\/project-a\/inbox/);
+  assert.match(html, /x-csrf-token/);
+  assert.match(html, /do not cancel in-flight work/);
+});
+
 test("renders nested workforce hierarchy with native keyboard disclosures", () => {
   const html = renderSupervisorDashboard({ providers: [{ id: "p", label: "Provider", status: "healthy", accounts: [{ id: "a", label: "Account", status: "ready", workspaces: [{ id: "w", label: "Workspace", workers: [{ id: "worker-1", status: "working" }] }] }] }] });
   assert.match(html, /<details class="distribution"><summary><span class="provider-title">Provider/);

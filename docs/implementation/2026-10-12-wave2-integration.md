@@ -1,0 +1,15 @@
+# Cloud workforce integration checkpoint — 2026-10-12
+
+Eight real LightSprint workers were observed running together on four accounts, two sessions per account. Claude Opus 5.5 performed UI/brand work using the Impeccable specialist brief; seven GPT-6 Luna workers owned Oracle scheduling, persistent recovery, client backups, job profiles, analytics, web tools, and release review. Three further Luna workers connected runtime controls, recovery consumption, and MCP/CLI/admin APIs. All branches were cherry-picked into the integration branch; no provider was purchased or topped up.
+
+The primary administration screen now leads with measured operational information and moves configuration into disclosures. Shared branding includes SVG marks, a favicon, light/dark themes, reduced-motion behavior, and native keyboard disclosures. Desktop and mobile were rendered headlessly. The supervisor displays registered model names, expandable accounts/workspaces/workers, durable inbox events, and project dispatch controls. Unknown quotas and provider capacity remain unknown.
+
+The Oracle queue supports atomic independent-task batches, fair assignment, model-catalog eligibility, queued cancellation, and durable results. Three actual OAuth-authenticated MCP submissions completed across ora1/ora3/ora5; another OAuth client could not retrieve them. This test used an isolated loopback gateway with the real queue and VMs. These VMs execute model prompts, not autonomous repository shells. Independent jobs can be balanced; a single prompt is not automatically divisible into equal work.
+
+Recovery now consumes registered inbox events with a durable cursor and restart-safe receipts. A synthetic failed-worker incident produced exactly one durable recovery event; a second pass processed zero duplicates, and the resulting Oracle diagnostic completed on ora3. Oracle recommendations remain advisory. The service provides no automatic cloud/headless action adapter, and cannot wake a dormant ChatGPT conversation. Pending decisions survive the chat.
+
+Search/extract MCP tools support explicit Exa/Firecrawl/Tavily bindings and exact client scopes. Provider credentials have not been connected or tested live in this checkpoint; tools remain disabled without explicit private configuration. Analytics API projects bounded real telemetry; unsupported dimensions are labeled unavailable. Client configuration backups preserve exact bytes and modes; restoration is guarded and the CLI currently previews it.
+
+Credit admission is wired to paid reservations when its private strict config is enabled. Unverified native cost ceilings deny dispatch. A manual balance or provisional USD metric is not an enforceable credit cap. Production should enable strict admission; approved bounded development batches are separate explicit operator exceptions.
+
+Remaining roadmap work includes additional workspace/provider integrations, automatic task decomposition/integration, verified 24/35 concurrency, fuller analytics/client-setup UI, and supported headless resumption with a real budget verifier. Do not treat these commits as completion of the entire master directive.

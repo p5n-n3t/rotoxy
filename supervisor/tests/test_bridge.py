@@ -103,6 +103,19 @@ class PrivateBridgeTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["accountId"], "account-b")
 
+    def test_project_controls_cross_bridge_with_revision_fence_and_isolation(self):
+        route = "/admin/api/v1/projects/project-a/control"
+        status, initial = call(str(self.socket_path), bearer=self.bearer, route=route)
+        self.assertEqual(status, 200)
+        request = {"action": "pause_dispatch", "expectedRevision": initial["revision"]}
+        status, changed = call(str(self.socket_path), method="POST", bearer=self.bearer, route=route, body=request)
+        self.assertEqual(status, 202)
+        self.assertTrue(changed["paused"])
+        self.assertEqual(call(str(self.socket_path), method="POST", bearer=self.bearer, route=route, body=request)[0], 409)
+        self.assertEqual(call(str(self.socket_path), bearer=self.bearer, route="/admin/api/v1/projects/project-b/control")[1]["paused"], False)
+        self.assertEqual(call(str(self.socket_path), method="POST", bearer=self.bearer, route=route,
+                              body={**request, "unexpected": True})[0], 400)
+
     def test_owner_client_scope_is_exact_and_missing_scope_cannot_read_or_cancel(self):
         def submit(identifier, key, *, owner=None, client=None):
             body = assignment()

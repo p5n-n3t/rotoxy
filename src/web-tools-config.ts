@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, lstat } from "node:fs/promises";
 import { WebTools, WEB_TOOL_DEFINITIONS, WebToolError, type WebProviderName, type WebFeature, type FeatureCapability, type WebToolName } from "./web-tools.js";
 import type { StateStore } from "./store.js";
 
@@ -39,8 +39,8 @@ function validate(value: unknown): PrivateConfig {
 /** Reads only an explicitly supplied, owner-private mapping. No credentials are stored in this file. */
 export async function loadWebToolsConfig(path: string | undefined, store: StateStore, options: { fetch?: typeof globalThis.fetch } = {}) {
   if (!path) return undefined;
-  const info = await stat(path);
-  if (!info.isFile() || (info.mode & 0o077) !== 0) throw new Error("Web tools config must be a private regular file (mode 0600 or stricter).");
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0 || info.size > 128 * 1024) throw new Error("Web tools config must be an owner-private regular file (mode 0600 or stricter).");
   const config = validate(JSON.parse(await readFile(path, "utf8")));
   const facade = new WebTools({
     config: { providers: config.providers },

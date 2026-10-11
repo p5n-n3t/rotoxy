@@ -244,6 +244,23 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 admission = registry.credit_admission
                 self._reply(200, admission.status() if admission is not None else {"mode": "legacy", "accounts": []})
                 return
+            project_control = re.fullmatch(r"/admin/api/v1/projects/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})/control", route)
+            if project_control:
+                project = project_control.group(1)
+                if self.command == "GET":
+                    if query:
+                        raise ValueError("Unexpected control query")
+                    self._reply(200, registry.get_project_control(project))
+                    return
+                if self.command == "POST":
+                    body = self._body()
+                    keys = {"action", "expectedRevision"}
+                    if body.get("action") == "set_concurrency":
+                        keys.add("value")
+                    if query or set(body) != keys:
+                        raise ValueError("Invalid project control request")
+                    self._reply(202, registry.set_project_control(project, body["action"], body.get("value"), body["expectedRevision"]))
+                    return
             if self.command == "POST" and route == "/admin/api/v1/control":
                 body = self._body()
                 if set(body) != {"action", "value", "expectedRevision"}:

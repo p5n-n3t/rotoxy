@@ -114,10 +114,11 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
   const requireAdmin = adminSession;
   const requireAdminPage = async (req: Request, res: Response, next: NextFunction) => {
     const state = await store.load();
+    res.locals.supervisorBase = new URL(state.config.publicBaseUrl).pathname.replace(/\/$/, "");
     const token = parseCookies(req.headers.cookie)["t2o_admin"];
     if (!sessions.valid(token, adminEpoch(state))) {
       const nextPath = req.originalUrl;
-      return res.redirect(302, "/admin/login?next=" + encodeURIComponent(nextPath));
+      return res.redirect(302, res.locals.supervisorBase + "/admin/login?next=" + encodeURIComponent(nextPath));
     }
     res.locals.supervisorAdminToken = token;
     res.locals.supervisorCsrf = sessions.csrfToken(token);
@@ -151,7 +152,7 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
   router.get("/admin/supervisor", requireAdminPage, (_req, res) => {
     const projects = (backend?.listProjects?.() ?? []).filter(id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)).slice(0, 50);
     const content = projects.length ? `<ul>${projects.map(id => `<li><a href="./supervisor/${encodeURIComponent(id)}">${esc(id)}</a></li>`).join("")}</ul>` : '<p class="muted">No supervised projects are configured. Configure the private supervisor runtime to connect this view.</p>';
-    res.type("html").send(page("Supervisor", withCsrf(`<main class="wrap">${adminNav("", "supervisor")}<section class="card full"><h1>Supervised projects</h1>${content}</section></main>`, res.locals.supervisorCsrf ?? "")));
+    res.type("html").send(page("Supervisor", withCsrf(`<main class="wrap">${adminNav(res.locals.supervisorBase, "supervisor")}<section class="card full"><h1>Supervised projects</h1>${content}</section></main>`, res.locals.supervisorCsrf ?? "")));
   });
 
   router.get("/admin/supervisor/:projectId", requireAdminPage, async (req, res) => {
@@ -172,7 +173,7 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
       const html = renderSupervisorDashboard({ state: "error", error: "Snapshot is unavailable or exceeds the display limit." }, dashboardOptions(req, res.locals.supervisorNonce, res.locals.supervisorCsrf, undefined, projectId));
       return res.status(502).type("html").send(html);
     }
-    const feedUrl = `/admin/api/v1/supervisor/${encodeURIComponent(projectId)}/live`;
+    const feedUrl = `${res.locals.supervisorBase}/admin/api/v1/supervisor/${encodeURIComponent(projectId)}/live`;
     const html = renderSupervisorDashboard(normalizeSupervisorSnapshot(safe.value), dashboardOptions(req, res.locals.supervisorNonce, res.locals.supervisorCsrf, feedUrl, projectId));
     return res.type("html").send(html);
   });
@@ -238,7 +239,8 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
       return res.status(400).json({ error: "invalid_control_request" });
     }
     try {
-      const result = await backend.controlAdmin(body as SupervisorControlInput);
+      const result = await backend.controlAdmin({ projectId: body.projectId, action: body.action as SupervisorControlAction,
+        expectedRevision: Number(body.expectedRevision), ...(concurrencyAction ? { value: Number(body.value) } : {}) });
       return res.json(result);
     } catch { return res.status(409).json({ error: "control_conflict" }); }
   });

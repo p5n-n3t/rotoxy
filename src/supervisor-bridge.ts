@@ -123,6 +123,8 @@ export function isAllowedSupervisorRoute(method: string, route: string): boolean
   if (parsed.origin !== "http://supervisor.invalid" || parsed.hash || parsed.username || parsed.password) return false;
   const path = parsed.pathname;
   let allowedQuery: string[] = [];
+  const projectControl = path.match(/^\/admin\/api\/v1\/projects\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/control$/);
+  if (projectControl) return parsed.search === "";
 
   if (path === "/admin/api/v1/credit-admission" && method === "GET") return parsed.search === "";
   if (path === "/admin/api/v1/assignments" && method === "POST") return parsed.search === "";

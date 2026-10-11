@@ -5,11 +5,12 @@ from pathlib import Path
 
 
 class InstallerTests(unittest.TestCase):
+    installer = Path(__file__).resolve().parents[1] / 'install.sh'
     def run_installer(self,*args):
-        return subprocess.run(['bash','install.sh',*args],capture_output=True,text=True,timeout=5)
+        return subprocess.run(['bash',str(self.installer),*args],capture_output=True,text=True,timeout=5)
 
     def test_help_and_shell_syntax(self):
-        self.assertEqual(subprocess.run(['bash','-n','install.sh']).returncode,0)
+        self.assertEqual(subprocess.run(['bash','-n',str(self.installer)]).returncode,0)
         result=self.run_installer('--help')
         self.assertEqual(result.returncode,0);self.assertIn('--state',result.stdout)
 
