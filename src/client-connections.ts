@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readFile, lstat, realpath, rename, unlink } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type LocalMcpClient = "claude-code" | "codex";
 export type ClientCommandRunner = (command: string, args: string[]) => Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
@@ -22,6 +24,21 @@ export interface ClientConnectionsOptions {
   homeDir?: string;
   backupDir?: string;
   now?: () => number;
+}
+
+const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
+const MAX_BACKUP_BYTES = 3 * 1024 * 1024;
+type ConfigState = { exists: false } | { exists: true; bytes: Buffer; mode: number };
+interface ExactConfigBackup {
+  schema: 1;
+  client: LocalMcpClient;
+  configPath: string;
+  action: "add" | "remove";
+  name: string;
+  createdAt: string;
+  original: { exists: false } | { exists: true; mode: number; contentBase64: string };
+  expectedAfter?: { exists: false } | { exists: true; sha256: string };
+  restoredAt?: string;
 }
 
 const CLIENTS: Record<LocalMcpClient, { label: string; executable: string; configPath: (home: string) => string }> = {
@@ -84,48 +101,89 @@ async function readMcpConfig(client: LocalMcpClient, homeDir: string): Promise<{
   }
 }
 
-function safeEndpoint(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
+function ownedByCurrentUser(info: { uid?: number }): boolean {
+  return process.platform === "win32" || typeof process.getuid !== "function" || info.uid === process.getuid();
+}
+
+async function ensurePrivateBackupDir(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isDirectory() || !ownedByCurrentUser(info) || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
+    throw new Error("Client config backup directory must be a real owner-only directory.");
+  }
+  if (await realpath(path) !== resolve(path)) throw new Error("Client config backup directory must not traverse symbolic links.");
+}
+
+async function exactConfigState(client: LocalMcpClient, homeDir: string): Promise<ConfigState> {
+  const path = CLIENTS[client].configPath(homeDir);
+  let info;
+  try { info = await lstat(path); }
+  catch (error: any) { if (error?.code === "ENOENT") return { exists: false }; throw new Error(`Cannot inspect ${CLIENTS[client].label} config file (${error?.code || "read error"}).`); }
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error(`${CLIENTS[client].label} config must be a regular non-symlink file before backup or restore.`);
+  if (info.size > MAX_CONFIG_BYTES) throw new Error(`${CLIENTS[client].label} config exceeds the 2 MiB exact-backup limit.`);
+  if (!ownedByCurrentUser(info)) throw new Error(`${CLIENTS[client].label} config is not owned by the current user.`);
+  let handle;
   try {
-    const url = new URL(value);
-    if (!/^https?:$/.test(url.protocol) || url.username || url.password) return undefined;
-    return url.origin;
-  } catch { return undefined; }
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size > MAX_CONFIG_BYTES) throw new Error(`${CLIENTS[client].label} config changed or exceeds the exact-backup limit.`);
+    const bytes = await handle.readFile();
+    if (bytes.byteLength > MAX_CONFIG_BYTES) throw new Error(`${CLIENTS[client].label} config exceeds the exact-backup limit.`);
+    return { exists: true, bytes, mode: info.mode & 0o777 };
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return { exists: false };
+    throw error instanceof Error && error.message.includes("config") ? error : new Error(`Cannot safely read ${CLIENTS[client].label} config (${error?.code || "read error"}).`);
+  } finally { await handle?.close(); }
 }
 
-function safeSnapshot(client: LocalMcpClient, configText: string, names: string[]): object {
-  const servers = names.map((name) => {
-    let transport = "unknown";
-    let endpoint: string | undefined;
-    if (client === "claude-code") {
-      try {
-        const config = JSON.parse(configText) as { mcpServers?: Record<string, any> };
-        const server = config.mcpServers?.[name];
-        if (server && typeof server === "object") {
-          transport = ["http", "sse", "stdio"].includes(server.type) ? server.type : (typeof server.command === "string" ? "stdio" : "unknown");
-          endpoint = safeEndpoint(server.url);
-        }
-      } catch { /* names already parsed; leave endpoint unknown */ }
-    } else {
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const section = new RegExp(`^\\s*\\[mcp_servers\\.(?:"${escaped}"|'${escaped}'|${escaped})\\]\\s*(?:#.*)?$([\\s\\S]*?)(?=^\\s*\\[|$(?![\\s\\S]))`, "m").exec(configText)?.[1] ?? "";
-      const match = /^\s*url\s*=\s*(["'])(.*?)\1\s*(?:#.*)?$/m.exec(section);
-      endpoint = safeEndpoint(match?.[2]);
-      transport = endpoint ? "http" : "stdio-or-unknown";
-    }
-    return { name, transport, ...(endpoint ? { endpoint } : {}) };
-  });
-  return { schema: 1, client, capturedAt: new Date().toISOString(), servers };
+function stateFingerprint(state: ConfigState): { exists: false } | { exists: true; sha256: string } {
+  return state.exists ? { exists: true, sha256: createHash("sha256").update(state.bytes).digest("hex") } : { exists: false };
 }
 
-async function createSafeBackup(client: LocalMcpClient, options: Required<Pick<ClientConnectionsOptions, "homeDir" | "backupDir" | "now">>): Promise<string | undefined> {
-  const config = await readMcpConfig(client, options.homeDir);
-  if (!config.exists) return undefined;
-  const snapshot = safeSnapshot(client, config.text, config.names);
-  const path = join(options.backupDir, `${options.now()}-${client}-mcp.json`);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, JSON.stringify(snapshot, null, 2) + "\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
-  return path;
+async function writeNewPrivateFile(path: string, text: string): Promise<void> {
+  const handle = await open(path, "wx", 0o600);
+  try { await handle.writeFile(text, "utf8"); await handle.sync(); }
+  finally { await handle.close(); }
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isFile() || !ownedByCurrentUser(info) || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
+    throw new Error("Exact client config backup was not created with private file permissions.");
+  }
+}
+
+async function writeBackupRecord(path: string, record: ExactConfigBackup, create = false): Promise<void> {
+  const text = `${JSON.stringify(record, null, 2)}\n`;
+  if (Buffer.byteLength(text) > MAX_BACKUP_BYTES) throw new Error("Exact client config backup exceeds the 3 MiB limit.");
+  if (create) { await writeNewPrivateFile(path, text); return; }
+  const tempPath = `${path}.${randomUUID()}.tmp`;
+  await writeNewPrivateFile(tempPath, text);
+  try { await rename(tempPath, path); }
+  catch (error) { await unlink(tempPath).catch(() => {}); throw error; }
+  const info = await lstat(path);
+  if (!ownedByCurrentUser(info) || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error("Exact client config backup permissions changed unexpectedly.");
+}
+
+async function createExactBackup(client: LocalMcpClient, action: "add" | "remove", name: string, options: Required<Pick<ClientConnectionsOptions, "homeDir" | "backupDir" | "now">>): Promise<{ path: string; record: ExactConfigBackup }> {
+  await ensurePrivateBackupDir(options.backupDir);
+  const configPath = CLIENTS[client].configPath(options.homeDir);
+  const state = await exactConfigState(client, options.homeDir);
+  const record: ExactConfigBackup = {
+    schema: 1, client, configPath, action, name, createdAt: new Date(options.now()).toISOString(),
+    original: state.exists ? { exists: true, mode: state.mode, contentBase64: state.bytes.toString("base64") } : { exists: false },
+  };
+  const path = join(options.backupDir, `${options.now()}-${client}-${randomUUID()}-exact-config.json`);
+  await writeBackupRecord(path, record, true);
+  return { path, record };
+}
+
+function isExpectedFingerprint(value: unknown): value is ExactConfigBackup["expectedAfter"] {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as { exists?: unknown; sha256?: unknown };
+  return candidate.exists === false || (candidate.exists === true && typeof candidate.sha256 === "string" && /^[a-f0-9]{64}$/.test(candidate.sha256));
+}
+
+async function updateBackupAfterChange(path: string, record: ExactConfigBackup, client: LocalMcpClient, homeDir: string): Promise<void> {
+  record.expectedAfter = stateFingerprint(await exactConfigState(client, homeDir));
+  await writeBackupRecord(path, record);
 }
 
 function validatedUrl(raw: string): string {
@@ -145,6 +203,27 @@ function commandFor(action: "add" | "remove", client: LocalMcpClient, name: stri
   return client === "claude-code"
     ? { command: executable, args: ["mcp", "add", "--transport", "http", "--scope", "user", name, url!] }
     : { command: executable, args: ["mcp", "add", name, "--url", url!] };
+}
+
+function parseVersion(text: string): string | undefined {
+  return /\bv?(\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.-]+)?)\b/.exec(text)?.[1];
+}
+
+async function verifyCliCompatibility(client: LocalMcpClient, action: "add" | "remove", runner: ClientCommandRunner): Promise<string> {
+  const { executable, label } = CLIENTS[client];
+  const versionResult = await runner(executable, ["--version"]);
+  const version = parseVersion(`${versionResult.stdout || ""} ${versionResult.stderr || ""}`);
+  if (versionResult.exitCode !== 0 || !version) throw new Error(`${label} CLI version could not be verified; no changes were made.`);
+  const addHelp = await runner(executable, ["mcp", "add", "--help"]);
+  const removeHelp = await runner(executable, ["mcp", "remove", "--help"]);
+  const helpText = (result: { stdout?: string; stderr?: string }): string => `${result.stdout || ""}\n${result.stderr || ""}`;
+  const addText = helpText(addHelp);
+  const removeText = helpText(removeHelp);
+  const compatible = addHelp.exitCode === 0 && removeHelp.exitCode === 0 && (client === "claude-code"
+    ? /--transport\b/.test(addText) && /--scope\b/.test(addText) && /--scope\b/.test(removeText)
+    : /--url\b/.test(addText));
+  if (!compatible) throw new Error(`${label} ${version} does not advertise the required official MCP ${action} options; no config was changed.`);
+  return version;
 }
 
 function optionsWithDefaults(options: ClientConnectionsOptions) {
@@ -179,8 +258,9 @@ export async function inspectClientConnections(options: ClientConnectionsOptions
 
 export interface ClientSetupResult {
   client: LocalMcpClient;
-  action: "add" | "remove";
+  action: "add" | "remove" | "restore";
   applied: boolean;
+  version?: string;
   command: string;
   args: string[];
   backupPath?: string;
@@ -213,8 +293,7 @@ export async function removeClientConnection(input: {
 async function changeClientConnection(client: LocalMcpClient, action: "add" | "remove", name: string, url: string | undefined, apply: boolean, options: ClientConnectionsOptions): Promise<ClientSetupResult> {
   const { runner, homeDir, backupDir, now } = optionsWithDefaults(options);
   const definition = CLIENTS[client];
-  const version = await runner(definition.executable, ["--version"]);
-  if (version.exitCode !== 0) throw new Error(`${definition.label} CLI is unavailable; no changes were made.`);
+  const version = await verifyCliCompatibility(client, action, runner);
   const config = await readMcpConfig(client, homeDir);
   if (!config.readable) throw new Error(`${definition.label} MCP configuration is unreadable; no changes were made.`);
   const exists = config.names.includes(name);
@@ -222,18 +301,96 @@ async function changeClientConnection(client: LocalMcpClient, action: "add" | "r
   if (action === "remove" && !exists) throw new Error(`MCP server "${name}" was not found in the user-level configuration.`);
   const command = commandFor(action, client, name, url);
   if (!apply) {
-    return { client, action, applied: false, ...command, message: `Dry run only. Re-run with --apply to let ${definition.label}'s official CLI change its user-level MCP configuration.` };
+    return { client, action, applied: false, version, ...command, message: `Dry run only. Re-run with --apply to let ${definition.label}'s official CLI change its user-level MCP configuration.` };
   }
 
-  const backupPath = action === "add" ? await createSafeBackup(client, { homeDir, backupDir, now }) : undefined;
-  const result = await runner(command.command, command.args);
-  if (result.exitCode !== 0) throw new Error(`${definition.label} CLI returned exit code ${result.exitCode}; consult its local output. ${backupPath ? `Redacted MCP snapshot: ${backupPath}` : "No existing MCP configuration needed a snapshot."}`);
+  const backup = await createExactBackup(client, action, name, { homeDir, backupDir, now });
+  let result: Awaited<ReturnType<ClientCommandRunner>>;
+  try { result = await runner(command.command, command.args); }
+  catch {
+    await updateBackupAfterChange(backup.path, backup.record, client, homeDir).catch(() => {});
+    throw new Error(`${definition.label} CLI result is uncertain. No retry was attempted; inspect its local state. Private exact config backup: ${backup.path}`);
+  }
+  try { await updateBackupAfterChange(backup.path, backup.record, client, homeDir); }
+  catch { throw new Error(`${definition.label} CLI completed but its resulting config could not be fingerprinted. Do not retry automatically. Private exact config backup: ${backup.path}`); }
+  if (result.exitCode !== 0) throw new Error(`${definition.label} CLI returned exit code ${result.exitCode}; consult its local output. Private exact config backup: ${backup.path}`);
   return {
-    client, action, applied: true, ...command, ...(backupPath ? { backupPath } : {}),
+    client, action, applied: true, version, ...command, backupPath: backup.path,
     message: action === "add"
       ? `Server registration command completed. Finish any OAuth flow in ${definition.label}; registration does not prove authentication or successful tool execution.`
       : `Official CLI removal command completed for "${name}".`,
   };
+}
+
+function pathInside(directory: string, candidate: string): boolean {
+  const rel = relative(resolve(directory), resolve(candidate));
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+async function readPrivateBackup(path: string, backupDir: string): Promise<ExactConfigBackup> {
+  await ensurePrivateBackupDir(backupDir);
+  const absolutePath = resolve(path);
+  if (!pathInside(backupDir, absolutePath) || dirname(absolutePath) !== resolve(backupDir)) throw new Error("Restore accepts only a backup from the configured private client-backup directory.");
+  let handle;
+  let parsed: Partial<ExactConfigBackup>;
+  try {
+    handle = await open(absolutePath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    const info = await handle.stat();
+    if (!info.isFile() || !ownedByCurrentUser(info) || (process.platform !== "win32" && (info.mode & 0o077) !== 0) || info.size > MAX_BACKUP_BYTES) throw new Error("Restore backup must be a bounded, owner-only regular file.");
+    const text = await handle.readFile("utf8");
+    if (Buffer.byteLength(text) > MAX_BACKUP_BYTES) throw new Error("Restore backup exceeded the size limit.");
+    parsed = JSON.parse(text) as Partial<ExactConfigBackup>;
+  } catch (error: any) {
+    if (error?.message === "Restore backup must be a bounded, owner-only regular file.") throw error;
+    throw new Error(`Cannot safely read restore backup (${error?.code || "invalid backup"}).`);
+  } finally { await handle?.close(); }
+  if (parsed.schema !== 1 || (parsed.client !== "claude-code" && parsed.client !== "codex") || typeof parsed.configPath !== "string" || typeof parsed.action !== "string" || typeof parsed.name !== "string" || !parsed.original || !isExpectedFingerprint(parsed.expectedAfter)) {
+    throw new Error("Restore backup format or post-operation fingerprint is invalid.");
+  }
+  if (parsed.action !== "add" && parsed.action !== "remove") throw new Error("Restore backup action is invalid.");
+  if (parsed.original.exists) {
+    if (typeof parsed.original.contentBase64 !== "string" || !Number.isInteger(parsed.original.mode) || parsed.original.mode < 0 || parsed.original.mode > 0o777 || parsed.original.contentBase64.length > Math.ceil(MAX_CONFIG_BYTES * 4 / 3) + 8) throw new Error("Restore backup does not contain a valid bounded original config.");
+    const bytes = Buffer.from(parsed.original.contentBase64, "base64");
+    if (bytes.byteLength > MAX_CONFIG_BYTES || bytes.toString("base64") !== parsed.original.contentBase64) throw new Error("Restore backup original config encoding is invalid or oversized.");
+  }
+  return parsed as ExactConfigBackup;
+}
+
+async function restoreConfigFile(client: LocalMcpClient, homeDir: string, original: ExactConfigBackup["original"]): Promise<void> {
+  const path = CLIENTS[client].configPath(homeDir);
+  if (!original.exists) { await unlink(path).catch((error: any) => { if (error?.code !== "ENOENT") throw error; }); return; }
+  const parent = dirname(path);
+  const parentInfo = await lstat(parent);
+  if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory() || await realpath(parent) !== resolve(parent)) throw new Error("Client config parent directory must be a real, non-symlink directory for restore.");
+  const tempPath = `${path}.token2oauth-restore-${randomUUID()}`;
+  const bytes = Buffer.from(original.contentBase64, "base64");
+  if (bytes.byteLength > MAX_CONFIG_BYTES || bytes.toString("base64") !== original.contentBase64) throw new Error("Restore config payload is invalid or exceeds the size limit.");
+  const handle = await open(tempPath, "wx", 0o600);
+  try { await handle.writeFile(bytes); await handle.chmod(original.mode); await handle.sync(); }
+  finally { await handle.close(); }
+  try { await rename(tempPath, path); }
+  catch (error) { await unlink(tempPath).catch(() => {}); throw error; }
+}
+
+/** Dry-run by default. Restore exact prior bytes only while the managed config is unchanged since the recorded CLI operation. */
+export async function restoreClientConnection(input: { client: LocalMcpClient; backupPath: string; apply?: boolean }, options: ClientConnectionsOptions = {}): Promise<ClientSetupResult> {
+  assertClient(input.client);
+  const { homeDir, backupDir } = optionsWithDefaults(options);
+  const backupPath = resolve(input.backupPath);
+  const backup = await readPrivateBackup(backupPath, backupDir);
+  if (backup.client !== input.client || backup.configPath !== CLIENTS[input.client].configPath(homeDir)) throw new Error("Restore backup belongs to a different client or home directory.");
+  if (backup.restoredAt) throw new Error("This exact config backup has already been restored.");
+  const current = stateFingerprint(await exactConfigState(input.client, homeDir));
+  if (JSON.stringify(current) !== JSON.stringify(backup.expectedAfter)) throw new Error("Client config changed after this backup was captured; restore refused to preserve later edits.");
+  const command = { command: "restoreClientConnection", args: [backupPath] };
+  if (!input.apply) return { client: input.client, action: "restore", applied: false, ...command, backupPath, message: "Dry run only. Restore will replace only this client's config with the exact backed-up bytes, and only if its post-operation fingerprint still matches." };
+  // Recheck immediately before writing, so edits made after the preview are protected.
+  const latest = stateFingerprint(await exactConfigState(input.client, homeDir));
+  if (JSON.stringify(latest) !== JSON.stringify(backup.expectedAfter)) throw new Error("Client config changed after the restore preview; no restore was performed.");
+  await restoreConfigFile(input.client, homeDir, backup.original);
+  backup.restoredAt = new Date().toISOString();
+  await writeBackupRecord(backupPath, backup);
+  return { client: input.client, action: "restore", applied: true, ...command, backupPath, message: "The exact backed-up client config was restored. Client authentication sessions were not read or restored." };
 }
 
 /** Honest product boundary: browser-only setup has no local official CLI command here. */
