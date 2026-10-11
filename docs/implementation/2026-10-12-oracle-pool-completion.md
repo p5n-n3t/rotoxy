@@ -1,0 +1,11 @@
+# Oracle pool completion checkpoint
+
+Assignment T2O-W2-ORACLE, branch `codex/t2o-w2-oracle-pool-20261012`, based on `origin/main` at `00e6e8f91564b7e4706b8dab3b36221c8bdfb4a2`.
+
+The pool remains a durable local SQLite queue and sends only bounded text inference to fixed strict-key SSH aliases `ora1`, `ora3`, and `ora5`; approved models remain `qwen3.5:9b`, `gpt-oss:20b`, and `tev1:0.8b`. Each prompt is an indivisible task. `submit_batch([...])` atomically accepts at most 12 independent task objects (`text`, with optional `model`, `job_id`, and `source`); duplicate IDs require identical content. Queue and retention limits still apply to the entire batch, with no partial inserts.
+
+Scheduling preserves equal default host weights: choose the eligible host with the fewest durable prior assignments, then rotate tie order. A host whose most recent catalog refresh failed is now ineligible even if it had a stale model list; work stays queued for other healthy compatible hosts or a later successful refresh. This allows safe fallback without repeatedly dispatching to a known-offline host. No model-weighting or prompt splitting was added.
+
+`cancel(job_id)` cancels queued tasks idempotently. It refuses running inference because a dispatched request cannot be recalled safely; timeout, transport loss, and worker disappearance remain ambiguous and are never automatically replayed. Cancellation does not terminate a remote model process. Existing crash recovery and task-ID idempotency remain intact.
+
+Focused tests cover three-host fairness, atomic bounded batch submission and retry, stale-host exclusion/recovery, queued cancellation, rejection of in-flight cancellation, timeout ambiguity, restart recovery, and existing queue/transport bounds. Tests use fake transport only; no live Oracle host or inference call was made. A live operator validation is still required: refresh the three host catalogs, submit three independent approved-model prompts, verify one completion per healthy host, then take one host offline and confirm its queued work runs on remaining eligible hosts and resumes after catalog recovery. In-flight cancellation, model latency, and remote service behavior were not live-verified.

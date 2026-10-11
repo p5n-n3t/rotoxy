@@ -24,8 +24,11 @@ class FakeTransport:
         self.lock = threading.Lock()
         self.gate = None
         self.error = None
+        self.catalog_failures = set()
 
     def catalog(self, host):
+        if host in self.catalog_failures:
+            raise PoolError("transport_exit")
         if self.error:
             raise self.error
         return list(APPROVED_MODELS)
@@ -100,6 +103,82 @@ class OraclePoolTests(unittest.TestCase):
         for kwargs in ({"model": "tev1:0.8b"}, {"source": "event:124"}):
             with self.assertRaisesRegex(ValueError, "different content"):
                 self.pool.submit("review task", job_id="event:review-1", **kwargs)
+
+    def test_batch_is_indivisible_atomic_idempotent_and_fair_across_hosts(self):
+        self.pool.catalog(refresh=True)
+        batch = [{"text": f"independent subtask {i}", "job_id": f"batch:{i}", "source": "event:batch"}
+                 for i in range(3)]
+        first = self.pool.submit_batch(batch)
+        retry = self.pool.submit_batch(batch)
+        self.assertEqual([row["id"] for row in first], [row["id"] for row in retry])
+        self.assertEqual([row["status"] for row in first], ["queued"] * 3)
+
+        outcome = self.pool.run_once()
+
+        self.assertEqual(outcome["claimed"], 3)
+        self.assertEqual({row["host"] for row in outcome["completed"]}, {"ora1", "ora3", "ora5"})
+        self.assertEqual({call[2] for call in self.transport.calls}, {item["text"] for item in batch})
+        with self.assertRaisesRegex(ValueError, "different content"):
+            self.pool.submit_batch([{"text": "changed", "job_id": "batch:0"},
+                                    {"text": "must not partially insert", "job_id": "batch:new"}])
+        with self.assertRaises(KeyError):
+            self.pool.status("batch:new")
+        with self.assertRaisesRegex(ValueError, "Duplicate task ID"):
+            self.pool.submit_batch([{"text": "one", "job_id": "duplicate"},
+                                    {"text": "two", "job_id": "duplicate"}])
+
+    def test_batch_capacity_is_atomic_and_bounded(self):
+        for index in range(MAX_PENDING - 1):
+            self.pool.submit(f"queued {index}", job_id=f"capacity:{index}")
+        with self.assertRaisesRegex(PoolError, "queue_full"):
+            self.pool.submit_batch([{"text": "first", "job_id": "capacity:new-1"},
+                                    {"text": "second", "job_id": "capacity:new-2"}])
+        self.assertEqual(self.pool.status()["counts"]["queued"], MAX_PENDING - 1)
+        with self.assertRaisesRegex(ValueError, "Batch must contain"):
+            self.pool.submit_batch([{"text": "x"}] * 13)
+
+    def test_catalog_failure_skips_stale_host_and_recovers_when_refreshed(self):
+        self.transport.catalog_failures.add("ora3")
+        catalog = self.pool.catalog(refresh=True)
+        self.assertEqual(next(row for row in catalog["hosts"] if row["id"] == "ora3")["error_code"],
+                         "transport_exit")
+        for index in range(3):
+            self.pool.submit(f"fallback {index}", job_id=f"fallback:{index}")
+        outcome = self.pool.run_once()
+        self.assertEqual(outcome["claimed"], 2)
+        self.assertNotIn("ora3", {row["host"] for row in outcome["completed"]})
+        self.assertEqual(self.pool.status("fallback:2")["status"], "queued")
+
+        self.transport.catalog_failures.clear()
+        self.pool.catalog(refresh=True)
+        self.assertEqual(self.pool.run_once()["claimed"], 1)
+        self.assertEqual(self.pool.status("fallback:2")["status"], "complete")
+
+    def test_cancel_only_removes_queued_work_and_is_idempotent(self):
+        self.pool.catalog(refresh=True)
+        task = self.pool.submit("do not dispatch", job_id="cancel:queued")
+        cancelled = self.pool.cancel(task["id"])
+        self.assertEqual(cancelled, {"id": "cancel:queued", "status": "cancelled", "cancelled": True})
+        self.assertTrue(self.pool.cancel(task["id"])["cancelled"])
+        self.assertEqual(self.pool.run_once()["claimed"], 0)
+        self.assertEqual(self.pool.results(task["id"])["status"], "cancelled")
+
+    def test_dispatched_inference_cannot_be_cancelled_or_replayed(self):
+        self.pool.catalog(refresh=True)
+        task = self.pool.submit("in flight", job_id="cancel:running")
+        self.transport.gate = threading.Event()
+        thread = threading.Thread(target=self.pool.run_once)
+        thread.start()
+        deadline = time.monotonic() + 2
+        while self.pool.status(task["id"])["status"] != "running" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        with self.assertRaisesRegex(PoolError, "not_cancellable"):
+            self.pool.cancel(task["id"])
+        self.assertEqual(self.pool.status(task["id"])["status"], "running")
+        self.transport.gate.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(self.transport.calls), 1)
 
     def test_three_host_fair_distribution_and_safe_durable_evidence(self):
         self.pool.catalog(refresh=True)
