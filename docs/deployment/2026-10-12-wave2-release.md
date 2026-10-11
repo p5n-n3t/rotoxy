@@ -1,0 +1,11 @@
+# Operator release checkpoint — 2026-10-12
+
+The release integrates the eleven cloud workstreams summarized in [the implementation checkpoint](../implementation/2026-10-12-wave2-integration.md). The installed package is `/home/jq/.local/share/token2oauth`; encrypted configuration remains `/home/jq/.config/token2oauth`. Gateway port 2030 and the existing `/token2oauth` Funnel mount are preserved; ROTOXY at the root is not changed.
+
+Private release backups live under `~/.local/state/token2oauth/backups/pre-wave2-20261012/`. They include the prior installed package and service definitions. A clean-stop encrypted configuration/SQLite archive is created immediately before the service swap. The old installation is retained at `~/.local/share/token2oauth-pre-wave2-20261012`. These paths are operator-specific and must not be committed or shared. The release script refuses existing staging/rollback destinations rather than overwriting them.
+
+Code/service rollback: run the reviewed owner-private script `~/.local/state/token2oauth/batches/20261012/parallel-wave2/rollback.py`. It stops the three affected services, retains the new package under a timestamped path, restores the old package and unit definitions, reloads systemd, and restarts services. It preserves durable runtime state. Do not blindly restore the older SQLite archive over tasks that have progressed since the backup; reconcile external execution first. Rollback is prepared, not exercised against production.
+
+Gateway starts with explicit supervisor and Oracle opt-ins. Strict admission with unknown bounds blocks new paid distributed dispatch outside separately authorized controlled batches. Monitoring performs ordinary read-only polling every five minutes and deduplicates observations by account/session. The recovery consumer runs from each monitor cycle with bounded Oracle advice and durable notifications; paid/headless adapters are not enabled. A disconnected interactive chat does not stop these services.
+
+Live validation results are recorded in the adjacent release evidence after installation. Build, package imports, headless renders, live provider execution, and installed/public health are separate evidence categories.
