@@ -56,7 +56,7 @@ export interface AnalyticsBucket {
 
 export interface AnalyticsProjection {
   source: "token2oauth-telemetry-and-supervisor";
-  window: { from: number | null; to: number | null; gatewayEventsConsidered: number; recordsCapped: boolean };
+  window: { from: number | null; to: number | null; gatewayEventsConsidered: number; gatewaySourceProvided: boolean; recordsCapped: boolean };
   filters: { requested: AnalyticsFilters; unsupportedForRequests: string[] };
   requests: {
     count: AvailableMetric<number>;
@@ -159,9 +159,12 @@ export function projectAnalytics(input: AnalyticsInput, options: AnalyticsOption
   const successes = requests.filter((event) => event.outcome === SUCCESS).length;
   const errors = requests.length - successes;
   const durations = requests.map((event) => event.latencyMs).filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0);
-  const requestMetric = (value: number, unit: string) => filterReason ? unavailable<number>(filterReason, "gateway request events", unit) : metric(value, "gateway request events", unit);
+  const requestMetric = (value: number, unit: string) => filterReason ? unavailable<number>(filterReason, "gateway request events", unit)
+    : input.gatewayEvents === undefined ? unavailable<number>("Gateway event source was not supplied.", "gateway request events", unit)
+      : metric(value, "gateway request events", unit);
   const latencyMetric = (p: number) => filterReason
     ? unavailable<number>(filterReason, "gateway request latencyMs", "milliseconds")
+    : input.gatewayEvents === undefined ? unavailable<number>("Gateway event source was not supplied.", "gateway request latencyMs", "milliseconds")
     : durations.length ? metric(percentile(durations, p)!, "gateway request latencyMs; nearest-rank percentile over valid samples", "milliseconds")
       : unavailable<number>("No valid latency samples were reported.", "gateway request latencyMs", "milliseconds");
 
@@ -196,11 +199,12 @@ export function projectAnalytics(input: AnalyticsInput, options: AnalyticsOption
     const key = `${date.getUTCDay()}:${date.getUTCHours()}`;
     heat.set(key, (heat.get(key) ?? 0) + 1);
   }
-  const timeBuckets = filterReason
-    ? { availability: "unavailable" as const, bucketMs, unit: "requests" as const, values: [], reason: filterReason }
+  const missingGateway = input.gatewayEvents === undefined ? "Gateway event source was not supplied." : undefined;
+  const timeBuckets = filterReason || missingGateway
+    ? { availability: "unavailable" as const, bucketMs, unit: "requests" as const, values: [], reason: filterReason ?? missingGateway }
     : { availability: "reported" as const, bucketMs, unit: "requests" as const, values: [...buckets.values()].sort((a, b) => a.start - b.start) };
-  const activityHeatmap = filterReason
-    ? { availability: "unavailable" as const, timezone: "UTC" as const, unit: "requests" as const, values: [], reason: filterReason }
+  const activityHeatmap = filterReason || missingGateway
+    ? { availability: "unavailable" as const, timezone: "UTC" as const, unit: "requests" as const, values: [], reason: filterReason ?? missingGateway }
     : { availability: "reported" as const, timezone: "UTC" as const, unit: "requests" as const,
       values: [...heat.entries()].map(([key, count]) => { const [weekday, hour] = key.split(":").map(Number); return { weekday, hour, count }; }).sort((a, b) => a.weekday - b.weekday || a.hour - b.hour) };
 
@@ -220,8 +224,8 @@ export function projectAnalytics(input: AnalyticsInput, options: AnalyticsOption
   type UsageProjection = NonNullable<AnalyticsProjection["providerUsage"]["value"]>;
   const usageRows: UsageProjection = [...usageGroups.values()].map((row) => ({ ...row, reportedValue: row.records ? row.reportedValue : null }))
     .sort((a, b) => a.metric.localeCompare(b.metric) || a.source.localeCompare(b.source));
-  const providerUsage = usageReason
-    ? unavailable<UsageProjection>(usageReason, "provider usage records", "reported values grouped by metric and unit")
+  const providerUsage = usageReason || input.providerUsage === undefined
+    ? unavailable<UsageProjection>(usageReason ?? "Provider usage source was not supplied.", "provider usage records", "reported values grouped by metric and unit")
     : metric(usageRows, "provider usage records; values remain separated by source, metric and unit", "reported values grouped by metric and unit");
 
   const lifecycleEvents = boundedSupervisor.items.filter((event) => inWindow(timestamp(event.at, typeof event.at === "number"), filters));
@@ -254,12 +258,16 @@ export function projectAnalytics(input: AnalyticsInput, options: AnalyticsOption
     (filters.model === undefined || task.reportedModel === filters.model) &&
     (filters.jobId === undefined || task.id.startsWith(`${filters.jobId}:`)));
   const recordTimeFilter = filters.from !== undefined || filters.to !== undefined;
-  const supervisorJobs = filters.client !== undefined || filters.model !== undefined
+  const supervisorJobs = input.jobs === undefined
+    ? unavailable<number>("Supervisor job source was not supplied.", "supervisor job snapshot", "jobs")
+    : filters.client !== undefined || filters.model !== undefined
     ? unavailable<number>(filters.client !== undefined ? "Client association is absent from supervisor job records." : "Model association is absent from supervisor job records.", "supervisor job snapshot", "jobs")
     : recordTimeFilter && boundedJobs.items.some((job) => job.updatedAt === undefined)
       ? unavailable<number>("Some supervisor jobs have no updatedAt timestamp for the requested time filter.", "supervisor job snapshot", "jobs")
       : metric(recordTimeFilter ? jobs.filter((job) => inWindow(timestamp(job.updatedAt), filters)).length : jobs.length, "supervisor job snapshot", "jobs");
-  const supervisorTasks = filters.client !== undefined || filters.provider !== undefined
+  const supervisorTasks = input.tasks === undefined
+    ? unavailable<number>("Supervisor task source was not supplied.", "supervisor task snapshot", "tasks")
+    : filters.client !== undefined || filters.provider !== undefined
     ? unavailable<number>(filters.client !== undefined ? "Client association is absent from supervisor task records." : "Provider association is absent from supervisor task records.", "supervisor task snapshot", "tasks")
     : recordTimeFilter && boundedTasks.items.some((task) => task.updatedAt === undefined)
       ? unavailable<number>("Some supervisor tasks have no updatedAt timestamp for the requested time filter.", "supervisor task snapshot", "tasks")
@@ -267,13 +275,13 @@ export function projectAnalytics(input: AnalyticsInput, options: AnalyticsOption
 
   return {
     source: "token2oauth-telemetry-and-supervisor",
-    window: { from, to, gatewayEventsConsidered: boundedGateway.items.length, recordsCapped: capped },
+    window: { from, to, gatewayEventsConsidered: boundedGateway.items.length, gatewaySourceProvided: input.gatewayEvents !== undefined, recordsCapped: capped },
     filters: { requested: { ...filters }, unsupportedForRequests: unsupported },
     requests: {
       count: requestMetric(requestCount, "requests"), successCount: requestMetric(successes, "requests"), errorCount: requestMetric(errors, "requests"),
       durationP50: latencyMetric(0.5), durationP95: latencyMetric(0.95), durationP99: latencyMetric(0.99),
     },
-    routingDistribution: filterReason ? unavailable(filterReason, "gateway pool", "requests") : metric(pools, "gateway event pool", "requests"),
+    routingDistribution: filterReason || missingGateway ? unavailable(filterReason ?? missingGateway!, "gateway pool", "requests") : metric(pools, "gateway event pool", "requests"),
     providerUsage, timeBuckets, activityHeatmap, jobIntervals,
     supervisorWake: { attempts: wakeAvailability, outcomes: wakeOutcomeMetric },
     supervisorRecords: { jobs: supervisorJobs, tasks: supervisorTasks },

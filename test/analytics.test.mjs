@@ -92,3 +92,17 @@ test("returns unavailable for absent supervisor evidence and bounds bucket count
   assert.equal(result.supervisorWake.attempts.availability, "unavailable");
   assert.equal(result.jobIntervals.availability, "unavailable");
 });
+
+test("distinguishes an unsupplied source from an observed empty source", () => {
+  const missing = projectAnalytics({});
+  assert.equal(missing.requests.count.value, null);
+  assert.equal(missing.requests.count.availability, "unavailable");
+  assert.equal(missing.providerUsage.value, null);
+  assert.equal(missing.supervisorRecords.jobs.value, null);
+  const empty = projectAnalytics({ gatewayEvents: [], providerUsage: [], jobs: [], tasks: [], supervisorEvents: [] });
+  assert.equal(empty.requests.count.value, 0);
+  assert.equal(empty.timeBuckets.availability, "reported");
+  assert.deepEqual(empty.providerUsage.value, []);
+  assert.equal(empty.supervisorRecords.jobs.value, 0);
+  assert.equal(empty.supervisorRecords.tasks.value, 0);
+});
