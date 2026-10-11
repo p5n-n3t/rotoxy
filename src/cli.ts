@@ -16,6 +16,7 @@ import { migrateLegacyPool, PoolSchemaError } from "./pool-schema.js";
 import { StateStore, normalizeBasePath } from "./store.js";
 import { startServer } from "./server.js";
 import type { GatewayConfig, PoolStrategy } from "./types.js";
+import { configureClientConnection, inspectClientConnections, manualClientSetupNotes, removeClientConnection, type LocalMcpClient } from "./client-connections.js";
 
 const execFileAsync = promisify(execFile);
 const program = new Command();
@@ -537,6 +538,41 @@ pools.command("preview").description("Show how the current single pool maps to t
     throw error;
   }
 });
+
+const clients = program.command("clients").description("Inspect or configure local MCP clients through their official CLIs");
+clients.command("inspect")
+  .description("Read local Claude Code and Codex CLI versions and user-level MCP registration names without contacting servers")
+  .option("--json", "print machine-readable status")
+  .action(async (opts) => {
+    const status = await inspectClientConnections();
+    if (opts.json) console.log(JSON.stringify({ clients: status, otherSetups: manualClientSetupNotes() }, null, 2));
+    else {
+      console.table(status.map((row) => ({ client: row.label, installed: row.installed, version: row.version || "", registration: row.registration, servers: row.serverNames.join(", ") })));
+      for (const row of status) console.log(`${row.label}: ${row.note}`);
+      for (const row of manualClientSetupNotes()) console.log(`${row.client} (${row.support}): ${row.note}`);
+    }
+  });
+
+clients.command("configure <client>")
+  .description("Preview or register Token2OAuth as a user-level MCP server; dry-run unless --apply")
+  .requiredOption("--url <url>", "HTTP(S) Token2OAuth MCP endpoint without embedded credentials/query")
+  .option("--name <name>", "MCP server name", "token2oauth")
+  .option("--apply", "invoke the official client CLI and make the configuration change")
+  .action(async (client: LocalMcpClient, opts) => {
+    const result = await configureClientConnection({ client, name: opts.name, url: opts.url, apply: Boolean(opts.apply) });
+    console.log(`${result.applied ? "Applied" : "Plan"}: ${result.command} ${result.args.map((arg) => /^https?:\/\//i.test(arg) ? "<endpoint-url>" : JSON.stringify(arg)).join(" ")}`);
+    if (result.backupPath) console.log(`Redacted MCP-only snapshot: ${result.backupPath}`);
+    console.log(result.message);
+  });
+
+clients.command("remove <client> <name>")
+  .description("Preview or remove a user-level MCP registration through the official CLI; dry-run unless --apply")
+  .option("--apply", "invoke the official client CLI and make the configuration change")
+  .action(async (client: LocalMcpClient, name: string, opts) => {
+    const result = await removeClientConnection({ client, name, apply: Boolean(opts.apply) });
+    console.log(`${result.applied ? "Applied" : "Plan"}: ${result.command} ${result.args.map((arg) => JSON.stringify(arg)).join(" ")}`);
+    console.log(result.message);
+  });
 
 program.parseAsync(process.argv).catch((error) => {
   console.error("token2oauth:", error?.message || error);
