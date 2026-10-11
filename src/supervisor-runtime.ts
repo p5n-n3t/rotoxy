@@ -380,10 +380,11 @@ export class SupervisorRuntime implements SupervisorBackend {
     const workers: SupervisorWorker[] = project.registeredSessions.map((session) => {
       const signal = accountSignal(state.accounts.find((account) => account.id === session.accountId), nativeTarget);
       const eligible = signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
-      const observations = tasks.filter((task) => task.worker === session.sessionId && task.usage).sort((a, b) => Number(b.usage?.observedAt ?? 0) - Number(a.usage?.observedAt ?? 0));
+      const observations = tasks.filter((task) => task.worker === session.sessionId).sort((a, b) => Number(b.usage?.observedAt ?? 0) - Number(a.usage?.observedAt ?? 0));
       const currentTask = observations.find((task) => !/complete|failed|cancelled|rejected/i.test(task.status)) ?? observations[0];
       return { id: session.sessionId, workspace: session.workspaceId, status: eligible ? "eligible" : "unavailable",
-        ...(currentTask?.usage ? { usage: currentTask.usage, ...(currentTask.reportedModel ? { model: currentTask.reportedModel } : {}), taskId: currentTask.id } : {}) };
+        ...(currentTask ? { taskId: currentTask.id, ...(currentTask.usage ? { usage: currentTask.usage } : {}),
+          ...(currentTask.reportedModel ? { model: currentTask.reportedModel } : {}) } : {}) };
     });
     const providers = [{ id: "lightsprint", label: "LightSprint", status: accountIds.some((accountId) => {
       const signal = accountSignal(state.accounts.find((account) => account.id === accountId), nativeTarget);

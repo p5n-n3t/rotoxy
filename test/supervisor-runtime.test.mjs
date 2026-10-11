@@ -151,7 +151,7 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
   const assignment = { assignmentId: "job-usage", projectId: "project-a", state: "running", tasks: [
     { taskId: "task-one", state: "running", generation: 2, sessionId: "session-a", selectedAccountId: "acct-a", modelReported: "gpt-6-luna", usage: usage(0.12, 200) },
     { taskId: "task-two", state: "running", generation: 1, sessionId: "session-a", selectedAccountId: "acct-a", modelReported: "gpt-6-luna", usage: usage(0.13, 300) },
-    { taskId: "task-three", state: "queued", generation: 0, sessionId: "session-b", selectedAccountId: "acct-b", usage: { reportedCostDeltaUsd: -1, maxBudget: 0 } },
+    { taskId: "task-three", state: "queued", generation: 0, sessionId: "session-b", selectedAccountId: "acct-b", modelReported: "gpt-6-luna", usage: { reportedCostDeltaUsd: -1, maxBudget: 0 } },
   ] };
   runtime.bridge.request = async (_method, path) => {
     if (path.startsWith("/admin/api/v1/assignments?")) return { assignments: [{ assignmentId: "job-usage" }] };
@@ -173,6 +173,9 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
   assert.equal(accountA.usage.provisional, true);
   assert.equal(workerA.usage.reportedCostDeltaUsd, 0.13);
   assert.equal(workerA.model, "gpt-6-luna");
+  const workerB = accountB.workspaces.flatMap((workspace) => workspace.workers).find((worker) => worker.id === "session-b");
+  assert.equal(workerB.model, "gpt-6-luna", "reported model survives missing usage metrics");
+  assert.equal(workerB.usage, undefined);
   assert.equal(accountB.usage.coveredTaskGenerations, 0);
   assert.equal("reportedCostDeltaUsd" in accountB.usage, false);
   assert.equal("capacity" in accountA, false);
