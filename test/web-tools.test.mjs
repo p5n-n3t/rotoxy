@@ -47,6 +47,12 @@ test("checks caller permission and the exact configured provider feature before 
   assert.equal(credentialCalls, 0);
 });
 
+test("rejects misspelled provider ids and feature states in injected configuration", () => {
+  assert.throws(() => makeTools({ providers: { exaa: { enabled: true, features: { search: "supported" } } } }), (error) => error.code === "invalid_configuration");
+  assert.throws(() => makeTools({ providers: { exa: { enabled: true, features: { search: "enabled" } } } }), (error) => error.code === "invalid_configuration");
+  assert.throws(() => makeTools({ providers: { exa: { enabled: true, features: { crawl: "supported" } } } }), (error) => error.code === "invalid_configuration");
+});
+
 test("routes the selected provider only and preserves Exa options and provider-reported usage", async () => {
   const calls = [];
   const tools = makeTools({

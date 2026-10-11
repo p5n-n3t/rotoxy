@@ -205,7 +205,24 @@ export class WebTools {
         typeof options.resolveCredential !== "function" || typeof options.isToolAllowed !== "function") {
       throw new WebToolError("invalid_configuration");
     }
-    this.config = options.config;
+    const providers: Partial<Record<WebProviderName, WebProviderConfig>> = {};
+    const features = new Set<WebFeature>(["search", "extract"]);
+    const states = new Set<FeatureCapability>(["supported", "unsupported", "unknown"]);
+    for (const [name, rawProvider] of Object.entries(options.config.providers)) {
+      if (!providerNames.includes(name as WebProviderName) || !isRecord(rawProvider) || typeof rawProvider.enabled !== "boolean") {
+        throw new WebToolError("invalid_configuration");
+      }
+      const rawFeatures = rawProvider.features === undefined ? {} : rawProvider.features;
+      if (!isRecord(rawFeatures) || Object.keys(rawFeatures).some((feature) => !features.has(feature as WebFeature)) ||
+          Object.values(rawFeatures).some((state) => !states.has(state as FeatureCapability))) {
+        throw new WebToolError("invalid_configuration");
+      }
+      providers[name as WebProviderName] = {
+        enabled: rawProvider.enabled,
+        features: { ...rawFeatures } as Partial<Record<WebFeature, FeatureCapability>>,
+      };
+    }
+    this.config = { providers };
     this.resolveCredential = options.resolveCredential;
     this.isToolAllowed = options.isToolAllowed;
     this.fetcher = options.fetch ?? globalThis.fetch;
