@@ -1,0 +1,121 @@
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from snooze.guidance import GuidanceInbox
+from snooze.recovery_service import RecoveryService, _read_config
+
+
+class Pool:
+    def __init__(self):
+        self.jobs = []
+
+    def submit(self, prompt, **kwargs):
+        self.jobs.append((prompt, kwargs))
+
+
+class RecoveryServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.inbox_path = self.root / "inbox.sqlite3"
+        self.state_path = self.root / "service.sqlite3"
+        self.inbox = GuidanceInbox(self.inbox_path)
+        self.project, self.owner, self.worker = "project-a", "owner-a", "worker-a"
+        self.inbox.register(worker=self.worker, project=self.project, owner=self.owner,
+                            account="account-a", session="session-a", model="codex")
+
+    def config(self, *, policy=None):
+        return {
+            "version": 1, "inboxDb": str(self.inbox_path), "stateDb": str(self.state_path),
+            "intervalSeconds": 60, "maxEventsPerCycle": 10,
+            "projects": [{"project": self.project, "scope": "scope-a", "owners": [self.owner],
+                          "policy": policy or {"level": "observe", "permissions": [], "rules": {},
+                              "max_attempts": 1, "max_runtime_seconds": 5, "action_budget_usd": 0,
+                              "budget_ceiling_usd": 0, "oracle_advice": False, "oracle_hourly_limit": 0,
+                              "headless_adapter_verified": False}}],
+        }
+
+    def service(self, **kwargs):
+        return RecoveryService(self.config(**kwargs))
+
+    def observe(self, state):
+        return self.inbox.observe(self.worker, {"state": state}, owner=self.owner, job=self.project, now=1000)
+
+    def test_once_and_restart_resume_cursor_and_ack_only_after_receipt(self):
+        event = self.observe("failed")
+        first = self.service().run_once()
+        second = RecoveryService(self.config()).run_once()
+        self.assertEqual(first["processed"], 1)
+        self.assertEqual(second["processed"], 0)
+        self.assertEqual(second["cursor"], event["eventId"])
+        with sqlite3.connect(self.state_path) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM recovery_events").fetchone()[0], 1)
+            source = db.execute("SELECT state FROM recovery_service_sources WHERE inbox_event_id=?", (event["eventId"],)).fetchone()
+        self.assertEqual(source[0], "observed")
+        self.assertIsNotNone(self.inbox.inbox()[0]["ack_at"])
+
+    def test_idle_review_does_not_call_oracle(self):
+        event = self.observe("idle")
+        policy = self.config()["projects"][0]["policy"]
+        policy.update(oracle_advice=True, oracle_hourly_limit=2)
+        pool = Pool()
+        service = RecoveryService(self.config(policy=policy), oracle_pool=pool)
+        service.run_once()
+        self.assertEqual(pool.jobs, [])
+        self.assertEqual(service.engine.get("guidance-" + str(event["eventId"]))["advice"], None)
+
+    def test_rule_action_has_durable_receipt_and_is_not_replayed_after_restart(self):
+        event = self.observe("failed")
+        policy = self.config()["projects"][0]["policy"]
+        policy.update(level="rules", permissions=["rule:ack-inbox"], rules={"failed": "ack-inbox"})
+        service = RecoveryService(self.config(policy=policy))
+        service.run_once()
+        RecoveryService(self.config(policy=policy)).run_once()
+        recovery_id = "guidance-" + str(event["eventId"])
+        with sqlite3.connect(self.state_path) as db:
+            actions = db.execute("SELECT action,state,receipt FROM recovery_actions WHERE event_id=?", (recovery_id,)).fetchall()
+        self.assertEqual(len(actions), 1)
+        self.assertEqual((actions[0][0], actions[0][1]), ("ack-inbox", "completed"))
+        self.assertIn("guidance-inbox-ack", actions[0][2])
+
+    def test_registration_owner_mismatch_becomes_audited_handoff(self):
+        self.observe("failed")
+        with sqlite3.connect(self.inbox_path) as db:
+            db.execute("UPDATE guidance_events SET owner='owner-b' WHERE id=1")
+        receipt = self.service().run_once()
+        with sqlite3.connect(self.state_path) as db:
+            handoff = db.execute("SELECT state,receipt FROM recovery_service_sources WHERE inbox_event_id=1").fetchone()
+            events = db.execute("SELECT count(*) FROM recovery_events").fetchone()[0]
+        self.assertEqual(receipt["pendingHandoffs"], 1)
+        self.assertEqual(handoff[0], "handoff")
+        self.assertIn("trusted_registration_or_project_policy_missing", handoff[1])
+        self.assertEqual(events, 0)
+
+    def test_private_config_rejects_group_readable_file(self):
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config()))
+        path.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "private_owner_permissions_required"):
+            _read_config(path)
+
+    def test_once_cli_emits_receipt(self):
+        self.observe("failed")
+        config_path = self.root / "recovery.json"
+        config_path.write_text(json.dumps(self.config()))
+        config_path.chmod(0o600)
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+        result = subprocess.run([sys.executable, "-m", "snooze.recovery_service", "--config",
+                                 str(config_path), "--once"], capture_output=True, text=True,
+                                env=env, timeout=10, check=True)
+        self.assertEqual(json.loads(result.stdout)["processed"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
