@@ -9,6 +9,8 @@ import { StateStore, normalizeBasePath } from "./store.js";
 import { TelemetryRecorder } from "./telemetry.js";
 import { createSupervisorAdminRouter, SupervisorApi, type SupervisorBackend } from "./supervisor-api.js";
 import { createSupervisorRuntime } from "./supervisor-runtime.js";
+import { loadWebToolsConfig, type ConfiguredWebTools } from "./web-tools-config.js";
+import { createAnalyticsApiRouter } from "./analytics-api.js";
 
 export interface ServerOptions {
   host?: string;
@@ -19,9 +21,12 @@ export interface ServerOptions {
   supervisorConfigPath?: string;
   oracleTools?: OracleTools;
   oraclePool?: boolean;
+  /** Explicit path to an owner-private, credential-free provider/account mapping. */
+  webToolsConfigPath?: string;
+  webTools?: ConfiguredWebTools;
 }
 
-export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "oracleTools"> = {}) {
+export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "oracleTools" | "webTools" | "webToolsConfigPath"> = {}) {
   await store.init();
   const state = await store.load();
   const sessions = new AdminSessions();
@@ -31,7 +36,8 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   pool.telemetry = telemetry;
   const oauth = new OAuthService(store, sessions);
   const supervisor = new SupervisorApi(options.supervisorBackend);
-  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools);
+  const webTools = options.webTools ?? await loadWebToolsConfig(options.webToolsConfigPath, store);
+  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools);
   const ui = new (await import("./ui.js")).AdminUi(store, pool, sessions, { oauth, telemetry });
 
   const app = express();
@@ -40,6 +46,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
 
   const router = express.Router();
   router.use(oauth.router);
+  router.use(createAnalyticsApiRouter(store, sessions, telemetry));
   router.use(createSupervisorAdminRouter(store, sessions, options.supervisorBackend));
   router.use(ui.router);
   router.all(
@@ -65,7 +72,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
     res.status(500).json({ error: "internal_error", message: String(error?.message || error) });
   });
 
-  return { app, store, pool, telemetry, sessions, supervisor };
+  return { app, store, pool, telemetry, sessions, supervisor, webTools };
 }
 
 export async function startServer(options: ServerOptions = {}) {
@@ -77,7 +84,7 @@ export async function startServer(options: ServerOptions = {}) {
     supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)),
     store,
   }) : undefined;
-  const { app } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined) });
+  const { app } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath });
   const host = options.host || process.env.TOKEN2OAUTH_HOST || "127.0.0.1";
   const port = options.port || Number(process.env.TOKEN2OAUTH_PORT || 2030);
 

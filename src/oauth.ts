@@ -23,6 +23,7 @@ import { AdminSessions, adminEpoch, parseCookies } from "./admin-session.js";
 const ACCESS_TTL_SECONDS = 60 * 60;
 const REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
 const CODE_TTL_MS = 2 * 60 * 1000;
+const SUPPORTED_SCOPES = ["mcp", "jobs:read", "jobs:write", "web:search", "web:extract"] as const;
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("base64url");
@@ -115,7 +116,7 @@ export class OAuthService {
     res.json({
       resource: this.resource(state),
       authorization_servers: [issuer],
-      scopes_supported: ["mcp", "jobs:read", "jobs:write"],
+      scopes_supported: [...SUPPORTED_SCOPES],
       bearer_methods_supported: ["header"],
       resource_name: "Token2OAuth MCP Gateway",
     });
@@ -132,7 +133,7 @@ export class OAuthService {
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
-      scopes_supported: ["mcp", "jobs:read", "jobs:write"],
+      scopes_supported: [...SUPPORTED_SCOPES],
       token_endpoint_auth_methods_supported: ["none"],
       authorization_response_iss_parameter_supported: true,
     });
@@ -195,7 +196,7 @@ export class OAuthService {
     if (resource !== this.resource(state)) throw new Error("resource does not match this MCP server");
     const requested = [...new Set(String(q.scope || "mcp").split(/\s+/).filter(Boolean))];
     if (!requested.includes("mcp")) throw new Error("mcp scope is required");
-    if (requested.some((scope) => !["mcp", "jobs:read", "jobs:write"].includes(scope))) throw new Error("unsupported scope requested");
+    if (requested.some((scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope))) throw new Error("unsupported scope requested");
     return { client, redirectUri, resource, scope: requested.join(" ") };
   }
 

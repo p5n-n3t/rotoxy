@@ -1,0 +1,40 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { StateStore } from "../dist/store.js";
+import { buildApp } from "../dist/server.js";
+
+const listen = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address())));
+const close = (server) => new Promise((resolve) => server.close(resolve));
+
+test("admin analytics requires an admin session and labels global metrics without fake project isolation", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-analytics-api-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  process.env.TOKEN2OAUTH_CONFIG_DIR = dir;
+  const store = new StateStore();
+  await store.init({ adminPassword: "correct-horse-battery-staple" });
+  const built = await buildApp(store);
+  const server = createServer(built.app);
+  const address = await listen(server);
+  t.after(() => close(server));
+  const base = `http://127.0.0.1:${address.port}`;
+  built.telemetry.recordGateway({ kind: "request", method: "tools/call", accountId: "acct-a", status: 200, latencyMs: 10 });
+  built.telemetry.recordGateway({ kind: "request", method: "tools/call", accountId: "acct-b", status: 500, latencyMs: 40 });
+  const route = base + "/admin/api/v1/analytics?from=0&to=9999999999999&accountId=acct-a";
+  assert.equal((await fetch(route)).status, 401);
+  const session = built.sessions.create(60_000, 0);
+  const response = await fetch(route, { headers: { cookie: `t2o_admin=${session}` } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.scope, "global-admin-gateway-metrics");
+  assert.equal(body.projectIsolation, false);
+  assert.equal(body.projection.requests.count.value, 1);
+  assert.equal(body.projection.requests.durationP50.value, 10);
+  assert.equal(body.projection.filters.requested.accountId, "acct-a");
+  const unsupported = await (await fetch(base + "/admin/api/v1/analytics?provider=exa", { headers: { cookie: `t2o_admin=${session}` } })).json();
+  assert.equal(unsupported.projection.requests.count.availability, "unavailable");
+  assert.deepEqual(unsupported.projection.filters.unsupportedForRequests, ["provider"]);
+});

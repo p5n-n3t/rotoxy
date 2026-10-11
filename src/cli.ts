@@ -16,7 +16,7 @@ import { migrateLegacyPool, PoolSchemaError } from "./pool-schema.js";
 import { StateStore, normalizeBasePath } from "./store.js";
 import { startServer } from "./server.js";
 import type { GatewayConfig, PoolStrategy } from "./types.js";
-import { configureClientConnection, inspectClientConnections, manualClientSetupNotes, removeClientConnection, type LocalMcpClient } from "./client-connections.js";
+import { configureClientConnection, inspectClientConnections, manualClientSetupNotes, removeClientConnection, restoreClientConnection, type LocalMcpClient } from "./client-connections.js";
 
 const execFileAsync = promisify(execFile);
 const program = new Command();
@@ -97,6 +97,7 @@ program
   .option("--upstream-url <url>", "override saved upstream MCP endpoint")
   .option("--strategy <strategy>", "override pool strategy")
   .option("--oracle-pool", "enable scoped tools for the configured private Oracle queue")
+  .option("--web-tools-config <path>", "explicit owner-private, credential-free provider/account binding file")
   .option("--supervisor-config <path>", "explicitly enable the durable supervisor using a private JSON config")
   .action(async (opts) => {
     const s = await ensureStore();
@@ -108,7 +109,7 @@ program
         if (opts.strategy) state.config.strategy = opts.strategy as PoolStrategy;
       });
     }
-    await startServer({ host: opts.host, port: opts.port, supervisorConfigPath: opts.supervisorConfig, oraclePool: opts.oraclePool });
+    await startServer({ host: opts.host, port: opts.port, supervisorConfigPath: opts.supervisorConfig, oraclePool: opts.oraclePool, webToolsConfigPath: opts.webToolsConfig });
   });
 
 const account = program.command("account").description("Manage encrypted upstream credentials");
@@ -572,6 +573,16 @@ clients.command("remove <client> <name>")
   .action(async (client: LocalMcpClient, name: string, opts) => {
     const result = await removeClientConnection({ client, name, apply: Boolean(opts.apply) });
     console.log(`${result.applied ? "Applied" : "Plan"}: ${result.command} ${result.args.map((arg) => JSON.stringify(arg)).join(" ")}`);
+    console.log(result.message);
+  });
+
+clients.command("restore <client> <backupPath>")
+  .description("Preview restoration from a private client-configuration backup; never applies a client change")
+  .action(async (client: LocalMcpClient, backupPath: string) => {
+    const result = await restoreClientConnection({ client, backupPath });
+    console.log(`Plan: ${result.command} ${result.args.map((arg) => JSON.stringify(arg)).join(" ")}`);
+    console.log(`Private backup label: ${client} client configuration`);
+    console.log(`Removal backup path: ${result.backupPath}`);
     console.log(result.message);
   });
 
