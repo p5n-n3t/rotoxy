@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { normalizeSupervisorSnapshot, renderSupervisorDashboard } from "../dist/supervisor-ui.js";
+import { normalizeSupervisionInbox } from "../dist/admin.js";
 
 test("renders nested workforce hierarchy with native keyboard disclosures", () => {
   const html = renderSupervisorDashboard({ providers: [{ id: "p", label: "Provider", status: "healthy", accounts: [{ id: "a", label: "Account", status: "ready", workspaces: [{ id: "w", label: "Workspace", workers: [{ id: "worker-1", status: "working" }] }] }] }] });
@@ -77,7 +78,7 @@ test("live polling is nonce-gated and preserves unrelated hierarchy/focus nodes"
 
 test("live pause stops polling and pagehide clears the interval", async () => {
   const html = renderSupervisorDashboard({}, { nonce: "n", liveFeedUrl: "/admin/api/v1/supervisor/p/live" });
-  const script = html.match(/<script nonce="n">([\s\S]*?)<\/script>/)?.[1];
+  const script = [...html.matchAll(/<script nonce="n">([\s\S]*?)<\/script>/g)].map((match) => match[1]).find((value) => value.includes('getElementById("live-shell")'));
   assert.ok(script);
   const events = { innerHTML: "initial" };
   const status = { textContent: "" };
@@ -190,4 +191,91 @@ test("Python epoch-second event timestamps render the actual observation date", 
   const html = renderSupervisorDashboard({ events: [{ id: "1", at: 1791652719.336, severity: "info", message: "operation_complete" }] });
   assert.match(html, /2026-10-10T17:18:39\.336Z/);
   assert.doesNotMatch(html, /1970-01-/);
+});
+
+test("brand system, snapshot ledger, and project-scoped supervision inbox are rendered", () => {
+  const html = renderSupervisorDashboard({
+    providers: [{ id: "p", label: "P", status: "ready", accounts: [{ id: "a", label: "A", status: "ready", workspaces: [{ id: "w", workers: [{ id: "worker", status: "ready" }] }] }] }],
+    jobs: [{ id: "job", status: "queued" }],
+  }, { nonce: "brand-nonce", csrfToken: "csrf", liveFeedUrl: "/admin/api/v1/supervisor/project-7/live" });
+  assert.match(html, /<meta name="color-scheme" content="light dark">/);
+  assert.match(html, /data:image\/svg\+xml/);
+  assert.match(html, /class="brand-name">Token2OAuth/);
+  assert.match(html, /class="page-mark"/);
+  assert.match(html, /Providers listed/);
+  assert.match(html, /Accounts listed/);
+  assert.match(html, /Workers listed/);
+  assert.match(html, /Assignments listed/);
+  assert.match(html, /Counts are records in this project snapshot/);
+  assert.match(html, /data-endpoint="\/admin\/api\/v1\/supervisor\/project-7\/inbox\?after=0&amp;limit=20"/);
+  assert.match(html, /data-project-id="project-7"/);
+  assert.match(html, /X-CSRF-Token/);
+  assert.match(html, /body:JSON\.stringify\(\{projectId\}\)/);
+  assert.match(html, /Inbox unavailable; retry when supervision service is available/);
+  assert.match(html, /prefers-reduced-motion:reduce/);
+  assert.match(html, /@media\(max-width:520px\)/);
+});
+
+test("overview ledger keeps missing snapshot sections unknown, not zero", () => {
+  const html = renderSupervisorDashboard({});
+  assert.equal((html.match(/Not reported/g) || []).length, 4);
+  assert.doesNotMatch(html, /Providers listed<\/dt><dd[^>]*>0<\/dd>/);
+  assert.match(html, /authenticated inbox endpoint is not available/);
+  const emptyKnownLists = renderSupervisorDashboard({ providers: [], jobs: [], workers: [] });
+  assert.match(emptyKnownLists, /Providers listed<\/dt><dd class="">0<\/dd>/);
+  assert.match(emptyKnownLists, /Assignments listed<\/dt><dd class="">0<\/dd>/);
+});
+
+test("inbox normalizer bounds event and model inventory fields and rejects unknown shapes", () => {
+  assert.equal(normalizeSupervisionInbox({ events: [], models: [] }), undefined);
+  const inbox = normalizeSupervisionInbox({
+    available: true,
+    events: Array.from({ length: 24 }, (_, index) => ({ id: `row-${index}`, eventId: `event-${index}`, worker: "w".repeat(400), oracle: { result: "r".repeat(900) } })),
+    models: [{ host: "h", models: Array.from({ length: 40 }, (_, index) => `model-${index}`), error: "e".repeat(400) }],
+  });
+  assert.equal(inbox.events.length, 20);
+  assert.equal(inbox.events[0].eventId, "event-0");
+  assert.equal(inbox.events[0].worker.length, 240);
+  assert.equal(inbox.events[0].oracle.result.length, 480);
+  assert.equal(inbox.models[0].models.length, 30);
+  assert.equal(inbox.models[0].error.length, 240);
+});
+
+test("inbox acknowledgment sends same-origin CSRF header and selected project body", async () => {
+  const html = renderSupervisorDashboard({}, { nonce: "n", csrfToken: "csrf-token", liveFeedUrl: "/admin/api/v1/supervisor/project-7/live" });
+  const script = [...html.matchAll(/<script nonce="n">([\s\S]*?)<\/script>/g)].map((match) => match[1]).find((value) => value.includes('getElementById("supervision-feed")'));
+  assert.ok(script);
+  class Node {
+    constructor(tag = "div") { this.tagName = tag; this.children = []; this.dataset = {}; this.listeners = {}; this.textContent = ""; }
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = nodes; }
+    addEventListener(type, fn) { this.listeners[type] = fn; }
+    setAttribute() {}
+  }
+  const root = new Node(); root.dataset = { endpoint: "/admin/api/v1/supervisor/project-7/inbox?after=0&limit=20", projectId: "project-7", csrfToken: "csrf-token" };
+  const status = new Node(), events = new Node(), models = new Node(), refresh = new Node("button");
+  const nodes = { "supervision-feed": root, "supervision-status": status, "supervision-events": events, "supervision-models": models, "supervision-refresh": refresh };
+  const requests = [];
+  const listeners = {};
+  const context = {
+    document: { getElementById: (id) => nodes[id] || null, createElement: (tag) => new Node(tag) },
+    location: { href: "https://local.test/admin/supervisor/project-7", origin: "https://local.test" },
+    window: { addEventListener: (name, fn) => { listeners[name] = fn; } },
+    fetch: async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      if (options.method === "POST") return { ok: true };
+      return new Response(JSON.stringify({ available: true, events: [{ id: "row-1", eventId: "evt/1", kind: "job.done", at: "2026-10-12T00:00:00Z" }], models: [] }), { headers: { "Content-Type": "application/json" } });
+    },
+    URL, TextDecoder, Uint8Array, JSON, Date, encodeURIComponent,
+  };
+  vm.runInNewContext(script, context);
+  await new Promise((resolve) => setImmediate(resolve));
+  const findButton = (node) => node.tagName === "button" && node.textContent === "Acknowledge" ? node : node.children.map(findButton).find(Boolean);
+  const acknowledge = findButton(events);
+  assert.ok(acknowledge);
+  await acknowledge.listeners.click();
+  assert.equal(requests[1].options.method, "POST");
+  assert.equal(new URL(requests[1].url).pathname, "/admin/api/v1/supervisor/project-7/inbox/evt%2F1/ack");
+  assert.equal(requests[1].options.headers["X-CSRF-Token"], "csrf-token");
+  assert.deepEqual(JSON.parse(requests[1].options.body), { projectId: "project-7" });
 });

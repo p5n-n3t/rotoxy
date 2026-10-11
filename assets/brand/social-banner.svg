@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Token2OAuth</title>
+  <desc id="desc">A relay gate mark beside Token2OAuth, a measured control plane for OAuth-backed workforces.</desc>
+  <rect width="1200" height="630" fill="#f5f3ee"/>
+  <path d="M0 500H1200" stroke="#dcd6ca" stroke-width="2"/>
+  <rect x="88" y="104" width="112" height="112" rx="24" fill="#fffdf9" stroke="#dcd6ca" stroke-width="2"/>
+  <g transform="translate(120 136) scale(1.45)" fill="none" stroke="#16191d" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 41V13a4 4 0 0 1 4-4h22a4 4 0 0 1 4 4v28"/>
+    <path d="M16 41V28a5 5 0 0 1 5-5M32 41V28a5 5 0 0 0-5-5M24 41V30"/>
+  </g>
+  <circle cx="155" cy="169" r="6.1" fill="#0f7b6c"/>
+  <text x="88" y="330" fill="#16191d" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="72" font-weight="700" letter-spacing="-3">Token2OAuth</text>
+  <text x="92" y="393" fill="#5d636b" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="28">A measured control plane for OAuth-backed workforces</text>
+  <text x="92" y="554" fill="#0f7b6c" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="18" font-weight="600" letter-spacing="3">ROUTE · SUPERVISE · VERIFY</text>
+</svg>
