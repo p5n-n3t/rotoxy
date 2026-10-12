@@ -10,7 +10,7 @@ The legacy process was stopped. Its old user unit and the old path-restoration u
 
 Real `rotoxy down`, `up`, and repeated `up` passed: down withdrew the route and stopped the configured services; up restored one foreground route after the health check; repeated up started nothing. Gateway/Oracle/monitor boot activation is disabled, and the new target and Funnel units have no boot installation target. No machine reboot was performed. A live public doctor check passed all seven stages, including actual upstream MCP initialization, tool inventory, OAuth metadata and Funnel inspection.
 
-Claude Code 2.1.286 used its official HTTP MCP configuration and browser consent. It authenticated and then performed a real LightSprint `GET /api/repos`; it repeated this successfully after the gateway restart and Funnel migration. Repository counts varied with the account selected by pooling. This test proves authenticated read execution and result retrieval, not a paid cloud inference task initiated by Claude.
+Claude Code 2.1.286 used its official HTTP MCP configuration and browser consent. It authenticated and then performed a real LightSprint `GET /api/repos`; it repeated this successfully after the gateway restart and Funnel migration. Repository counts varied with the account selected by pooling. This test proves authenticated read execution and result retrieval, not a paid cloud inference task initiated by Claude. Project-scoped job access also requires the approved client ID in the private supervisor project binding; OAuth job scopes alone do not grant project membership. A stale cached registration ID initially caused a job-access denial. The active grant was signature-verified and its client ID was added explicitly.
 
 ## Implemented surfaces
 
@@ -45,6 +45,7 @@ The installed Codex 0.162.1 App Server completed its real initialize/device-code
 - Embedded Python suite: 306 passed.
 - Desktop 1280px and mobile 390px headless rendering: Models, Credits, Oracle, Search and Codex all returned 200 without document-width overflow. Private screenshots were retained locally; they contain operator account data and are not published.
 - Public OAuth/MCP and CLI lifecycle behavior were tested separately from unit mocks.
+- Offline build/tarball audit passed with the new manual installer, controller and foreground units included.
 - Manual installer behavior was tested with isolated local command doubles. A fresh clean-machine installation was not performed.
 
 ## Rollback and continuity
