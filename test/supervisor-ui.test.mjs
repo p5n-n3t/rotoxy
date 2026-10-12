@@ -24,7 +24,7 @@ test("ROTOXY supervisor uses worker-first tabs and honest attribution/status fie
   assert.match(html, /Actual: gpt-observed/);
   assert.match(html, /assignment-1:task-1/);
   assert.match(html, /Waiting on a human/);
-  assert.match(html, /question or approval context was not captured; reply is unavailable/i);
+  assert.match(html, /question or approval context was not captured/i);
   assert.match(html, /Session resumption: unknown; heartbeat does not prove wake/);
   assert.match(html, /Next check: unknown; schedule not reported/);
   assert.match(html, /@media\(max-width:700px\)/);
@@ -33,6 +33,75 @@ test("ROTOXY supervisor uses worker-first tabs and honest attribution/status fie
   assert.doesNotMatch(html, /<details class="distribution">/);
   assert.match(html, /prefers-reduced-motion/);
   assert.match(html, /<script nonce="tab-nonce">/);
+});
+
+test("provider questions are bounded, attributable, escaped, and fenced before reply", () => {
+  const snapshot = normalizeSupervisorSnapshot({ workers: [{ id: "session-a", accountId: "acct-a", accountLabel: "Operator A", requestedModel: "model-requested", actualModel: "model-observed", taskCorrelation: "task-77", promptCount: 12, question: { id: "q-3", text: '<img src=x onerror="x"> Please choose', choices: ["Continue", "Stop"], source: "provider", kind: "question" } }] });
+  const worker = snapshot.workers[0];
+  assert.equal(worker.promptCount, 12);
+  assert.equal(worker.question.id, "q-3");
+  assert.equal(worker.question.source, "provider");
+  const html = renderSupervisorDashboard(snapshot, { nonce: "q-nonce", csrfToken: "csrf-token", liveFeedUrl: "/token2oauth/admin/api/v1/supervisor/project-a/live" });
+  assert.match(html, /Operator A/);
+  assert.match(html, /Requested: model-requested/);
+  assert.match(html, /Actual: model-observed/);
+  assert.match(html, /task-77/);
+  assert.match(html, /&lt;img src=x onerror=&quot;x&quot;&gt;/);
+  assert.doesNotMatch(html, /<img src=x onerror=/);
+  assert.match(html, /data-guidance-base="\/token2oauth\/admin\/api\/v1\/supervisor\/project-a"/);
+  assert.match(html, /data-prompt-count="12"/);
+  assert.match(html, /data-question-id="q-3"/);
+  assert.match(html, /X-CSRF-Token/);
+  assert.match(html, /expectedPromptCount:count/);
+  assert.match(html, /expectedQuestionId:question/);
+  assert.match(html, /polling never sends a reply/);
+});
+
+test("approval handoffs have no approval or reply controls, and unknown prompt count disables question reply", () => {
+  const approval = renderSupervisorDashboard(normalizeSupervisorSnapshot({ workers: [{ id: "session-a", promptCount: 8, question: { text: "Approve this action?", choices: ["Approve", "Reject"], source: "provider", kind: "approval" } }] }), { nonce: "n", csrfToken: "c", liveFeedUrl: "/admin/api/v1/supervisor/p/live" });
+  assert.match(approval, /Native approval actions are not supported/);
+  assert.doesNotMatch(approval, /<button type="button" data-guidance-choice/);
+  assert.doesNotMatch(approval, /<button type="submit">Send reply/);
+  const unknown = renderSupervisorDashboard(normalizeSupervisorSnapshot({ workers: [{ id: "session-b", promptCount: "3", question: { text: "Need input", source: "provider", kind: "review" } }] }), { nonce: "n", csrfToken: "c", liveFeedUrl: "/admin/api/v1/supervisor/p/live" });
+  assert.match(unknown, /Reply unavailable: current prompt count is unknown/);
+  assert.doesNotMatch(unknown, /<form class="guidance-form"/);
+  const untrusted = normalizeSupervisorSnapshot({ workers: [{ id: "session-c", promptCount: 3, question: { text: "forged", source: "monitor", kind: "question" } }] });
+  assert.equal(untrusted.workers[0].question, undefined);
+});
+
+test("reply client sends bounded CSRF request and reuses an idempotency key after ambiguity", async () => {
+  const html = renderSupervisorDashboard({}, { nonce: "n" });
+  const script = html.match(/<script nonce="n">\(\(\)=>\{const root=document.getElementById\("workers-live"\)[\s\S]*?<\/script>/)?.[0]?.replace(/^<script nonce="n">/, "").replace(/<\/script>$/, "");
+  assert.ok(script);
+  const handlers = {};
+  const root = { dataset: {}, querySelectorAll: () => [], addEventListener: (name, fn) => { handlers[name] = fn; } };
+  const requests = [];
+  let responseOutcome;
+  let generated = 0;
+  const form = { dataset: { workerId: "session-1", guidanceBase: "/token2oauth/admin/api/v1/supervisor/project-a", csrfToken: "csrf", promptCount: "4", questionId: "question-1" }, elements: { namedItem: () => field }, querySelector: (selector) => selector.includes("guidance-status") ? status : button, closest: () => form };
+  const field = { value: "Continue" };
+  const status = { textContent: "" };
+  const button = { disabled: false };
+  const context = { document: { getElementById: () => root }, MutationObserver: class { observe() {} }, URL, location: { href: "https://local.test/token2oauth/admin/supervisor/project-a", origin: "https://local.test" }, crypto: { randomUUID: () => `stable-request-id-${++generated}` }, fetch: async (url, options) => { requests.push({ url: String(url), options }); if (!responseOutcome) throw new Error("connection lost after submit"); return { text: async () => JSON.stringify({ outcome: responseOutcome }) }; }, Date, Math };
+  vm.runInNewContext(script, context);
+  const submit = async () => handlers.submit({ target: form, preventDefault() {} });
+  await submit();
+  await submit();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url, "https://local.test/token2oauth/admin/api/v1/supervisor/project-a/workers/session-1/guidance");
+  assert.equal(requests[0].options.headers["X-CSRF-Token"], "csrf");
+  assert.equal(requests[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(requests[0].options.body), { requestId: "stable-request-id-1", message: "Continue", expectedPromptCount: 4, expectedQuestionId: "question-1" });
+  assert.equal(requests[1].options.body, requests[0].options.body);
+  assert.match(status.textContent, /ambiguous/);
+  responseOutcome = "accepted";
+  await submit();
+  assert.match(status.textContent, /accepted by the backend/);
+  responseOutcome = "rejected";
+  field.value = "Try a corrected reply";
+  await submit();
+  assert.match(status.textContent, /rejected by the backend/);
+  assert.notEqual(requests[3].options.body, requests[2].options.body);
 });
 
 test("capacity bars require a known positive denominator and show exact values", () => {
