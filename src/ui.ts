@@ -13,7 +13,7 @@ import { renderDiagnosticsPage, renderSecurityPage, renderToolsPage, renderRotat
 import { refreshAccountCapabilities, toolCatalog } from "./capabilities.js";
 import { collectDoctorSnapshot } from "./doctor-runtime.js";
 import { diagnoseDoctorSnapshot } from "./doctor.js";
-import { LifecycleController, createExecFileRunner, planUp, renderCommand } from "./lifecycle.js";
+import { LifecycleController, effectiveServeConfig, createExecFileRunner, planUp, renderCommand } from "./lifecycle.js";
 import { compileToolPolicy, type ToolPolicy } from "./tool-policy.js";
 import { adminNav, withCsrf, ROTOXY_FAVICON_SVG } from "./html.js";
 import { BRAND_MARK_SVG } from "./supervisor-ui.js";
@@ -42,7 +42,7 @@ function e(v: unknown): string {
 }
 
 const css = String.raw`
-:root{color-scheme:light dark;--paper:#f5f3ee;--surface:#fffdf9;--sunk:#ece8df;--ink:#16191d;--muted:#565c64;--line:#d6d0c4;--rule:#e6e1d6;--signal:#0f7b6c;--signal-soft:#dff1ec;--amber:#9a540f;--amber-soft:#fbecd8;--red:#a33a2f;--red-soft:#f8e3df;--focus:#c26a12;--mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;font:15px/1.55 ui-sans-serif,"Inter","Segoe UI",system-ui,-apple-system,sans-serif}
+:root{color-scheme:light dark;--paper:#f5f3ee;--surface:#fffdf9;--sunk:#ece8df;--ink:#16191d;--muted:#565c64;--line:#d6d0c4;--rule:#e6e1d6;--signal:#0f7b6c;--signal-soft:#dff1ec;--amber:#9a540f;--amber-soft:#fbecd8;--red:#a33a2f;--red-soft:#f8e3df;--focus:#c26a12;--mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;font:15px/1.55 ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif}
 @media(prefers-color-scheme:dark){:root{--paper:#0d0f12;--surface:#14171b;--sunk:#0a0c0e;--ink:#e9e6df;--muted:#a3a7ad;--line:#2c3138;--rule:#1f242a;--signal:#4fd1b8;--signal-soft:#123a33;--amber:#f0b25c;--amber-soft:#3a2a12;--red:#f08a7c;--red-soft:#3d1b17;--focus:#f0b25c}}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);min-height:100vh}
 a{color:var(--signal);text-underline-offset:3px}
@@ -138,7 +138,7 @@ export function brandMarkup(body: string): string {
 }
 
 export function page(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f3ee"><meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0d0f12"><link rel="icon" type="image/svg+xml" href="${faviconHref}"><title>${e(title)} · Token2OAuth</title><style>${css}</style></head><body>${brandMarkup(body)}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f3ee"><meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0d0f12"><link rel="icon" type="image/svg+xml" href="${faviconHref}"><title>${e(title)} · ROTOXY</title><style>${css}</style></head><body>${brandMarkup(body)}</body></html>`;
 }
 
 export class AdminUi {
@@ -469,9 +469,9 @@ strategySelect.addEventListener("change", () => {
         snapshot.funnel = {
           checked: true,
           enabled: routes.funnel,
-          expectedPath: controller.routes.ownedPath,
+          expectedPath: routes.root.target === "http://127.0.0.1:2030" ? "/" : controller.routes.ownedPath,
           reportedCollision: routes.owned.state === "collision",
-          mounts: Object.entries((routes.hostPort && observed.serveConfig.Web?.[routes.hostPort]?.Handlers) || {}).map(([path, handler]) => {
+          mounts: Object.entries((routes.hostPort && effectiveServeConfig(observed.serveConfig).Web?.[routes.hostPort]?.Handlers) || {}).map(([path, handler]) => {
             try {
               const target = new URL(String(handler.Proxy));
               return { path, targetHost: target.hostname, targetPort: Number(target.port) || undefined };

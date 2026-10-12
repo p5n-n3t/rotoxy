@@ -1,0 +1,15 @@
+{
+  "verifiedAt": "2026-10-12",
+  "product": "ROTOXY",
+  "canonicalRepository": "p5n-n3t/token2oauth",
+  "publicRoute": {"mode":"foreground", "mount":"/", "targetPort":2030, "bootEnabled":false},
+  "legacyProcessRetired": true,
+  "claudeCode": {"version":"2.1.286", "oauthCompleted":true, "realReadExecuted":true, "reconnectAfterMigration":true},
+  "doctorStagesPassed": 7,
+  "ollama": {"keysInRotation":9, "catalogModels":18, "realChatAnswer":true, "reportedPromptTokens":18, "reportedCompletionTokens":2},
+  "lightsprint": {"configuredAccounts":12, "peakObservedRunning":8, "overlappingAccounts":4, "sharedObservationUtc":"2026-10-12T11:30:44.348Z", "providerLimitVerified":false, "nativeCreditCeilingVerified":false},
+  "oracle": {"hosts":["ora1","ora3","ora5"], "advisoryTasksCompleted":3, "observedHistoricalAssignments":[7,7,6]},
+  "codex": {"version":"0.162.1", "officialDeviceCodeStartAndCancel":true, "signedInProfileQuotaVerified":false, "automaticSubscriptionDispatch":false},
+  "tests": {"nodeRegression":326, "python":306, "focusedLifecycleInstallerRelease":9, "freshMachineInstall":false},
+  "limitations": ["No automatic paid cloud/headless recovery adapter", "No arbitrary dormant web-chat wakeup", "Historical credit readings are not live balances", "Legacy OpenRouter/MCP entries preserved but routes not migrated", "24/35-worker capacity remains unverified"]
+}

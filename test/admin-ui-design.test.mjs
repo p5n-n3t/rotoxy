@@ -31,7 +31,7 @@ test("theme wrapper keeps CSRF injection on every POST form and escapes the titl
   const body = `${adminNav("", "pool")}<form method="post" action="/admin/accounts"><input name="label"></form><form method="get" action="/x"></form>`;
   const html = withCsrf(page("<Pool>", body), "tok-123");
   assert.equal((html.match(/name="_csrf" value="tok-123"/g) || []).length, 2); // logout + accounts
-  assert.match(html, /<title>&lt;Pool&gt; · Token2OAuth<\/title>/);
+  assert.match(html, /<title>&lt;Pool&gt; · ROTOXY<\/title>/);
 });
 
 test("mobile rules keep forms single-column and nav scrollable without hiding overflow", () => {

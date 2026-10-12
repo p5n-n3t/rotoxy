@@ -1,5 +1,8 @@
 import { OracleTools } from "./oracle-tools.js";
 import express from "express";
+import { join } from "node:path";
+import { CodexProfiles } from "./codex-profiles.js";
+import { createResourceConnectionsRouter } from "./resource-connections.js";
 import { fileURLToPath } from "node:url";
 import { AdminSessions } from "./admin-session.js";
 import { OAuthService } from "./oauth.js";
@@ -9,8 +12,10 @@ import { StateStore, normalizeBasePath } from "./store.js";
 import { TelemetryRecorder } from "./telemetry.js";
 import { createSupervisorAdminRouter, SupervisorApi, type SupervisorBackend } from "./supervisor-api.js";
 import { createSupervisorRuntime } from "./supervisor-runtime.js";
-import { loadWebToolsConfig, type ConfiguredWebTools } from "./web-tools-config.js";
+import { liveWebToolsConfig, type ConfiguredWebTools } from "./web-tools-config.js";
 import { createAnalyticsApiRouter } from "./analytics-api.js";
+import { createModelGateway } from "./model-gateway.js";
+import { createControlPlaneAdminRouter } from "./control-plane-admin.js";
 
 export interface ServerOptions {
   host?: string;
@@ -35,8 +40,10 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const pool = new CredentialPool(store);
   pool.telemetry = telemetry;
   const oauth = new OAuthService(store, sessions);
+  const modelGateway = createModelGateway(store);
   const supervisor = new SupervisorApi(options.supervisorBackend);
-  const webTools = options.webTools ?? await loadWebToolsConfig(options.webToolsConfigPath, store);
+  const webTools = options.webTools ?? liveWebToolsConfig(options.webToolsConfigPath ?? join(store.dir, "web-tools.json"), store);
+  const codexProfiles = process.env.TOKEN2OAUTH_CODEX_BINARY ? new CodexProfiles({ codexBinary: process.env.TOKEN2OAUTH_CODEX_BINARY, configDir: store.dir }) : undefined;
   const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools);
   const ui = new (await import("./ui.js")).AdminUi(store, pool, sessions, { oauth, telemetry });
 
@@ -46,6 +53,9 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
 
   const router = express.Router();
   router.use(oauth.router);
+  router.use(modelGateway.router);
+  router.use(createControlPlaneAdminRouter(store, sessions, modelGateway.credentials, fileURLToPath(new URL("../supervisor/", import.meta.url)), codexProfiles, modelGateway.snapshot));
+  router.use(createResourceConnectionsRouter(store, sessions));
   router.use(createAnalyticsApiRouter(store, sessions, telemetry));
   router.use(createSupervisorAdminRouter(store, sessions, options.supervisorBackend));
   router.use(ui.router);
@@ -72,7 +82,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
     res.status(500).json({ error: "internal_error", message: String(error?.message || error) });
   });
 
-  return { app, store, pool, telemetry, sessions, supervisor, webTools };
+  return { app, store, pool, telemetry, sessions, supervisor, webTools, modelGateway, codexProfiles };
 }
 
 export async function startServer(options: ServerOptions = {}) {
@@ -84,7 +94,7 @@ export async function startServer(options: ServerOptions = {}) {
     supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)),
     store,
   }) : undefined;
-  const { app } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath });
+  const { app, codexProfiles } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath });
   const host = options.host || process.env.TOKEN2OAUTH_HOST || "127.0.0.1";
   const port = options.port || Number(process.env.TOKEN2OAUTH_PORT || 2030);
 
@@ -108,6 +118,7 @@ export async function startServer(options: ServerOptions = {}) {
     });
   });
 
+  if (codexProfiles) server.once("close", () => { void codexProfiles.close(); });
   if (runtime) server.once("close", () => { void runtime.close(); });
 
   return { server, store, init, supervisor: runtime };

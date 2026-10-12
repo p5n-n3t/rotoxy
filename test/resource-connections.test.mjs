@@ -91,7 +91,7 @@ test("private resource connections are admin/CSRF gated, encrypted, explicit, an
   assert.equal(listed.includes(secret), false);
   assert.match(listed, /credential|credentialStatus|allowedTools/);
   const html = await (await fetch(base + "/admin/resources", { headers: { cookie: `t2o_admin=${session}` } })).text();
-  assert.match(html, /Workspace providers/);
+  assert.match(html, /Search &amp; scraping APIs/);
   assert.match(html, /Models &amp; APIs/);
   assert.match(html, /Known client/);
   assert.equal(html.includes("exa-mock-key"), false);

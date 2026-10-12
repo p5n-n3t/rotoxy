@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync, statSync } from "node:fs";
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { open, mkdir, stat, unlink, utimes } from 'node:fs/promises';
@@ -21,7 +22,12 @@ export function createExecFileRunner(timeout = MAX_COMMAND_MS) {
   return async (file, args = []) => {
     if (!['systemctl', 'tailscale', 'curl'].includes(file)) throw new Error(`command not allowlisted: ${file}`);
     try {
-      const out = await execFileAsync(file, args, { timeout, maxBuffer: 256 * 1024, encoding: 'utf8' });
+      const env = { ...process.env };
+      if (process.platform === 'linux' && !env.DBUS_SESSION_BUS_ADDRESS && process.getuid) {
+        const runtime = `/run/user/${process.getuid()}`;
+        try { const bus = statSync(`${runtime}/bus`); if (bus.isSocket() && bus.uid === process.getuid()) { env.XDG_RUNTIME_DIR ||= runtime; env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${runtime}/bus`; } } catch {}
+      }
+      const out = await execFileAsync(file, args, { env, timeout, maxBuffer: 256 * 1024, encoding: 'utf8' });
       return { code: 0, stdout: out.stdout || '', stderr: out.stderr || '' };
     } catch (error) {
       return { code: Number.isInteger(error?.code) ? error.code : 1, stdout: error?.stdout || '', stderr: error?.stderr || error?.message || '' };
@@ -41,28 +47,29 @@ function parseServe(text) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('Tailscale Serve status must be an object');
   return v;
 }
+function layers(config) { return [config, ...Object.values(config.Foreground || {})]; }
 function webState(config) {
-  const ports = Object.entries(config.Web || {}).filter(([key]) => key.endsWith(':443'));
+  const ports = layers(config).flatMap(layer => Object.entries(layer.Web || {}).filter(([key]) => key.endsWith(':443')).map(([hostPort, server]) => ({ hostPort, server, layer })));
   if (ports.length > 1) throw new Error('Multiple Tailscale HTTPS listeners exist; refusing ambiguous routing');
-  const [hostPort, server] = ports[0] || [];
+  const { hostPort, server, layer } = ports[0] || {};
   const handlers = server?.Handlers || {};
-  const root = handlers['/'];
-  return { hostPort, handlers, root, funnelAllowed: Boolean(hostPort && config.AllowFunnel?.[hostPort]) };
+  return { hostPort, handlers, root: handlers['/'], funnelAllowed: Boolean(hostPort && layer.AllowFunnel?.[hostPort]) };
 }
 function unrelatedSnapshot(config) {
   const view = structuredClone(config);
   delete view.ETag;
-  for (const key of Object.keys(view.Web || {})) {
-    if (!key.endsWith(':443')) continue;
-    if (view.AllowFunnel) delete view.AllowFunnel[key];
-    const handlers = view.Web[key].Handlers || {};
-    delete handlers['/'];
-    if (!Object.keys(handlers).length) {
-      delete view.Web[key];
-      if (view.TCP?.['443'] && !view.TCP['443'].TCPForward) delete view.TCP['443'];
+  for (const layer of layers(view)) {
+    for (const key of Object.keys(layer.Web || {})) {
+      if (!key.endsWith(':443')) continue;
+      if (layer.AllowFunnel) delete layer.AllowFunnel[key];
+      const handlers = layer.Web[key].Handlers || {};
+      if (handlers['/']?.Proxy === 'http://127.0.0.1:2030') delete handlers['/'];
+      if (!Object.keys(handlers).length) { delete layer.Web[key]; if (layer.TCP?.['443'] && !layer.TCP['443'].TCPForward) delete layer.TCP['443']; }
     }
+    for (const key of ['Web', 'TCP', 'AllowFunnel']) if (layer[key] && !Object.keys(layer[key]).length) delete layer[key];
   }
-  for (const key of ['Web', 'TCP', 'AllowFunnel']) if (view[key] && !Object.keys(view[key]).length) delete view[key];
+  for (const [key, layer] of Object.entries(view.Foreground || {})) if (!Object.keys(layer).length) delete view.Foreground[key];
+  if (view.Foreground && !Object.keys(view.Foreground).length) delete view.Foreground;
   return canonical(view);
 }
 
@@ -111,12 +118,21 @@ export class RotoxyController {
     delete stable.ETag;
     return { config, ...webState(config), fingerprint: canonical(stable) };
   }
+  async appUnits() {
+    const units = [APP_UNITS[0]];
+    for (const unit of APP_UNITS.slice(1)) {
+      const r = await this.command("systemctl", ["--user", "show", unit, "--property=LoadState", "--value"]);
+      if (r.code === 0 && r.stdout.trim() === "loaded") units.push(unit);
+    }
+    return units;
+  }
   async status() {
     const units = {};
     for (const unit of MANAGED_UNITS) units[unit] = await this.active(unit);
     const route = await this.inspect();
-    return { units, root: route.root?.Proxy || null, funnelAllowed: route.funnelAllowed,
-      mounts: Object.keys(route.handlers).sort(), healthy: APP_UNITS.every(unit => units[unit]) && units[FUNNEL_UNIT] && route.root?.Proxy === 'http://127.0.0.1:2030' && route.funnelAllowed };
+    const configuredUnits = await this.appUnits();
+    return { units, configuredUnits, root: route.root?.Proxy || null, funnelAllowed: route.funnelAllowed,
+      mounts: Object.keys(route.handlers).sort(), healthy: configuredUnits.every(unit => units[unit]) && units[FUNNEL_UNIT] && route.root?.Proxy === 'http://127.0.0.1:2030' && route.funnelAllowed };
   }
   async waitHealthy() {
     for (let i = 0; i < this.healthAttempts; i++) {
@@ -138,7 +154,8 @@ export class RotoxyController {
     try {
       const before = await this.inspect();
       let baselineFingerprint = before.fingerprint;
-      const backendsActive = (await Promise.all(APP_UNITS.map(unit => this.active(unit)))).every(Boolean);
+      const appUnits = await this.appUnits();
+      const backendsActive = (await Promise.all(appUnits.map(unit => this.active(unit)))).every(Boolean);
       if (await this.active(FUNNEL_UNIT) && before.root?.Proxy === 'http://127.0.0.1:2030' && before.funnelAllowed && backendsActive) {
         await this.waitHealthy();
         return { ok: true, started: [], status: await this.status() };
@@ -166,14 +183,17 @@ export class RotoxyController {
         baselineFingerprint = migrated.fingerprint;
       }
       if (!await this.active(TARGET_UNIT)) { await this.runUnit('start', TARGET_UNIT); started.push(TARGET_UNIT); }
-      for (const unit of APP_UNITS) {
+      for (const unit of appUnits) {
         if (!await this.active(unit)) { await this.runUnit('start', unit); started.push(unit); }
       }
       await this.waitHealthy();
       const current = await this.inspect();
       if (current.fingerprint !== baselineFingerprint) throw new Error('Tailscale routes changed during startup; refusing exposure');
       if (!await this.active(FUNNEL_UNIT)) { await this.runUnit('start', FUNNEL_UNIT); started.push(FUNNEL_UNIT); }
-      const after = await this.inspect();
+      let after = await this.inspect();
+      for (let attempt = 0; attempt < 20 && (after.root?.Proxy !== 'http://127.0.0.1:2030' || !after.funnelAllowed); attempt++) {
+        await this.sleep(250); after = await this.inspect();
+      }
       if (after.root?.Proxy !== 'http://127.0.0.1:2030' || !after.funnelAllowed) throw new Error('Foreground Funnel did not produce the expected root route to 127.0.0.1:2030');
       return { ok: true, started, status: await this.status() };
     } catch (error) {
@@ -197,7 +217,7 @@ export class RotoxyController {
       if (after.root?.Proxy === 'http://127.0.0.1:2030' || after.funnelAllowed) throw new Error('Funnel route remains after stopping the owned foreground unit; no global route reset was attempted');
       if (unrelatedSnapshot(after.config) !== unrelatedBefore) throw new Error('Unrelated Tailscale state changed while stopping the foreground Funnel; backend units were left running');
       if (await this.active(TARGET_UNIT)) await this.runUnit('stop', TARGET_UNIT);
-      for (const unit of [...APP_UNITS].reverse()) if (await this.active(unit)) await this.runUnit('stop', unit);
+      for (const unit of [...await this.appUnits()].reverse()) if (await this.active(unit)) await this.runUnit('stop', unit);
       return { ok: true, status: await this.status() };
     } finally { await release(); }
   }
@@ -224,7 +244,7 @@ export function parseArgs(argv) {
   return { action, migrationPlan };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
     const { action, migrationPlan } = parseArgs(process.argv.slice(2));
     const controller = new RotoxyController();

@@ -133,8 +133,25 @@ export class ModelCredentialStore {
     });
   }
 
+  async listTokens(): Promise<Array<{ id: string; scopes: ModelScope[]; expiresAt: number }>> {
+    return (await this.read()).tokens.map(({ id, scopes, expiresAt }) => ({ id, scopes, expiresAt }));
+  }
+
+  /** Explicit local migration only: preserve a previously issued proxy token as a hash. */
+  async importLegacyToken(token: string, expiresAt: number): Promise<string> {
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(token) || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || expiresAt > Date.now() + TOKEN_LIFETIME_MAX_SECONDS * 1000) throw new TypeError("legacy token migration is invalid");
+    return this.mutate((doc) => {
+      const digest = hash(token);
+      const prior = doc.tokens.find((entry) => entry.hash === digest);
+      if (prior) return prior.id;
+      const id = randomToken(12);
+      doc.tokens.push({ id, hash: digest, scopes: ["model:read", "model:invoke"], createdAt: Date.now(), expiresAt });
+      return id;
+    });
+  }
+
   async authorizeToken(token: string, scope: ModelScope, now = Date.now()): Promise<boolean> {
-    if (typeof token !== "string" || !token.startsWith("t2om_") || token.length > 128) return false;
+    if (typeof token !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) return false;
     const candidate = Buffer.from(hash(token), "hex");
     const doc = await this.read();
     return doc.tokens.some((record) => {

@@ -28,7 +28,7 @@ test("ROTOXY brand renders with Token2OAuth compatibility subtitle and authored 
   assert.match(html, /<strong>ROTOXY<\/strong><div class="eyebrow">Token2OAuth gateway<\/div>/);
   assert.match(html, /<div class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"/);
   assert.ok(html.includes(ROTOXY_MARK_SVG));
-  assert.match(html, /<title>Pool · Token2OAuth<\/title>/); // title kept for compatibility
+  assert.match(html, /<title>Pool · ROTOXY<\/title>/); // legacy URLs remain compatible
 });
 
 test("nav escapes base and extra groups, and logout keeps CSRF", () => {

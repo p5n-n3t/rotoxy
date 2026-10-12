@@ -1,0 +1,16 @@
+import test from 'node:test';import assert from 'node:assert/strict';import{mkdtemp,rm,readFile}from'node:fs/promises';import{tmpdir}from'node:os';import{join}from'node:path';
+import{StateStore}from'../dist/store.js';import{buildApp}from'../dist/server.js';import{adminEpoch}from'../dist/admin-session.js';
+test('unified admin keeps model keys private, enforces CSRF and preserves only an explicitly migrated bearer',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'rotoxy-control-test-'));const old={home:process.env.HOME,config:process.env.TOKEN2OAUTH_CONFIG_DIR};process.env.HOME=dir;process.env.TOKEN2OAUTH_CONFIG_DIR=join(dir,'gateway');let server;
+ try{const store=new StateStore();await store.init({adminPassword:'admin-password-only-for-test'});const built=await buildApp(store);server=built.app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const base='http://127.0.0.1:'+server.address().port;const state=await store.load();const sid=built.sessions.create(undefined,adminEpoch(state)),csrf=built.sessions.csrfToken(sid),cookie='t2o_admin='+sid;
+  const unauth=await fetch(base+'/admin/models',{redirect:'manual'});assert.equal(unauth.status,302);
+  const post=(path,body)=>fetch(base+path,{method:'POST',redirect:'manual',headers:{cookie,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams(body)});
+  assert.equal((await post('/admin/models/add',{label:'Key one',apiKey:'sensitive-model-api-key'})).status,403);
+  const added=await post('/admin/models/add',{_csrf:csrf,label:'Key one',apiKey:'sensitive-model-api-key'});assert.equal(added.status,303);
+  const html=await(await fetch(base+'/admin/models',{headers:{cookie}})).text();assert.match(html,/Key one/);assert.ok(!html.includes('sensitive-model-api-key'));assert.ok(!String(await readFile(join(store.dir,'model-credentials.json'))).includes('sensitive-model-api-key'));
+  const issued=await post('/admin/models/token',{_csrf:csrf,scope:'invoke',days:'1'});assert.equal(issued.status,200);assert.equal(issued.headers.get('cache-control'),'no-store');const once=await issued.text();const token=/t2om_[A-Za-z0-9_-]+/.exec(once)?.[0];assert.ok(token);assert.equal(await built.modelGateway.credentials.authorizeToken(token,'model:invoke'),true);assert.ok(!(await(await fetch(base+'/admin/models',{headers:{cookie}})).text()).includes(token));
+  assert.equal((await fetch(base+'/v1/models',{headers:{authorization:'Bearer admin-password-only-for-test'}})).status,401);
+  const legacy='a'.repeat(64);assert.equal(await built.modelGateway.credentials.authorizeToken(legacy,'model:invoke'),false);const id=await built.modelGateway.credentials.importLegacyToken(legacy,Date.now()+86400000);assert.equal(await built.modelGateway.credentials.authorizeToken(legacy,'model:invoke'),true);await built.modelGateway.credentials.revokeToken(id);assert.equal(await built.modelGateway.credentials.authorizeToken(legacy,'model:invoke'),false);
+  assert.equal((await fetch(base+'/admin/oracle',{redirect:'manual'})).status,302);
+ }finally{if(server)await new Promise(r=>server.close(r));if(old.home===undefined)delete process.env.HOME;else process.env.HOME=old.home;if(old.config===undefined)delete process.env.TOKEN2OAUTH_CONFIG_DIR;else process.env.TOKEN2OAUTH_CONFIG_DIR=old.config;await rm(dir,{recursive:true,force:true});}
+});

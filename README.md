@@ -1,25 +1,15 @@
-# Token2OAuth
+# ROTOXY
 
-<p align="center">
-  <strong>Turn bearer-token MCP servers into OAuth-connected MCP servers—with encrypted multi-account pooling.</strong>
-</p>
+![ROTOXY](assets/brand/rotoxy-wordmark.svg)
 
-<p align="center">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-4%2F4%20passing-44DC93">
-  <img alt="Node 22+" src="https://img.shields.io/badge/Node.js-22%2B-5FA04E?logo=nodedotjs&logoColor=white">
-  <img alt="OAuth 2.1 + PKCE" src="https://img.shields.io/badge/OAuth-2.1%20%2B%20PKCE-7B61FF">
-  <img alt="MCP" src="https://img.shields.io/badge/MCP-Streamable%20HTTP-51D3EF">
-  <img alt="Tailscale" src="https://img.shields.io/badge/Tailscale-Funnel-111111?logo=tailscale">
-  <a href="./LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-</p>
+One gateway for authorized AI workspaces, model accounts, search tools and local workers. ROTOXY combines Token2OAuth's OAuth/MCP gateway with Snooze's durable jobs and monitoring. Existing `token2oauth` commands, configuration paths and client URLs remain compatible.
 
-Token2OAuth is a self-hosted **OAuth facade + smart credential pool + reverse proxy** for remote MCP servers that normally expect a static bearer token.
+- **Workspace providers:** pooled LightSprint access, pinned sessions, distributed job tools and a persistent supervisor.
+- **Models & APIs:** an encrypted Ollama Cloud key pool, scoped model tokens, and explicitly permitted Exa, Firecrawl and Tavily search/extraction tools.
+- **Private workers:** a durable Oracle queue with health, assignments, model names and reported throughput.
+- **Codex profiles:** isolated official CLI sign-in, model discovery and reported AI quota windows. Automatic subscription pooling/dispatch is not enabled.
 
-ChatGPT connects to **one** Token2OAuth MCP URL using OAuth. Token2OAuth keeps upstream provider credentials encrypted on the host, chooses a healthy credential for each new MCP session, and forwards the request to the real upstream MCP server.
-
-It was designed for the common case where you own several legitimate provider accounts or keys with separate quotas and do **not** want to configure one ChatGPT connector per account.
-
-> Use Token2OAuth only with accounts and credentials you are authorized to use, and in accordance with the upstream service's terms and limits.
+The dashboard distinguishes reported values, historical snapshots and unknown metrics. Monitoring survives a closed chat while the service host remains online. Automatic recovery capabilities and client limitations are described in the [verified release checkpoint](docs/implementation/2026-10-12-rotoxy-release.md).
 
 ## Architecture
 
@@ -67,32 +57,28 @@ It was designed for the common case where you own several legitimate provider ac
 
 ## Quick install
 
+Install Node.js 22+, Git, npm and an authenticated Tailscale client first, then run:
+
 ~~~bash
-curl -fsSL https://raw.githubusercontent.com/p5n-n3t/token2oauth/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/p5n-n3t/token2oauth/main/install-rotoxy.sh | bash
+rotoxy up
 ~~~
 
-The installer detects an existing Tailscale installation. If Tailscale is missing, it can install the official client. It does **not** reset existing Serve/Funnel routes.
+The manual installer prepares the gateway and foreground Funnel units without enabling boot startup or publishing routes. `rotoxy up` starts the configured services and publishes one root route to port 2030. `rotoxy down` withdraws that route and stops the services. Existing conflicting routes cause a refusal and must be migrated explicitly; global resets are never used. Oracle and monitoring units are started when separately installed and configured.
 
 | Item | Default |
 |---|---|
-| Local listen | <code>127.0.0.1:2030</code> |
-| Public path | <code>/token2oauth</code> |
-| Exposure | Tailscale Funnel |
-| State | <code>~/.config/token2oauth</code> |
-| Program | <code>~/.local/share/token2oauth</code> |
-| CLI | <code>~/.local/bin/token2oauth</code> |
+| Local listener | `127.0.0.1:2030` |
+| Public MCP path | `/token2oauth/mcp` (compatible root `/mcp` also works) |
+| Dashboard | `/token2oauth/admin` |
+| Lifecycle | `rotoxy up`, `rotoxy down`, `rotoxy status` |
+| Configuration | `~/.config/token2oauth` |
+| Runtime | `~/.local/share/token2oauth` |
+| Boot startup | Off |
 
-An existing root service can coexist with Token2OAuth:
+The canonical repository retains the `token2oauth` name during migration; product branding is ROTOXY. See [manual lifecycle and legacy migration](docs/implementation/rotoxy-lifecycle.md).
 
-~~~text
-https://my-host.my-tailnet.ts.net/
-├── /             → existing service
-└── /token2oauth  → Token2OAuth :2030
-~~~
-
-Tailscale supports path-specific mounts with <code>--set-path</code>, so Token2OAuth does not have to replace the root Funnel.
-
-### Installer switches
+### Compatibility installer switches
 
 ~~~text
 --prefix PATH
@@ -268,7 +254,7 @@ token2oauth doctor [--live] [--public] [--repairs] [--json]
 token2oauth pools preview
 ~~~
 
-`lifecycle up|down` and `tailscale expose` are dry runs that print the exact
+For the unified foreground stack use `rotoxy up|down|status`. The older `lifecycle up|down` and `tailscale expose` commands refuse changes when a foreground stack exists; otherwise they are dry runs that print the exact
 commands unless `--execute` is given. They only ever add or remove the
 `/token2oauth` mount, re-read `tailscale serve status --json` before and after
 each write, and stop if any other route changed.

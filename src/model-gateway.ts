@@ -16,12 +16,13 @@ export interface ModelGatewayOptions {
   quotaCooldownMs?: number;
   now?: () => number;
 }
-interface RouteTarget { path: "/v1/models" | "/v1/chat/completions"; method: "GET" | "POST"; scope: ModelScope }
+export interface ModelRequestEvent { accountId: string; path: string; model?: string; startedAt: number; durationMs: number; status: number }
+interface RouteTarget { path: "/v1/models" | "/v1/chat/completions" | "/v1/responses" | "/api/tags" | "/api/chat" | "/api/generate"; method: "GET" | "POST"; scope: ModelScope }
 
 function routeTarget(method: string, path: string): RouteTarget | undefined {
   const normalized = path.replace(/^\/(?:p\/ollama|pool\/ollama)/, "");
-  if (normalized === "/v1/models" && method === "GET") return { path: normalized, method, scope: "model:read" };
-  if (normalized === "/v1/chat/completions" && method === "POST") return { path: normalized, method, scope: "model:invoke" };
+  if (["/v1/models", "/api/tags"].includes(normalized) && method === "GET") return { path: normalized as RouteTarget["path"], method, scope: "model:read" };
+  if (["/v1/chat/completions", "/v1/responses", "/api/chat", "/api/generate"].includes(normalized) && method === "POST") return { path: normalized as RouteTarget["path"], method, scope: "model:invoke" };
   return undefined;
 }
 function bearer(req: Request): string | undefined {
@@ -75,11 +76,13 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
   }
   const inflight = new Map<string, number>();
   let roundRobin = 0;
+  const recent: ModelRequestEvent[] = [];
+  const totals = new Map<string, { requests: number; successes: number; failures: number }>();
 
   const handleRequest = async (req: Request, res: Response, next: NextFunction) => {
     const pathname = req.path;
-    const isGatewayPath = pathname === "/v1/models" || pathname === "/v1/chat/completions" ||
-      pathname.startsWith("/pool/ollama/v1/") || pathname.startsWith("/p/ollama/v1/");
+    const isGatewayPath = ["/v1/models", "/v1/chat/completions", "/v1/responses", "/api/tags", "/api/chat", "/api/generate"].includes(pathname) ||
+      pathname.startsWith("/pool/ollama/") || pathname.startsWith("/p/ollama/");
     if (!isGatewayPath) return next();
     const target = routeTarget(req.method, pathname);
     if (!target) return sendError(res, 404, "Unsupported Ollama Cloud route");
@@ -108,6 +111,9 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
     }
     if (!accountView || !apiKey) return sendError(res, 503, "No Ollama Cloud credential is currently available");
 
+    const startedAt = now();
+    let model: string | undefined;
+    if (Buffer.isBuffer(req.body)) { try { const v = JSON.parse(req.body.toString()).model; if (typeof v === "string" && v.length <= 160 && !/[\r\n\0]/.test(v)) model = v; } catch {} }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onClose = () => { if (!res.writableEnded) controller.abort(); };
@@ -169,6 +175,10 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
       if (!res.headersSent) sendError(res, 502, "Ollama Cloud proxy failed; request was not retried");
       else res.destroy();
     } finally {
+      const counter = totals.get(accountView.id) ?? { requests: 0, successes: 0, failures: 0 };
+      counter.requests++; if (res.statusCode < 400 && res.writableFinished) counter.successes++; else counter.failures++; totals.set(accountView.id, counter);
+      recent.push({ accountId: accountView.id, path: target.path, ...(model ? { model } : {}), startedAt, durationMs: Math.max(0, now() - startedAt), status: res.statusCode });
+      if (recent.length > 100) recent.shift();
       clearTimeout(timer);
       req.off("aborted", onAbort);
       res.off("close", onClose);
@@ -180,14 +190,14 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
   const parseModelBody = express.raw({ type: "*/*", limit: MAX_REQUEST_BYTES });
   router.use((req: Request, res: Response, next: NextFunction) => {
     const pathname = req.path;
-    const isGatewayPath = pathname === "/v1/models" || pathname === "/v1/chat/completions" ||
-      pathname.startsWith("/pool/ollama/v1/") || pathname.startsWith("/p/ollama/v1/");
+    const isGatewayPath = ["/v1/models", "/v1/chat/completions", "/v1/responses", "/api/tags", "/api/chat", "/api/generate"].includes(pathname) ||
+      pathname.startsWith("/pool/ollama/") || pathname.startsWith("/p/ollama/");
     if (!isGatewayPath) return next();
     parseModelBody(req, res, (error?: unknown) => {
-      if (error) return next(error);
+      if (error) return sendError(res, 413, "Request body exceeds the size limit");
       void handleRequest(req, res, next).catch(next);
     });
   });
 
-  return { router, credentials };
+  return { router, credentials, snapshot: () => ({ accounts: [...totals].map(([accountId, counters]) => ({ accountId, ...counters, inflight: inflight.get(accountId) ?? 0 })), recent: recent.map(e => ({ ...e })) }) };
 }

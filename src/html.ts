@@ -25,9 +25,9 @@ export interface NavGroup { label: string; items: readonly NavItem[] }
  */
 export const NAV_GROUPS: readonly NavGroup[] = [
   { label: "Workspace", items: [{ key: "pool", label: "Pool", href: "/admin" }] },
-  { label: "Providers", items: [{ key: "accounts", label: "Accounts", href: "/admin#accounts" }] },
-  { label: "Models & APIs", items: [{ key: "tools", label: "Tools", href: "/admin/tools" }] },
-  { label: "Operations", items: [{ key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
+  { label: "Providers", items: [{ key: "accounts", label: "Accounts", href: "/admin#accounts" }, { key: "credits", label: "Credits", href: "/admin/credits" }] },
+  { label: "Models & APIs", items: [{ key: "models", label: "Models", href: "/admin/models" }, { key: "resources", label: "Search", href: "/admin/resources" }, { key: "codex", label: "Codex", href: "/admin/codex" }, { key: "tools", label: "Tools", href: "/admin/tools" }] },
+  { label: "Operations", items: [{ key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }, { key: "oracle", label: "Oracle", href: "/admin/oracle" }] },
   { label: "Platform", items: [{ key: "security", label: "Security", href: "/admin/security" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
 ];
 

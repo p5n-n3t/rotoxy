@@ -86,9 +86,10 @@ test("keeps manual snapshots stale, records correction audit lineage, and resets
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
-test("new LightSprint account estimates ten million at zero usage; cross-unit spend stays separate", async () => {
+test("unknown LightSprint balance stays unknown; known balances subtract only same-unit spend", async () => {
   const { root, store } = await isolatedStore([lightsprint(), lightsprint("ls-02", "New LS account"), exa()]);
   try {
+    await store.recordBalanceSnapshot({ auditId: "known", provider: "lightsprint", accountId: "ls-01", unit: "credits", remaining: 10_000_000, observedAt: now - 1, source: "user-reported" });
     await store.recordUsage({ id: "usd", provider: "exa", accountId: "exa-01", unit: "USD", amount: 9, source: "provider-reported", observedAt: now });
     await store.recordUsage({ id: "credit", provider: "lightsprint", accountId: "ls-01", unit: "credits", amount: 250, source: "estimated", provenance: "observed per-task credit estimate", observedAt: now });
     const views = api.summarizeCredits([lightsprint(), lightsprint("ls-02", "New LS account"), exa()], await store.load(), { now,
@@ -98,8 +99,8 @@ test("new LightSprint account estimates ten million at zero usage; cross-unit sp
     assert.equal(views[0].observedSessionSpendUsd, 2.5);
     assert.equal(views[0].modelSlotUsage[0].debit, null);
     assert.match(views[0].modelSlotUsage[0].debitReason, /does not report/);
-    assert.equal(views[1].estimatedRemaining, 10_000_000);
-    assert.match(views[1].estimateProvenance, /Configured 10,000,000 monthly credits/);
+    assert.equal(views[1].estimatedRemaining, null);
+    assert.match(views[1].estimateProvenance, /No same-unit allowance/);
     assert.equal(views[2].estimatedRemaining, null);
     assert.equal(views[2].debitsBySource["provider-reported"], 9);
     await assert.rejects(store.recordUsage({ id: "wrong-unit", provider: "lightsprint", accountId: "ls-01", unit: "USD", amount: 1, source: "user-reported", observedAt: now }), /requires unit credits/);
@@ -109,6 +110,7 @@ test("new LightSprint account estimates ten million at zero usage; cross-unit sp
 test("separates live holds from debits and excludes released reservations", async () => {
   const { root, store } = await isolatedStore([lightsprint()]);
   try {
+    await store.recordBalanceSnapshot({ auditId: "known", provider: "lightsprint", accountId: "ls-01", unit: "credits", remaining: 10_000_000, observedAt: now - 1, source: "user-reported" });
     await store.recordUsage({ id: "debit-1", provider: "lightsprint", accountId: "ls-01", unit: "credits", amount: 10, source: "provider-reported", observedAt: now });
     await store.recordReservation({ id: "hold-a", provider: "lightsprint", accountId: "ls-01", unit: "credits", amount: 500, state: "reserved", observedAt: now });
     await store.recordReservation({ id: "hold-a", provider: "lightsprint", accountId: "ls-01", unit: "credits", amount: 500, state: "released", observedAt: now + 1 });

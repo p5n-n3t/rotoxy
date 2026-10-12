@@ -18,6 +18,7 @@ const requiredPackageFiles = [
   "assets/brand/favicon.svg",
   "dist/jsonrpc-wire.js",
   "scripts/monitor-workforce.mjs",
+  "scripts/rotoxy-control.mjs", "install-rotoxy.sh", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service",
   "supervisor/snooze/bridge.py",
   "supervisor/snooze/jobs.py",
   "supervisor/snooze/job_inbox.py",
@@ -126,6 +127,7 @@ try {
     "package.json", "tsconfig.json", "src", "docs", "assets/brand", "supervisor/snooze",
     "supervisor/LICENSE", "supervisor/THIRD_PARTY_NOTICES.md", "supervisor/SECURITY.md",
     "supervisor/UPSTREAM.md", "supervisor/install.sh", "scripts/monitor-workforce.mjs",
+    "scripts/rotoxy-control.mjs", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service", "install-rotoxy.sh",
     "install.sh", "uninstall.sh", "LICENSE", "README.md", "SECURITY.md", "CHANGELOG.md",
   ];
   for (const item of stagePaths) {

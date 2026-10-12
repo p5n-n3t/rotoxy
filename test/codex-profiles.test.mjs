@@ -48,8 +48,8 @@ test("registers isolated private CODEX_HOME profiles and persists only non-secre
 test("uses official app-server methods, filters snapshots and only reports the user-mediated device code", async (t) => {
   const h = await harness(t, (_id, method) => {
     if (method === "account/login/start") return { type: "chatgptDeviceCode", loginId: "login-123", verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-1234", accessToken: "must-not-leak" };
-    if (method === "account/read") return { authMode: "chatgpt", planType: "plus", email: "private@example.test", accessToken: "never-return" };
-    if (method === "model/list") return { data: [{ id: "gpt-6-luna", name: "Luna", supportedReasoningEfforts: ["low", "high"] }, { id: "hidden", hidden: true }] };
+    if (method === "account/read") return { account: { type: "chatgpt", planType: "plus", email: "private@example.test" }, accessToken: "never-return" };
+    if (method === "model/list") return { data: [{ id: "gpt-6-luna", name: "Luna", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }] }, { id: "hidden", hidden: true }] };
     if (method === "account/rateLimits/read") return { rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1800000000 }, secondary: null } } };
     return {};
   });

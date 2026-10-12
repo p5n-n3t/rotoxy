@@ -288,7 +288,7 @@ export function summarizeCredits(accounts: readonly CreditAccount[], state: Cred
       ...(snapshot.refreshDate ? { refreshDate: snapshot.refreshDate } : {}) } : null;
     const renewal = account.provider === "lightsprint" ? latest(state.renewals, (row) => row.accountId === account.accountId) : undefined;
     const renewalResetsBase = renewal !== undefined && (snapshot === undefined || renewal.verifiedAt > snapshot.observedAt);
-    const estimateBase = renewalResetsBase ? LIGHTSPRINT_MONTHLY_ALLOWANCE : snapshot?.remaining ?? (account.provider === "lightsprint" ? LIGHTSPRINT_MONTHLY_ALLOWANCE : null);
+    const estimateBase = renewalResetsBase ? LIGHTSPRINT_MONTHLY_ALLOWANCE : snapshot?.remaining ?? null;
     const baseAt = renewalResetsBase ? renewal?.verifiedAt : snapshot?.observedAt ?? renewal?.verifiedAt;
     const usageRows = state.usage.filter((row) => row.provider === account.provider && row.accountId === account.accountId && row.unit === account.unit &&
       (baseAt === undefined || row.observedAt >= baseAt) && (!renewal || row.observedAt >= renewal.verifiedAt));

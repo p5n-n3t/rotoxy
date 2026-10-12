@@ -10,7 +10,7 @@
  */
 
 import type { DoctorSnapshot, FunnelMountSnapshot } from "./doctor.js";
-import { LifecycleController, createExecFileRunner, type CommandRunner } from "./lifecycle.js";
+import { LifecycleController, createExecFileRunner, effectiveServeConfig, type CommandRunner } from "./lifecycle.js";
 import type { CredentialPool } from "./pool.js";
 import type { StateStore } from "./store.js";
 import { refreshAccountCapabilities } from "./capabilities.js";
@@ -161,7 +161,7 @@ export async function collectDoctorSnapshot(
       const observed = await controller.observe();
       const mounts: FunnelMountSnapshot[] = [];
       const host = observed.routes.hostPort;
-      for (const [path, handler] of Object.entries((host && observed.serveConfig.Web?.[host]?.Handlers) || {})) {
+      for (const [path, handler] of Object.entries((host && effectiveServeConfig(observed.serveConfig).Web?.[host]?.Handlers) || {})) {
         let targetHost: string | undefined;
         let targetPort: number | undefined;
         try {
@@ -176,7 +176,7 @@ export async function collectDoctorSnapshot(
       snapshot.funnel = {
         checked: true,
         enabled: observed.routes.funnel,
-        expectedPath: state.config.basePath || "/token2oauth",
+        expectedPath: observed.routes.root.target === "http://127.0.0.1:2030" ? "/" : state.config.basePath || "/token2oauth",
         reportedCollision: observed.routes.owned.state === "collision",
         mounts,
       };

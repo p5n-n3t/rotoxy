@@ -1,11 +1,12 @@
 {
   "name": "token2oauth",
   "version": "0.2.0",
-  "description": "OAuth 2.1 facade and smart credential-pool gateway for bearer-token MCP servers.",
+  "description": "ROTOXY: pooled AI gateways, distributed jobs, persistent supervision and private workers.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "token2oauth": "dist/cli.js"
+    "token2oauth": "dist/cli.js",
+    "rotoxy": "scripts/rotoxy-control.mjs"
   },
   "files": [
     "dist",
@@ -25,7 +26,10 @@
     "LICENSE",
     "README.md",
     "SECURITY.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "scripts/rotoxy-control.mjs",
+    "packaging/rotoxy*",
+    "install-rotoxy.sh"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts serve",
@@ -36,8 +40,16 @@
     "prepack": "npm run build"
   },
   "keywords": [
-    "mcp", "oauth", "oauth2", "pkce", "chatgpt", "bearer-token",
-    "reverse-proxy", "credential-pool", "tailscale", "funnel"
+    "mcp",
+    "oauth",
+    "oauth2",
+    "pkce",
+    "chatgpt",
+    "bearer-token",
+    "reverse-proxy",
+    "credential-pool",
+    "tailscale",
+    "funnel"
   ],
   "license": "MIT",
   "engines": {

@@ -20,6 +20,7 @@ function fixture({ health = true, initial = {} } = {}) {
   const runner = async (file, args) => {
     events.push([file, [...args]]);
     if (file === 'systemctl') {
+      if (args[1] === 'show') return { code: 0, stdout: 'loaded' };
       if (args[1] === 'is-active') return active.has(args[2]) ? { code: 0, stdout: 'active\n' } : { code: 3, stdout: 'inactive\n' };
       const [, action, unit] = args;
       if (action === 'start') {
@@ -108,4 +109,19 @@ test('CLI accepts only explicit manual actions and migration plan file on up', (
   assert.deepEqual(parseArgs(['up', '--migration-plan', '/tmp/review.json']), { action: 'up', migrationPlan: '/tmp/review.json' });
   assert.throws(() => parseArgs(['enable']), /Usage/);
   assert.throws(() => parseArgs(['status', '--migration-plan', 'x']), /only valid with up/);
+});
+
+// Real Tailscale keeps non-background routes under a session-keyed Foreground map.
+test('reads foreground routes and ignores session keys when verifying their withdrawal', async () => {
+  const config = { Foreground: { 'session-a': { Web: { 'rotoxy.tailnet.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:2030' } } } }, TCP: { '443': { HTTPS: true } }, AllowFunnel: { 'rotoxy.tailnet.ts.net:443': true } } } };
+  let current = config;
+  const controller = new RotoxyController(async (file, args) => {
+    if (file === 'tailscale') return { code: 0, stdout: JSON.stringify(current) };
+    if (file === 'systemctl' && args[1] === 'show') return { code: 0, stdout: 'loaded' };
+    if (file === 'systemctl' && args[1] === 'is-active') return { code: 0, stdout: 'active' };
+    if (file === 'systemctl' && args[1] === 'stop') { if (args[2] === FUNNEL_UNIT) current = {}; return { code: 0, stdout: '' }; }
+    throw Error('unexpected command');
+  }, { lockPath: join(isolatedHome, 'foreground.lock') });
+  assert.equal((await controller.status()).healthy, true);
+  assert.equal((await controller.down()).ok, true);
 });

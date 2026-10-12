@@ -331,8 +331,8 @@ export class CodexProfiles {
     const rawModels = Array.isArray(modelsResult.data) ? modelsResult.data : [];
     const models = rawModels.flatMap((item) => {
       const m = record(item); const id = safeString(m?.id, 160); if (!m || !id || m.hidden === true) return [];
-      const effort = Array.isArray(m.supportedReasoningEfforts) ? m.supportedReasoningEfforts.filter((v): v is string => typeof v === "string" && v.length < 80) : undefined;
-      return [{ id, ...(safeString(m.name, 160) ? { name: m.name as string } : {}), ...(effort?.length ? { reasoningEfforts: effort } : {}) }];
+      const effort = Array.isArray(m.supportedReasoningEfforts) ? m.supportedReasoningEfforts.map(v => typeof v === "string" ? v : record(v)?.reasoningEffort).filter((v): v is string => typeof v === "string" && v.length < 80) : undefined;
+      return [{ id, ...(safeString(m.displayName ?? m.name, 160) ? { name: (m.displayName ?? m.name) as string } : {}), ...(effort?.length ? { reasoningEfforts: effort } : {}) }];
     });
     const root = record(limitsResult.rateLimitsByLimitId) || (record(limitsResult.rateLimits) ? { codex: limitsResult.rateLimits } : {});
     const windows: CodexRateWindow[] = [];
@@ -346,7 +346,8 @@ export class CodexProfiles {
         windows.push({ limitId: safeString(bucket.limitId, 120) || limitId.slice(0, 120), slot, ...(duration ? { windowDurationMins: duration } : {}), ...(used !== undefined ? { usedPercent: used } : {}), ...(resets ? { resetsAt: resets } : {}), exhausted: bucket.rateLimitReachedType != null || used !== undefined && used >= 100 });
       }
     }
-    const authMode = accountInfo.authMode === "chatgpt" ? "chatgpt" : accountInfo.authMode == null ? undefined : "other";
+    const reportedMode = accountInfo.type ?? accountInfo.authMode;
+    const authMode = reportedMode === "chatgpt" ? "chatgpt" : reportedMode == null ? undefined : "other";
     const snapshot: CodexProfileSnapshot = { profileId, capturedAt: this.now(), ...(authMode ? { authMode } : {}), ...(safeString(accountInfo.planType, 40) ? { planType: accountInfo.planType as string } : {}), models, rateWindows: windows };
     this.snapshots.set(profileId, snapshot); const profile = this.profile(profileId); profile.updatedAt = snapshot.capturedAt; await this.save();
     return structuredClone(snapshot);

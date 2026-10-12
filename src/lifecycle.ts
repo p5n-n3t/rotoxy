@@ -164,7 +164,24 @@ export interface RouteInspection {
   handlerCount: number;
 }
 
+/** Read-only projection of background and foreground Serve listeners. */
+export function effectiveServeConfig(sc: ServeConfig): ServeConfig {
+  const out = clone(sc); delete out.Foreground;
+  for (const value of Object.values(sc.Foreground || {})) {
+    if (!value || typeof value !== "object") continue;
+    const layer = value as ServeConfig;
+    for (const [host, web] of Object.entries(layer.Web || {})) {
+      if (out.Web?.[host]) throw new Error("Overlapping foreground/background HTTPS listeners");
+      (out.Web ||= {})[host] = clone(web);
+    }
+    Object.assign(out.TCP ||= {}, layer.TCP || {});
+    Object.assign(out.AllowFunnel ||= {}, layer.AllowFunnel || {});
+  }
+  return out;
+}
+
 export function inspectRoutes(sc: ServeConfig, routes: RouteExpectations = DEFAULT_ROUTES): RouteInspection {
+  sc = effectiveServeConfig(sc);
   const suffix = `:${routes.httpsPort}`;
   const candidates = Object.keys(sc.Web ?? {}).filter((hp) => hp.endsWith(suffix));
   let hostPort: string | undefined;
@@ -358,6 +375,7 @@ function routeSubcommand(r: RouteInspection, mode: ExposureMode): ExposureMode {
 export function planUp(state: ObservedState, options: PlanOptions = {}): LifecyclePlan {
   const routes = resolveRoutes(options.routes);
   const plan = emptyPlan("up", state, routes);
+  if (Object.keys(state.serveConfig.Foreground || {}).length) plan.blockers.push("Foreground services are manually managed; use rotoxy up/down instead of changing persistent routes.");
   const r = inspectRoutes(state.serveConfig, routes);
   // With no explicit mode, follow the existing listener; funnel only when creating one.
   const mode = options.mode ?? routeSubcommand(r, "funnel");
@@ -405,6 +423,7 @@ export function planUp(state: ObservedState, options: PlanOptions = {}): Lifecyc
 export function planDown(state: ObservedState, options: PlanOptions = {}): LifecyclePlan {
   const routes = resolveRoutes(options.routes);
   const plan = emptyPlan("down", state, routes);
+  if (Object.keys(state.serveConfig.Foreground || {}).length) plan.blockers.push("Foreground services are manually managed; use rotoxy up/down instead of changing persistent routes.");
   const r = inspectRoutes(state.serveConfig, routes);
   commonRouteChecks(plan, r, routes);
 

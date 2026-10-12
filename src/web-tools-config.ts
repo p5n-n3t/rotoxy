@@ -85,4 +85,14 @@ export async function loadWebToolsConfig(path: string | undefined, store: StateS
   };
 }
 
-export type ConfiguredWebTools = NonNullable<Awaited<ReturnType<typeof loadWebToolsConfig>>>;
+export type ConfiguredWebTools = NonNullable<Awaited<ReturnType<typeof loadWebToolsConfig>>> & { configured?: () => Promise<boolean> };
+
+/** Reload private bindings for each operation so permission revocation takes effect immediately. */
+export function liveWebToolsConfig(path: string, store: StateStore): ConfiguredWebTools {
+  const current = async () => { try { return await loadWebToolsConfig(path, store); } catch (error: any) { if (error?.code === "ENOENT") return undefined; throw new WebToolError("provider_not_enabled"); } };
+  return {
+    configured: async () => Boolean(await current()),
+    call: async (name, args, caller) => { const active = await current(); if (!active) throw new WebToolError("provider_not_enabled"); return active.call(name, args, caller); },
+    definitionsFor: async (caller, scopes) => (await current())?.definitionsFor(caller, scopes) ?? [],
+  };
+}

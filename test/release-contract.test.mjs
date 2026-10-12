@@ -23,7 +23,7 @@ test("published tarball includes install, runtime, and rollback guidance", async
   assert.equal(manifest.bin.token2oauth, "dist/cli.js");
   const files = new Set(metadata.files.map((file) => file.path));
   for (const required of [
-    "install.sh", "uninstall.sh", "supervisor/install.sh",
+    "install.sh", "install-rotoxy.sh", "scripts/rotoxy-control.mjs", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service", "uninstall.sh", "supervisor/install.sh",
     "docs/deployment/unified-supervisor.md", "docs/RELEASE-VERIFICATION.md",
     "supervisor/snooze/static/index.html",
   ]) assert.ok(files.has(required), `release tarball omits ${required}`);
