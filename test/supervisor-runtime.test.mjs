@@ -76,7 +76,7 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/assignments/job-one/../../other"), false);
 
   const adapters = new Map();
-  const options = { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store,
+  const options = { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store,
     adapterFactory: (accountId) => { if (!adapters.has(accountId)) adapters.set(accountId, fakeAdapter(accountId)); return adapters.get(accountId); },
     workerOptions: { pollIntervalMs: 20, adapterTimeoutMs: 1000 } };
   const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
@@ -104,6 +104,8 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   assert.equal(supervision.project, "project-a");
   assert.ok(Array.isArray(supervision.events));
   assert.ok(Array.isArray(supervision.models));
+  assert.equal(supervision.recovery.project, "project-a");
+  assert.equal(supervision.recovery.available, false, "the scoped snapshot uses the injected temporary recovery database");
   currentState.accounts.find((account) => account.id === "acct-b").stats.state = "auth-failed";
   const narrowed = await runtime.callTool("job_submit", { ...submission, jobId: "job-two", idempotencyKey: "idem-two", tasks: [submission.tasks[0]] }, caller);
   assert.equal(narrowed.assignmentId, "job-two");
@@ -144,7 +146,7 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
   t.after(() => rm(dir, { recursive: true, force: true }));
   const configPath = join(dir, "runtime.json");
   await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
-  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store });
+  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store });
   const usage = (delta, observedAt) => ({ reportedSessionCostUsd: 1.5, reportedCostDeltaUsd: delta, promptCountDelta: 2, budgetUsed: 4, maxBudget: 10,
     fundingSource: "shared", sandboxTier: "standard", observedAt, source: "lightsprint-session-status", provisional: true, budgetUnit: "unknown" });
   const assignment = { assignmentId: "job-usage", projectId: "project-a", state: "running", tasks: [
@@ -187,7 +189,7 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
 test("admin project controls use configured project scope and revision-fenced durable bridge route", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "t2o-runtime-controls-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const runtime = new SupervisorRuntime(config, { configPath: join(dir, "unused.json"), configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), store });
+  const runtime = new SupervisorRuntime(config, { configPath: join(dir, "unused.json"), configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store });
   const calls = [];
   runtime.bridge.request = async (...args) => { calls.push(args); return { projectId: "project-a", state: "paused", paused: true, emergencyStop: false, maxConcurrency: 2, activeTaskCount: 0, revision: 2 }; };
   assert.deepEqual(await runtime.controlAdmin({ projectId: "project-a", action: "set_concurrency", value: 2, expectedRevision: 1 }),

@@ -230,7 +230,7 @@ test("overview ledger keeps missing snapshot sections unknown, not zero", () => 
   const html = renderSupervisorDashboard({});
   assert.equal((html.match(/Not reported/g) || []).length, 4);
   assert.doesNotMatch(html, /Providers listed<\/dt><dd[^>]*>0<\/dd>/);
-  assert.match(html, /authenticated inbox endpoint is not available/);
+  assert.match(html, /authenticated project API is not available/);
   const emptyKnownLists = renderSupervisorDashboard({ providers: [], jobs: [], workers: [] });
   assert.match(emptyKnownLists, /Providers listed<\/dt><dd class="">0<\/dd>/);
   assert.match(emptyKnownLists, /Assignments listed<\/dt><dd class="">0<\/dd>/);
@@ -251,6 +251,26 @@ test("inbox normalizer bounds event and model inventory fields and rejects unkno
   assert.equal(inbox.models[0].error.length, 240);
 });
 
+test("recovery projection bounds diagnostic text, hides owners, and labels advice as non-executable", () => {
+  const inbox = normalizeSupervisionInbox({ available: true, events: [], models: [], recovery: {
+    available: true, project: "project-a", state: "handoff", cursor: 44, owner: "must-not-render",
+    decisions: [{ eventId: "guidance-44", kind: "failed", decision: { level: "rules", outcome: "human_handoff", reason: "Bearer secret" } }],
+    pendingHandoffs: [{ eventId: "guidance-44", kind: "failed", state: "handoff", reason: "manual review" }],
+    notifyReceipts: [{ eventId: "guidance-44", kind: "failed", at: 1791792000 }],
+    oracleAdvice: [{ eventId: "guidance-44", status: "complete", advisoryOnly: true, result: "api_key=private-value ".repeat(50) }],
+  } });
+  assert.equal(inbox.recovery.cursor, 44);
+  assert.equal(inbox.recovery.pendingHandoffs.length, 1);
+  assert.ok(inbox.recovery.oracleAdvice[0].result.length <= 1200);
+  assert.doesNotMatch(inbox.recovery.oracleAdvice[0].result, /private-value/);
+  const html = renderSupervisorDashboard({}, { nonce: "n", liveFeedUrl: "/token2oauth/admin/api/v1/supervisor/project-a/live" });
+  assert.match(html, /dormant initiating chat can remain dormant/i);
+  assert.match(html, /Oracle diagnostics are advisory only/);
+  assert.match(html, /id="supervision-recovery"/);
+  const recoveryScript = [...html.matchAll(/<script nonce="n">([\s\S]*?)<\/script>/g)].map((match) => match[1]).find((value) => value.includes("renderRecovery")) || "";
+  assert.doesNotMatch(recoveryScript, /setInterval|job_resume|sendMessage/);
+});
+
 test("inbox acknowledgment sends same-origin CSRF header and project-scoped endpoint", async () => {
   const html = renderSupervisorDashboard({}, { nonce: "n", csrfToken: "csrf-token", liveFeedUrl: "/admin/api/v1/supervisor/project-7/live" });
   const script = [...html.matchAll(/<script nonce="n">([\s\S]*?)<\/script>/g)].map((match) => match[1]).find((value) => value.includes('getElementById("supervision-feed")'));
@@ -263,8 +283,8 @@ test("inbox acknowledgment sends same-origin CSRF header and project-scoped endp
     setAttribute() {}
   }
   const root = new Node(); root.dataset = { endpoint: "/admin/api/v1/supervisor/project-7/inbox?after=0&limit=20", projectId: "project-7", csrfToken: "csrf-token" };
-  const status = new Node(), events = new Node(), models = new Node(), refresh = new Node("button");
-  const nodes = { "supervision-feed": root, "supervision-status": status, "supervision-events": events, "supervision-models": models, "supervision-refresh": refresh };
+  const status = new Node(), events = new Node(), models = new Node(), recovery = new Node(), refresh = new Node("button");
+  const nodes = { "supervision-feed": root, "supervision-status": status, "supervision-events": events, "supervision-models": models, "supervision-recovery": recovery, "supervision-refresh": refresh };
   const requests = [];
   const listeners = {};
   const context = {
@@ -274,7 +294,7 @@ test("inbox acknowledgment sends same-origin CSRF header and project-scoped endp
     fetch: async (url, options = {}) => {
       requests.push({ url: String(url), options });
       if (options.method === "POST") return { ok: true };
-      return new Response(JSON.stringify({ available: true, events: [{ id: 17, kind: "job.done", at: "2026-10-12T00:00:00Z" }], models: [] }), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ available: true, events: [{ id: 17, kind: "job.done", at: "2026-10-12T00:00:00Z" }], models: [], recovery: { available: true, project: "project-7", state: "handoff", cursor: 17, decisions: [], pendingHandoffs: [{ kind: "failed", reason: "review" }], notifyReceipts: [], oracleAdvice: [] } }), { headers: { "Content-Type": "application/json" } });
     },
     URL, TextDecoder, Uint8Array, JSON, Date, encodeURIComponent,
   };
@@ -283,6 +303,8 @@ test("inbox acknowledgment sends same-origin CSRF header and project-scoped endp
   const findButton = (node) => node.tagName === "button" && node.textContent === "Acknowledge" ? node : node.children.map(findButton).find(Boolean);
   const acknowledge = findButton(events);
   assert.ok(acknowledge);
+  const recoveryText = (node) => [node.textContent, ...node.children.map(recoveryText)].join(" ");
+  assert.match(recoveryText(recovery), /manual review|handoff/);
   await acknowledge.listeners.click();
   assert.equal(requests[1].options.method, "POST");
   assert.equal(new URL(requests[1].url).pathname, "/admin/api/v1/supervisor/project-7/inbox/17/ack");

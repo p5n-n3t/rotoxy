@@ -33,6 +33,34 @@ export interface SupervisionInbox {
   available: boolean;
   events: SupervisionEvent[];
   models: SupervisionModelHost[];
+  recovery?: SupervisionRecovery;
+}
+
+export interface SupervisionRecoveryItem {
+  eventId?: string;
+  kind?: string;
+  state?: string;
+  at?: string | number;
+  level?: string;
+  outcome?: string;
+  reason?: string;
+  action?: string;
+  status?: string;
+  error?: string;
+  model?: string;
+  result?: string;
+  advisoryOnly?: boolean;
+}
+
+export interface SupervisionRecovery {
+  available: boolean;
+  project: string;
+  state: string;
+  cursor: number;
+  decisions: SupervisionRecoveryItem[];
+  pendingHandoffs: SupervisionRecoveryItem[];
+  notifyReceipts: SupervisionRecoveryItem[];
+  oracleAdvice: SupervisionRecoveryItem[];
 }
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
@@ -65,6 +93,34 @@ function oracleValue(value: unknown): SupervisionOracle | undefined {
     result: safeText(value.result, 480),
   };
   return Object.values(oracle).some((part) => part !== undefined) ? oracle : undefined;
+}
+
+function recoveryItems(value: unknown, kind?: "notification"): SupervisionRecoveryItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, kind === "notification" ? 20 : 20).flatMap((row): SupervisionRecoveryItem[] => {
+    if (!record(row)) return [];
+    const decision = record(row.decision) ? row.decision : row;
+    const item: SupervisionRecoveryItem = {
+      eventId: safeText(row.eventId, 160), kind: safeText(row.kind, 120), state: safeText(row.state, 80),
+      at: safeTime(row.at), status: safeText(row.status, 80), level: safeText(decision.level, 80),
+      outcome: safeText(decision.outcome, 100), reason: safeText(decision.reason, 240), action: safeText(decision.action, 100),
+      error: safeText(row.error, 120), model: safeText(row.model, 120),
+      result: safeText(row.result, 1200), advisoryOnly: row.advisoryOnly === true,
+    };
+    return [item];
+  });
+}
+
+function recoveryValue(value: unknown): SupervisionRecovery | undefined {
+  if (!record(value) || typeof value.available !== "boolean") return undefined;
+  const project = safeText(value.project, 160);
+  if (!project) return undefined;
+  return {
+    available: value.available, project, state: safeText(value.state, 80) || "unknown",
+    cursor: Number.isSafeInteger(value.cursor) && Number(value.cursor) >= 0 ? Number(value.cursor) : 0,
+    decisions: recoveryItems(value.decisions), pendingHandoffs: recoveryItems(value.pendingHandoffs),
+    notifyReceipts: recoveryItems(value.notifyReceipts, "notification"), oracleAdvice: recoveryItems(value.oracleAdvice),
+  };
 }
 
 /** Keep only bounded fields from the selected project's supervision endpoint. */
@@ -101,7 +157,8 @@ export function normalizeSupervisionInbox(input: unknown): SupervisionInbox | un
       : [];
     return [{ host, models: names, updated: safeTime(value.updated), error: safeText(value.error, 240) }];
   });
-  return { available: input.available, events, models };
+  const recovery = recoveryValue(input.recovery);
+  return { available: input.available, events, models, ...(recovery ? { recovery } : {}) };
 }
 
 function attr(value: string): string {
@@ -111,8 +168,8 @@ function attr(value: string): string {
 /** Same-origin, bounded and text-only inbox client. A POST is possible only after a CSRF token is rendered. */
 export function renderSupervisionInboxScript(nonce: string): string {
   return `<script nonce="${attr(nonce)}">(()=>{
-const root=document.getElementById("supervision-feed"),status=document.getElementById("supervision-status"),eventsNode=document.getElementById("supervision-events"),modelsNode=document.getElementById("supervision-models"),refresh=document.getElementById("supervision-refresh");
-if(!root||!status||!eventsNode||!modelsNode||!refresh)return;
+const root=document.getElementById("supervision-feed"),status=document.getElementById("supervision-status"),eventsNode=document.getElementById("supervision-events"),modelsNode=document.getElementById("supervision-models"),recoveryNode=document.getElementById("supervision-recovery"),refresh=document.getElementById("supervision-refresh");
+if(!root||!status||!eventsNode||!modelsNode||!recoveryNode||!refresh)return;
 const MAX_BYTES=262144,MAX_TEXT=480;let current=null,closed=false;
 const clean=(v,n=240)=>typeof v==="string"?v.replace(/[\\u0000-\\u001f\\u007f]/g," ").replace(/Bearer\\s+[A-Za-z0-9._~+\\/-]+=*/gi,"Bearer [REDACTED]").replace(/(api[_-]?key|token|secret)(\\s*[:=]\\s*)[^\\s,;]+/gi,"$1$2[REDACTED]").slice(0,n):"";
 const eventId=v=>typeof v==="number"&&Number.isSafeInteger(v)&&v>0?String(v):clean(v,160);
@@ -122,7 +179,13 @@ const message=(host,value)=>host.replaceChildren(element("p","empty",value));
 const timeText=v=>{if(typeof v==="number"&&Number.isFinite(v)){const ms=Math.abs(v)<100000000000?v*1000:v;try{return new Date(ms).toISOString();}catch{return "Time unavailable";}}return clean(v,100)||"Time unavailable";};
 async function boundedJson(response){const len=response.headers.get("content-length");if(len&&/^\\d+$/.test(len)&&Number(len)>MAX_BYTES)throw new Error("size");if(!response.body)throw new Error("body");const reader=response.body.getReader(),chunks=[];let total=0;try{while(true){const part=await reader.read();if(part.done)break;total+=part.value.byteLength;if(total>MAX_BYTES){await reader.cancel().catch(()=>{});throw new Error("size");}chunks.push(part.value);}}finally{reader.releaseLock();}const bytes=new Uint8Array(total);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return JSON.parse(new TextDecoder().decode(bytes));}
 function field(row,label,value){const safe=clean(value);if(!safe)return;const line=element("div","supervision-field","");const name=document.createElement("strong");name.textContent=label+": ";const val=document.createElement("span");val.textContent=safe;line.append(name,val);row.append(line);}
-function render(payload){if(!record(payload)||typeof payload.available!=="boolean"||!Array.isArray(payload.events)||!Array.isArray(payload.models))throw new Error("shape");current=payload;eventsNode.replaceChildren();modelsNode.replaceChildren();if(!payload.available){status.textContent="Durable inbox is unavailable for this project.";message(eventsNode,"The inbox endpoint is unavailable; workforce and job data remain available above.");message(modelsNode,"No supervision model inventory is available.");return;}
+function renderRecovery(value){recoveryNode.replaceChildren();if(!record(value)||value.project!==root.dataset.projectId||typeof value.available!=="boolean"){message(recoveryNode,"Recovery snapshot unavailable for this project.");return;}if(!value.available){message(recoveryNode,"Private recovery state is unavailable. No session resumption is inferred.");return;}
+const summary=element("p","recovery-cursor","Project cursor "+clean(value.cursor,32)+" · current state "+clean(value.state,80));recoveryNode.append(summary);recoveryNode.append(element("p","recovery-note","A dormant initiating chat can remain dormant. Resumption is unknown until a verified completion receipt appears. Oracle diagnostics are advisory only; this console never executes their text."));
+const section=(title,rows,advice=false)=>{const group=element("section","recovery-group","");const heading=document.createElement("h4");heading.textContent=title;group.append(heading);if(!Array.isArray(rows)||!rows.length){group.append(element("p","empty","No "+title.toLowerCase()+" recorded for this project."));recoveryNode.append(group);return;}
+for(const item of rows.slice(0,20)){if(!record(item))continue;const card=element("article","supervision-event recovery-event","");card.append(element("h5","",clean(item.kind,120)||title.slice(0,-1)));field(card,"Event",item.eventId);field(card,"State",item.state);field(card,"Decision",[item.level,item.outcome,item.action].filter(Boolean).join(" · "));field(card,"Reason",item.reason||item.error);field(card,"At",timeText(item.at));if(advice&&item.status==="complete"&&item.advisoryOnly===true){field(card,"Oracle model",item.model);const result=element("p","advisory-result",clean(item.result,1200));card.append(result);card.append(element("span","advisory-label","Advisory only · not executed"));}group.append(card);}recoveryNode.append(group);};
+section("Recovery decisions",value.decisions);section("Pending human handoffs",value.pendingHandoffs);section("Notify receipts",value.notifyReceipts);section("Completed Oracle advice",value.oracleAdvice,true);}
+function render(payload){if(!record(payload)||typeof payload.available!=="boolean"||!Array.isArray(payload.events)||!Array.isArray(payload.models))throw new Error("shape");current=payload;eventsNode.replaceChildren();modelsNode.replaceChildren();if(!payload.available){status.textContent="Durable inbox is unavailable for this project.";message(eventsNode,"The inbox endpoint is unavailable; workforce and job data remain available above.");message(modelsNode,"No supervision model inventory is available.");renderRecovery(payload.recovery);return;}
+renderRecovery(payload.recovery);
 status.textContent="Durable inbox connected · showing up to 20 project-scoped events";
 const events=payload.events.slice(0,20);if(!events.length)message(eventsNode,"No durable supervision events are recorded for this project.");
 for(const raw of events){if(!record(raw)||!eventId(raw.id))continue;const row=element("article","supervision-event","");const heading=element("h3","",clean(raw.kind,120)||"Supervision event");row.append(heading);field(row,"At",timeText(raw.at));field(row,"Worker",raw.worker);field(row,"Model",raw.model);field(row,"Owner",raw.owner);field(row,"Job",raw.job);field(row,"Guidance",raw.guidance_state);if(record(raw.oracle)){const oracle=element("div","oracle-detail","");field(oracle,"Oracle status",raw.oracle.status);field(oracle,"Requested model",raw.oracle.model);field(oracle,"Actual model",raw.oracle.actual_model);field(oracle,"Assigned host",raw.oracle.assigned_host);field(oracle,"Result",clean(raw.oracle.result,MAX_TEXT));if(oracle.childNodes.length)row.append(oracle);}const ack=raw.ack_at||raw.acknowledged;const footer=element("div","supervision-ack",ack?"Acknowledged"+(raw.ack_at?" · "+timeText(raw.ack_at):""):"Awaiting acknowledgment");if(!ack&&root.dataset.csrfToken){const button=element("button","","Acknowledge");button.type="button";button.addEventListener("click",()=>acknowledge(raw,button));footer.append(button);}row.append(footer);eventsNode.append(row);}

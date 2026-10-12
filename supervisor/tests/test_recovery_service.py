@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from snooze.guidance import GuidanceInbox
-from snooze.recovery_service import RecoveryService, _read_config
+from snooze.recovery_service import RecoveryService, _read_config, read_recovery_snapshot
 
 
 class Pool:
@@ -115,6 +115,47 @@ class RecoveryServiceTests(unittest.TestCase):
                                  str(config_path), "--once"], capture_output=True, text=True,
                                 env=env, timeout=10, check=True)
         self.assertEqual(json.loads(result.stdout)["processed"], 1)
+
+    def test_snapshot_is_project_and_owner_scoped_with_private_cursor(self):
+        self.observe("failed")
+        worker_b = "worker-b"
+        self.inbox.register(worker=worker_b, project="project-b", owner="owner-b",
+                            account="account-b", session="session-b", model="codex")
+        self.inbox.observe(worker_b, {"state": "failed"}, owner="owner-b", job="project-b", now=1001)
+        config = self.config()
+        config["projects"].append({"project": "project-b", "scope": "scope-b", "owners": ["owner-b"],
+                                    "policy": config["projects"][0]["policy"]})
+        RecoveryService(config).run_once()
+        snapshot = read_recovery_snapshot(self.state_path, project="project-a", owners=["owner-a"])
+        self.assertEqual(snapshot["project"], "project-a")
+        self.assertEqual(snapshot["cursor"], 1)
+        self.assertEqual(len(snapshot["decisions"]), 1)
+        encoded = json.dumps(snapshot)
+        self.assertNotIn("project-b", encoded)
+        self.assertNotIn("owner-b", encoded)
+        self.assertEqual(read_recovery_snapshot(self.state_path, project="project-a", owners=["owner-b"])["decisions"], [])
+        self.assertEqual(read_recovery_snapshot(self.state_path, project="project-a", owners=["owner-a"], after=1)["decisions"], [])
+
+    def test_snapshot_contains_notify_receipt_and_redacted_completed_advice(self):
+        event = self.observe("failed")
+        policy = self.config()["projects"][0]["policy"]
+        policy.update(level="notify", permissions=["notify"], oracle_advice=True, oracle_hourly_limit=2)
+        pool = Pool()
+        service = RecoveryService(self.config(policy=policy), oracle_pool=pool)
+        service.run_once()
+        recovery_id = "guidance-" + str(event["eventId"])
+        job_id = service.engine.get(recovery_id)["advice"]["job_id"]
+        oracle_db = self.root / "oracle.sqlite3"
+        with sqlite3.connect(oracle_db) as db:
+            db.execute("CREATE TABLE pool_tasks(id TEXT PRIMARY KEY,status TEXT,result TEXT,actual_model TEXT,model TEXT,updated REAL)")
+            db.execute("INSERT INTO pool_tasks VALUES(?,?,?,?,?,?)", (job_id, "complete", "Advice: Bearer secret-value; api_key=topsecret", "qwen3.5:9b", "qwen3.5:9b", 1002))
+        oracle_db.chmod(0o600)
+        snapshot = read_recovery_snapshot(self.state_path, project=self.project, owners=[self.owner], oracle_db_path=oracle_db)
+        self.assertEqual(snapshot["notifyReceipts"][0]["eventId"], recovery_id)
+        self.assertEqual(snapshot["oracleAdvice"][0]["status"], "complete")
+        self.assertTrue(snapshot["oracleAdvice"][0]["advisoryOnly"])
+        self.assertNotIn("secret-value", snapshot["oracleAdvice"][0]["result"])
+        self.assertNotIn("topsecret", snapshot["oracleAdvice"][0]["result"])
 
 
 if __name__ == "__main__":
