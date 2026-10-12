@@ -1,0 +1,9 @@
+# ROTOXY Oracle operations checkpoint
+
+Assignment RX-ORACLE-OPS, branch `codex/rotoxy-oracle-ops-20261012`, based on `origin/main` at `a7b7a30545d2fdd90d845a3a2003eaa973926927`.
+
+Added `snooze.oracle_ops` as a read-only SQLite snapshot and a typed TypeScript loader plus pure admin-page renderer. The snapshot allowlists only ora1/ora3/ora5 and approved catalog models, reports last catalog-check evidence without probing SSH, and aggregates task counts, observed token values, hourly completions, and host assignment shares with explicit denominators/nulls. Task/event pages are bounded and omit prompts, results, task identifiers, and source/owner references. `tev1:0.8b` is labeled an advisory candidate only when its cached catalog shows availability. The page reuses Token2OAuth's shared admin navigation and labels itself ROTOXY; no legacy feature set or external logo asset was copied.
+
+The Python reader requires explicit absolute private config/database paths, refuses missing/insecure files without creating them, opens SQLite with `mode=ro` and `query_only`, and has no SSH, HTTP, or inference path. Root integration seam: add an authenticated admin GET route (for example `/admin/oracle`) that passes only trusted configured paths to `loadOracleOpsSnapshot`, validates bounded `offset`/`afterEvent` query values, and adds an admin navigation link. Do not forward request parameters as config/database paths.
+
+Tests: `PYTHONPATH=. python -m unittest tests.test_oracle_ops -v` — 3/3 passed; `npm run build`; `node --test test/oracle-ops.test.mjs` — 5/5 passed. Python fixtures set temporary `HOME` and `TOKEN2OAUTH_CONFIG_DIR` before pool construction; every loader test supplies explicit temporary paths. Tests use fake transport, verify redaction, fixed-host scope, meaningful zero/unknown metrics, pagination, renderer escaping, and missing-state behavior. No live host probe or full existing project suite was run.
