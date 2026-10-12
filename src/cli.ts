@@ -109,7 +109,26 @@ program
         if (opts.strategy) state.config.strategy = opts.strategy as PoolStrategy;
       });
     }
-    await startServer({ host: opts.host, port: opts.port, supervisorConfigPath: opts.supervisorConfig, oraclePool: opts.oraclePool, webToolsConfigPath: opts.webToolsConfig });
+    const running = await startServer({ host: opts.host, port: opts.port, supervisorConfigPath: opts.supervisorConfig, oraclePool: opts.oraclePool, webToolsConfigPath: opts.webToolsConfig });
+    let stopping = false;
+    const stop = async () => {
+      if (stopping) return;
+      stopping = true;
+      const deadline = setTimeout(() => process.exit(1), 10_000);
+      try {
+        // Await the owned bridge cleanup before exiting; a killed process leaves
+        // its private socket behind and the next startup correctly fails closed.
+        await running.supervisor?.close();
+        await new Promise<void>((resolve, reject) => running.server.close(error => error ? reject(error) : resolve()));
+        clearTimeout(deadline);
+        process.exit(0);
+      } catch {
+        clearTimeout(deadline);
+        process.exit(1);
+      }
+    };
+    process.once("SIGTERM", () => { void stop(); });
+    process.once("SIGINT", () => { void stop(); });
   });
 
 const account = program.command("account").description("Manage encrypted upstream credentials");

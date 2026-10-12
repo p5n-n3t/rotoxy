@@ -294,7 +294,7 @@ test("inbox acknowledgment sends same-origin CSRF header and project-scoped endp
     fetch: async (url, options = {}) => {
       requests.push({ url: String(url), options });
       if (options.method === "POST") return { ok: true };
-      return new Response(JSON.stringify({ available: true, events: [{ id: 17, kind: "job.done", at: "2026-10-12T00:00:00Z" }], models: [], recovery: { available: true, project: "project-7", state: "handoff", cursor: 17, decisions: [], pendingHandoffs: [{ kind: "failed", reason: "review" }], notifyReceipts: [], oracleAdvice: [] } }), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ available: true, events: [{ id: 17, kind: "job.done", at: "2026-10-12T00:00:00Z" }], models: [], recovery: { available: true, project: "project-7", state: "handoff", cursor: 17, decisions: [{eventId:"nested",decision:{outcome:"human_handoff",reason:"Nested decision reason"}}], pendingHandoffs: [{ kind: "failed", reason: "review" }], notifyReceipts: [], oracleAdvice: [] } }), { headers: { "Content-Type": "application/json" } });
     },
     URL, TextDecoder, Uint8Array, JSON, Date, encodeURIComponent,
   };
@@ -305,6 +305,8 @@ test("inbox acknowledgment sends same-origin CSRF header and project-scoped endp
   assert.ok(acknowledge);
   const recoveryText = (node) => [node.textContent, ...node.children.map(recoveryText)].join(" ");
   assert.match(recoveryText(recovery), /manual review|handoff/);
+  assert.match(recoveryText(recovery), /Project cursor 17/);
+  assert.match(recoveryText(recovery), /Nested decision reason/);
   await acknowledge.listeners.click();
   assert.equal(requests[1].options.method, "POST");
   assert.equal(new URL(requests[1].url).pathname, "/admin/api/v1/supervisor/project-7/inbox/17/ack");

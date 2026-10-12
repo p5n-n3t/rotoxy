@@ -208,7 +208,7 @@ export class SupervisorRuntime implements SupervisorBackend {
   /** Read-only fixed-module projection. The HTTP request can select only its configured project, never a DB path. */
   private async recoverySnapshot(projectId: string, owners: string[], after = 0, limit = 20): Promise<unknown> {
     return new Promise((resolvePromise, rejectPromise) => {
-      const python = process.env.PYTHON ?? "/usr/bin/python3";
+      const python = "/usr/bin/python3";
       const args = ["-m", "snooze.recovery_service", "--snapshot", "--db", this.recoveryDbPath,
         "--project", projectId, "--owners", ...owners, "--after", String(after), "--limit", String(limit),
         "--oracle-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")];
