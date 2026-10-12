@@ -15,8 +15,8 @@ import { collectDoctorSnapshot } from "./doctor-runtime.js";
 import { diagnoseDoctorSnapshot } from "./doctor.js";
 import { LifecycleController, createExecFileRunner, planUp, renderCommand } from "./lifecycle.js";
 import { compileToolPolicy, type ToolPolicy } from "./tool-policy.js";
-import { adminNav, withCsrf } from "./html.js";
-import { BRAND_FAVICON_SVG, BRAND_MARK_SVG } from "./supervisor-ui.js";
+import { adminNav, withCsrf, ROTOXY_FAVICON_SVG } from "./html.js";
+import { BRAND_MARK_SVG } from "./supervisor-ui.js";
 
 export interface AdminUiDeps {
   oauth?: OAuthService;
@@ -115,11 +115,22 @@ details.settings{border-top:1px solid var(--line);padding:4px 0}details.settings
 details.settings>summary .tiny{font-weight:400;margin-left:8px}
 .empty{padding:14px 16px;background:var(--sunk);color:var(--muted);border-radius:4px;font-size:14px}
 @media(max-width:520px){.ledger{grid-template-columns:repeat(2,minmax(0,1fr))}.ledger div,.ledger div+div{padding:12px 10px 12px 0;border-left:0;border-bottom:1px solid var(--rule)}.ledger dd{font-size:23px}.reqs li{grid-template-columns:64px minmax(0,1fr)}.reqs .lat{grid-column:2}}
+.topbar{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px 24px;padding:10px 0;margin-bottom:22px;border-bottom:1px solid var(--line)}
+.topbar .brand{text-decoration:none;color:var(--ink)}.topbar .brand strong{font:700 15px/1.1 var(--mono);letter-spacing:.14em}
+.groups{display:flex;flex-wrap:wrap;gap:4px 18px;min-width:0}
+.nav-group{display:flex;align-items:center;gap:2px;min-width:0}
+.nav-label{font:600 11px/1 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-right:6px;white-space:nowrap}
+.nav-link{padding:6px 9px;border-radius:3px;color:var(--ink);text-decoration:none;font-size:13.5px;font-weight:550;white-space:nowrap}
+.nav-link:hover{background:var(--surface)}.nav-link[aria-current=page]{background:var(--ink);color:var(--paper)}
+.topbar-end{display:flex;gap:6px;align-items:center}.topbar-end .btn,.topbar-end button{min-height:32px;padding:4px 11px;font-size:13px;white-space:nowrap}
+button,.btn{white-space:nowrap}
+@media(max-width:1100px){.topbar{grid-template-columns:auto auto}.groups{grid-column:1/-1;grid-row:2}.topbar-end{justify-self:end}}
+@media(max-width:620px){.groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 10px}.nav-group{flex-wrap:wrap}.nav-label{flex:1 0 100%;margin:4px 0 2px}.nav-link{padding:7px 8px;min-height:36px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 `;
 
 
-const faviconHref = `data:image/svg+xml,${encodeURIComponent(BRAND_FAVICON_SVG)}`;
+const faviconHref = `data:image/svg+xml,${encodeURIComponent(ROTOXY_FAVICON_SVG)}`;
 
 /** Swap the legacy text badge (also emitted by shared nav helpers) for the relay-gate mark. */
 export function brandMarkup(body: string): string {
