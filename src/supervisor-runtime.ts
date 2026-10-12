@@ -13,6 +13,8 @@ import { redactString } from "./telemetry.js";
 import { SupervisorBridge, type SupervisorBridgeOptions } from "./supervisor-bridge.js";
 import type { SupervisorBackend, SupervisorCaller } from "./supervisor-api.js";
 import type { SupervisorAccountUsage, SupervisorEvent, SupervisorJob, SupervisorSnapshot, SupervisorTask, SupervisorUsage, SupervisorWorker } from "./supervisor-ui.js";
+import { evaluateToolCall } from "./tool-policy.js";
+import { WorkerGuidanceLedger, WorkerGuidanceService, type WorkerGuidanceInput, type WorkerGuidanceResult } from "./worker-guidance.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -162,11 +164,38 @@ export class SupervisorRuntime implements SupervisorBackend {
   private readonly supervisionDbPath: string;
   private readonly recoveryDbPath: string;
   private readonly monitorRegistrationByProject = new Map<string, { expected: number; registered: number; failed: number }>();
+  private readonly workerGuidance: WorkerGuidanceService;
 
   constructor(private readonly config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
     this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
     this.supervisionDbPath = options.supervisionDbPath ?? resolve(homedir(), ".local/state/token2oauth/supervision/inbox.sqlite");
     this.recoveryDbPath = options.recoveryDbPath ?? resolve(homedir(), ".local/state/token2oauth/supervision/recovery.sqlite3");
+    this.workerGuidance = new WorkerGuidanceService({
+      ledger: new WorkerGuidanceLedger(options.store, options.configDir),
+      findWorker: (projectId, workerId) => {
+        const project = this.config.projects.find((row) => row.projectId === projectId);
+        const session = project?.registeredSessions.find((row) => row.sessionId === workerId);
+        return session ? { projectId, sessionId: session.sessionId, accountId: session.accountId, model: session.model } : undefined;
+      },
+      adapterFor: async (accountId) => {
+        const timeoutMs = this.options.workerOptions?.adapterTimeoutMs ?? 30_000;
+        if (this.options.adapterFactory) return this.options.adapterFactory(accountId, { timeoutMs });
+        let adapter = this.adapterCache.get(accountId);
+        if (!adapter) { adapter = new LightSprintJobsAdapter(this.options.store, accountId, { timeoutMs }); this.adapterCache.set(accountId, adapter); }
+        return adapter;
+      },
+      accountEligible: async (accountId) => {
+        const latest = await this.options.store.load();
+        const signal = accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl));
+        return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
+      },
+      policyAllows: async (worker, message, clientMessageId) => {
+        const latest = await this.options.store.load();
+        return evaluateToolCall(latest.config.toolPolicy, { name: "lightsprint_api", arguments: {
+          method: "POST", path: `/api/agent-sessions/${worker.sessionId}/chat`, body: { message, clientMessageId },
+        } }).allowed;
+      },
+    });
     const spawnChild = options.bridgeOptions?.spawnChild ?? ((function (command: string, args?: readonly string[], spawnOptions?: any) {
       if (!args || args[0] !== "-m" || args[1] !== "snooze.bridge") throw new Error("Unexpected supervisor command");
       const code = "import os,runpy,sys; os.umask(0o177); sys.argv=['snooze.bridge',*sys.argv[1:]]; runpy.run_module('snooze.bridge',run_name='__main__')";
@@ -320,6 +349,12 @@ export class SupervisorRuntime implements SupervisorBackend {
   }
 
   get status() { return { ...this.bridge.status(), workerStarted: this.started && !this.closed }; }
+
+  async guidanceAdmin(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult> {
+    if (this.closed || !this.started) return { requestId: input.requestId, state: "rejected", reason: "supervisor_not_running" };
+    if (!this.config.projects.some((project) => project.projectId === input.projectId)) return { requestId: input.requestId, state: "rejected", reason: "worker_not_registered" };
+    return this.workerGuidance.submit(input);
+  }
 
   async callTool(name: JobToolName, rawArgs: unknown, caller: SupervisorCaller): Promise<unknown> {
     if (this.closed || !this.started) throw new Error("supervisor_not_running");

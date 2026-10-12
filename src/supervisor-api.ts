@@ -7,6 +7,7 @@ import { validateJobToolArguments, type JobToolName } from "./job-submit.js";
 import { redact } from "./telemetry.js";
 import { normalizeSupervisorSnapshot, renderSupervisorDashboard, renderSupervisorEventFeed, renderSupervisorWorkerView } from "./supervisor-ui.js";
 import type { StateStore } from "./store.js";
+import type { WorkerGuidanceInput, WorkerGuidanceResult } from "./worker-guidance.js";
 
 export interface SupervisorCaller {
   /** OAuth client id; the durable bridge uses this to enforce project ownership. */
@@ -31,6 +32,8 @@ export interface SupervisorBackend {
   controlAdmin?(input: SupervisorControlInput): Promise<unknown>;
   readSupervision?(projectId: string, after: number, limit: number): Promise<unknown>;
   acknowledgeSupervision?(projectId: string, eventId: number): Promise<unknown>;
+  /** Admin-only one-shot message to a configured existing worker session. */
+  guidanceAdmin?(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult>;
 }
 
 export class SupervisorUnavailable extends Error {
@@ -248,6 +251,33 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
         expectedRevision: Number(body.expectedRevision), ...(concurrencyAction ? { value: Number(body.value) } : {}) });
       return res.json(result);
     } catch { return res.status(409).json({ error: "control_conflict" }); }
+  });
+
+  router.post("/admin/api/v1/supervisor/:projectId/workers/:workerId/guidance", express.json({ limit: "32kb" }), requireAdmin, requireCsrf, async (req, res) => {
+    const { projectId, workerId } = req.params;
+    const body = req.body as Record<string, unknown>;
+    const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+    if (typeof projectId !== "string" || !id(projectId) || typeof workerId !== "string" || !id(workerId) ||
+        !body || Object.keys(body).some((key) => !["requestId", "message", "expectedPromptCount", "expectedQuestionId"].includes(key)) ||
+        !id(body.requestId) || typeof body.message !== "string" || Buffer.byteLength(body.message, "utf8") < 1 || Buffer.byteLength(body.message, "utf8") > 20_000 ||
+        !Number.isSafeInteger(body.expectedPromptCount) || Number(body.expectedPromptCount) < 0 ||
+        (body.expectedQuestionId !== undefined && !id(body.expectedQuestionId))) {
+      return res.status(400).json({ error: "invalid_worker_guidance" });
+    }
+    if (!backend?.guidanceAdmin) return res.status(503).json({ error: "worker_guidance_unavailable" });
+    try {
+      const result = await backend.guidanceAdmin({ projectId, workerId, requestId: body.requestId, message: body.message,
+        expectedPromptCount: Number(body.expectedPromptCount), ...(body.expectedQuestionId ? { expectedQuestionId: body.expectedQuestionId as string } : {}) });
+      if (result.requestId !== body.requestId || !["accepted", "rejected", "ambiguous"].includes(result.state)) return res.status(502).json({ error: "worker_guidance_result_invalid" });
+      const model = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value) ? value : undefined;
+      const reason = typeof result.reason === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(result.reason) ? result.reason : undefined;
+      const safe = { requestId: body.requestId, state: result.state, ...(reason ? { reason } : {}),
+        ...(model(result.requestedModel) ? { requestedModel: model(result.requestedModel) } : {}), ...(model(result.reportedModel) ? { reportedModel: model(result.reportedModel) } : {}) };
+      const status = result.state === "rejected" && result.reason === "worker_not_registered" ? 404 : result.state === "ambiguous" ? 202 : result.state === "rejected" ? 409 : 200;
+      return res.status(status).json(safe);
+    } catch {
+      return res.status(404).json({ requestId: typeof body.requestId === "string" ? body.requestId : "unknown", state: "rejected", reason: "project_or_worker_unavailable" });
+    }
   });
   return router;
 }

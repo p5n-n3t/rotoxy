@@ -128,6 +128,22 @@ test("existing revision-fenced admin control still rejects missing CSRF and dele
   assert.equal(unexpectedValue.status, 400);
 });
 
+test("worker guidance requires admin session and CSRF and delegates only the bounded registered-worker request", async (t) => {
+  const calls = [];
+  const f = await fixture(t, { callTool: async () => ({}), guidanceAdmin: async (input) => { calls.push(input); return { requestId: input.requestId, state: "accepted", reason: "provider_accepted_message", requestedModel: "gpt-6-luna", reportedModel: "gpt-6-luna" }; } });
+  const url = f.base + "/admin/api/v1/supervisor/project-a/workers/session-a/guidance";
+  const body = { requestId: "guidance-001", message: "Please clarify the next bounded step.", expectedPromptCount: 3, expectedQuestionId: "q-17" };
+  const post = (cookie, csrf, value = body) => fetch(url, { method: "POST", headers: { ...(cookie ? { cookie } : {}), "content-type": "application/json", ...(csrf ? { "x-csrf-token": csrf } : {}) }, body: JSON.stringify(value) });
+  assert.equal((await post(undefined, f.csrf)).status, 401);
+  assert.equal((await post(f.cookie, undefined)).status, 403);
+  assert.equal((await post(f.cookie, f.csrf, { ...body, extra: "blocked" })).status, 400);
+  assert.deepEqual(calls, []);
+  const response = await post(f.cookie, f.csrf);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { requestId: body.requestId, state: "accepted", reason: "provider_accepted_message", requestedModel: "gpt-6-luna", reportedModel: "gpt-6-luna" });
+  assert.deepEqual(calls, [{ projectId: "project-a", workerId: "session-a", ...body }]);
+});
+
 test("supervision inbox requires admin auth, bounds pages, and CSRF-protects project event acknowledgments", async (t) => {
   const reads = [];
   const acks = [];
