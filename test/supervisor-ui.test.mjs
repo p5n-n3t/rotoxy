@@ -14,14 +14,25 @@ test("dispatch controls retain mounted paths and render only authoritative revis
   assert.match(html, /do not cancel in-flight work/);
 });
 
-test("renders nested workforce hierarchy with native keyboard disclosures", () => {
-  const html = renderSupervisorDashboard({ providers: [{ id: "p", label: "Provider", status: "healthy", accounts: [{ id: "a", label: "Account", status: "ready", workspaces: [{ id: "w", label: "Workspace", workers: [{ id: "worker-1", status: "working" }] }] }] }] });
-  assert.match(html, /<details class="distribution"><summary><span class="provider-title">Provider/);
-  assert.match(html, /Workspace Workspace/);
-  assert.match(html, /worker-1/);
-  assert.match(html, /<nav aria-label="Dashboard sections">/);
+test("ROTOXY supervisor uses worker-first tabs and honest attribution/status fields", () => {
+  const html = renderSupervisorDashboard(normalizeSupervisorSnapshot({ workers: [{ id: "session-1", accountId: "acct-1", accountLabel: "Primary account", workspace: "ws-1", requestedModel: "gpt-requested", actualModel: "gpt-observed", taskCorrelation: "assignment-1:task-1", status: "needs_instructions", monitorState: "needs_instructions", heartbeatAt: 1791792000 }] }), { nonce: "tab-nonce", liveFeedUrl: "/token2oauth/admin/api/v1/supervisor/project-a/live" });
+  assert.match(html, /role="tablist"[^>]*aria-label="Supervisor sections"/);
+  for (const tab of ["workers", "inbox", "recovery", "handoffs"]) assert.match(html, new RegExp(`data-tab="${tab}"`));
+  assert.match(html, /class="workers-table"/);
+  assert.match(html, /Primary account/);
+  assert.match(html, /Requested: gpt-requested/);
+  assert.match(html, /Actual: gpt-observed/);
+  assert.match(html, /assignment-1:task-1/);
+  assert.match(html, /Waiting on a human/);
+  assert.match(html, /question or approval context was not captured; reply is unavailable/i);
+  assert.match(html, /Session resumption: unknown; heartbeat does not prove wake/);
+  assert.match(html, /Next check: unknown; schedule not reported/);
+  assert.match(html, /@media\(max-width:700px\)/);
+  assert.match(html, /\.table-wrap\{overflow:auto\}/);
+  assert.match(html, /ArrowRight/);
+  assert.doesNotMatch(html, /<details class="distribution">/);
   assert.match(html, /prefers-reduced-motion/);
-  assert.doesNotMatch(html, /<script\b/i);
+  assert.match(html, /<script nonce="tab-nonce">/);
 });
 
 test("capacity bars require a known positive denominator and show exact values", () => {

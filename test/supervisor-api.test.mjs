@@ -14,6 +14,8 @@ const close = (server) => new Promise((resolve) => server.close(resolve));
 async function fixture(t, backend) {
   const dir = await mkdtemp(join(tmpdir(), "t2o-supervisor-ui-"));
   const previous = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  const previousHome = process.env.HOME;
+  process.env.HOME = dir;
   process.env.TOKEN2OAUTH_CONFIG_DIR = dir;
   const store = new StateStore();
   await store.init({ adminPassword: ADMIN });
@@ -23,7 +25,7 @@ async function fixture(t, backend) {
   const base = `http://127.0.0.1:${address.port}`;
   const cookie = `t2o_admin=${encodeURIComponent(built.sessions.create())}`;
   const csrf = built.sessions.csrfToken(decodeURIComponent(cookie.slice("t2o_admin=".length)));
-  t.after(async () => { await close(server); await rm(dir, { recursive: true, force: true }); if (previous === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = previous; });
+  t.after(async () => { await close(server); await rm(dir, { recursive: true, force: true }); if (previous === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = previous; if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; });
   return { base, cookie, csrf };
 }
 
@@ -55,7 +57,7 @@ test("project dashboard and admin JSON require session and set the pre-AdminUi s
 });
 
 test("live endpoint returns bounded sanitized filtered event HTML and status from the actual project snapshot", async (t) => {
-  const snapshot = { supervisor: { status: "healthy" }, orchestrator: { status: "degraded" }, events: [
+  const snapshot = { supervisor: { status: "healthy" }, orchestrator: { status: "degraded" }, workers: [{ id: "session-a", accountId: "acct-a", accountLabel: "Primary account", status: "running", monitorState: "running", requestedModel: "gpt-requested", actualModel: "gpt-observed", taskCorrelation: "job-a:task-1", heartbeatAt: 1791792000 }], events: [
     { id: "1", severity: "warning", message: "quota paused", paused: true, api_key: "must-not-leak" },
     { id: "2", severity: "info", message: "worker online", paused: false },
     ...Array.from({ length: 118 }, (_, i) => ({ id: `event-${i + 3}`, severity: "info", message: "bounded activity", paused: false })),
@@ -69,6 +71,13 @@ test("live endpoint returns bounded sanitized filtered event HTML and status fro
   assert.equal(json.supervisor, "healthy");
   assert.equal(json.orchestrator, "degraded");
   assert.match(json.eventsHtml, /quota paused/);
+  assert.match(json.workersHtml, /Primary account/);
+  assert.match(json.workersHtml, /gpt-requested/);
+  assert.match(json.workersHtml, /gpt-observed/);
+  assert.match(json.workersHtml, /job-a:task-1/);
+  assert.equal(json.activeWorkers, 1);
+  assert.equal(json.attentionWorkers, 0);
+  assert.match(json.latestHeartbeat, /2026-/);
   assert.doesNotMatch(json.eventsHtml, /worker online|must-not-leak/);
   assert.match(response.headers.get("cache-control"), /no-store/);
   assert.match(response.headers.get("content-security-policy"), /connect-src 'self'/);
