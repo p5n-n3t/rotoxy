@@ -1,0 +1,13 @@
+[Unit]
+Description=ROTOXY foreground Tailscale Funnel to Token2OAuth on port 2030
+After=network-online.target rotoxy.target token2oauth.service
+Requires=token2oauth.service
+PartOf=rotoxy.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tailscale funnel --https=443 http://127.0.0.1:2030
+Restart=no
+TimeoutStopSec=10
+
+# No [Install] section: this unit is never enabled for automatic boot exposure.
