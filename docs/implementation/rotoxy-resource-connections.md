@@ -17,3 +17,5 @@ Before exposing the page, `server.ts` must add `router.use(createResourceConnect
 The new tests set both `HOME` and `TOKEN2OAUTH_CONFIG_DIR` before constructing `StateStore`. They cover auth/CSRF/epoch checks, encrypted key storage, private file mode, known-client-only permissions, redaction, status labeling, loading the saved mapping through `loadWebToolsConfig`, generic account compatibility, provider-specific pool isolation, and rejection before mismatched health-probe network I/O. `npm test` passed: 296 tests, 0 failures (includes TypeScript build). Credentials were mock values only; no provider calls, production config edits, or deployment occurred.
 
 The connected label means an enabled matching account has an encrypted credential stored; it does not claim that the provider accepted the key. The checkpoint-only feature remains unwired into the running app until the integration seams above are applied.
+
+Implementation commit `c84f736b886f96a1e9d42ea43cb105c92e116a13` was pushed successfully to `origin/codex/rotoxy-connections-20261012`. The checkpoint update itself will be published as a follow-up commit.
