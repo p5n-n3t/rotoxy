@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "recordedAt": "2026-10-12T18:19:37.143947+00:00",
+  "recordedAt": "2026-10-12T18:51:02.252463+00:00",
   "scope": "actionable supervision update; full platform roadmap remains incomplete",
   "sourceBase": "e1d51cb24fd2ae00b3b111e40dd36462e4642f70",
   "verification": {
@@ -107,6 +107,86 @@
       "passed": 15,
       "failed": 0,
       "realDelayedPythonStartup": true
+    },
+    "lifecycleAfterUnitChange": {
+      "passed": 10,
+      "failed": 0
+    },
+    "gatewayRestart": {
+      "passed": true,
+      "realGatewayRestart": true,
+      "sameForegroundFunnelProcess": true,
+      "sameRouteConfiguration": true,
+      "gatewayHealthy": true,
+      "funnelUnitState": "static",
+      "gatewayUnitState": "disabled",
+      "lifecycleCommit": "eae6b57",
+      "instrumentationNote": "Restart/route/PID assertions passed; the initial status helper then treated is-enabled disabled exit 1 as an error. UnitFileState was rechecked with show."
+    },
+    "installedContinuity": {
+      "passed": true,
+      "syntheticIncidents": true,
+      "providerCalls": 0,
+      "initiatorExited": true,
+      "supervisorRestarted": true,
+      "durableEvents": 4,
+      "notificationReceipts": 3,
+      "duplicateActions": 0,
+      "dormantWebHandoff": true,
+      "replayProcessed": 0,
+      "questionProjection": true,
+      "productionStateTouched": false
+    },
+    "publicAuthenticationBoundary": {
+      "metadataStatus": 200,
+      "registrationValidationStatus": 400,
+      "registrationReachedWithoutLegacyToken": true,
+      "registrationPersisted": false,
+      "unauthenticatedMcpStatus": 401,
+      "bearerChallenge": true,
+      "legacyTokenError": false,
+      "adminStatus": 302
+    },
+    "publicDoctor": {
+      "status": "healthy",
+      "stageChecks": [
+        {
+          "stage": "process",
+          "status": "passed",
+          "summary": "The local process and listener were checked."
+        },
+        {
+          "stage": "config",
+          "status": "passed",
+          "summary": "Required gateway configuration fields are valid."
+        },
+        {
+          "stage": "credentials",
+          "status": "passed",
+          "summary": "At least one enabled credential is available."
+        },
+        {
+          "stage": "upstream",
+          "status": "passed",
+          "summary": "The upstream connection and MCP initialize probe passed."
+        },
+        {
+          "stage": "oauth",
+          "status": "passed",
+          "summary": "Issuer, resource, and redirect URI values were compared."
+        },
+        {
+          "stage": "tools",
+          "status": "passed",
+          "summary": "MCP tools/list returned a valid result."
+        },
+        {
+          "stage": "funnel",
+          "status": "passed",
+          "summary": "The expected Funnel path is mounted without a path collision."
+        }
+      ],
+      "findings": []
     }
   },
   "cloudWave": {
@@ -131,12 +211,43 @@
     "decisionAuthority": false
   },
   "runtime": {
-    "deploymentVerified": false,
+    "deploymentVerified": true,
     "manualLifecycle": true,
     "bootEnabled": false,
     "strictReadOnlyToolPolicyPreserved": true,
     "nativeApprovalActionsEnabled": false,
-    "headlessAdapterEnabled": false
+    "headlessAdapterEnabled": false,
+    "units": {
+      "token2oauth.service": true,
+      "token2oauth-oracle-pool.service": true,
+      "token2oauth-worker-monitor.service": true,
+      "rotoxy-funnel.service": true,
+      "rotoxy.target": true
+    },
+    "configuredUnits": [
+      "token2oauth.service",
+      "token2oauth-oracle-pool.service",
+      "token2oauth-worker-monitor.service"
+    ],
+    "root": "http://127.0.0.1:2030",
+    "funnelAllowed": true,
+    "mounts": [
+      "/"
+    ],
+    "healthy": true,
+    "sourceFilesMatch": true,
+    "manifestFilesVerified": 237,
+    "monitor": {
+      "freshDaemonPassChecked": 64,
+      "statusErrors": 0,
+      "guidanceSubmitted": 0,
+      "recoveryProcessed": 0,
+      "previousGenericFailuresDuringRollout": 2,
+      "manualRetryBeforeHardeningPassed": true,
+      "hardeningVerifiedByDaemon": true
+    },
+    "configurationAndDatabaseBackupTaken": true,
+    "fullRollbackExercised": false
   },
   "remainingGaps": [
     "Live parked-question schema and native approval semantics",
@@ -153,5 +264,6 @@
     "disabled": 1,
     "newAccountsEnabled": true,
     "healthSource": "cached gateway state; not a fresh all-account authentication test"
-  }
+  },
+  "deployedCodeCommit": "e6c9b8660ea7c276b7acb1820248a83411f39dee"
 }
