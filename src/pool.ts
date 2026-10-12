@@ -7,6 +7,9 @@ import type {
 import { StateStore } from "./store.js";
 import { UpstreamOwnershipRegistry } from "./routing-safety.js";
 import type { TelemetryRecorder } from "./telemetry.js";
+import { providerProfile } from "./provider-capabilities.js";
+
+const WEB_RESOURCE_PROVIDERS = new Set(["exa", "firecrawl", "tavily"]);
 
 export interface FailureInfo {
   status?: number;
@@ -69,6 +72,24 @@ export class CredentialPool {
     if (account.stats.state === "exhausted" && !account.stats.cooldownUntil) return false;
     if (account.stats.cooldownUntil && account.stats.cooldownUntil > now) return false;
     return true;
+  }
+
+  /**
+   * Provider API credentials belong to their declared MCP provider and must
+   * never fall into an unrelated bearer-token pool. Generic bearer accounts
+   * retain the historical any-upstream behavior.
+   */
+  isCompatibleAccount(account: UpstreamAccount, state: PersistedState): boolean {
+    if (!WEB_RESOURCE_PROVIDERS.has(account.provider)) return true;
+    const profile = providerProfile(account.provider);
+    if (!profile) return false;
+    try {
+      const configured = new URL(state.config.upstreamUrl);
+      const canonical = new URL(profile.defaultServerUrl);
+      return configured.protocol === "https:" && configured.hostname.toLowerCase() === canonical.hostname.toLowerCase();
+    } catch {
+      return false;
+    }
   }
 
   private cleanupAffinity(): void {
@@ -156,7 +177,7 @@ export class CredentialPool {
   ): UpstreamAccount | undefined {
     const exclude = options.exclude || new Set<string>();
     const eligible = state.accounts.filter(
-      (a) => this.isEligible(a) && !exclude.has(a.id),
+      (a) => this.isEligible(a) && this.isCompatibleAccount(a, state) && !exclude.has(a.id),
     );
     if (!eligible.length) return undefined;
 
@@ -312,6 +333,9 @@ export class CredentialPool {
     }
     if (!state.config.upstreamUrl) {
       return { accountId, label: account.label, ok: false, error: "upstream URL is not configured" };
+    }
+    if (!this.isCompatibleAccount(account, state)) {
+      return { accountId, label: account.label, ok: false, error: "account provider does not match the configured MCP upstream" };
     }
 
     try {
