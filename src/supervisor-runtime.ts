@@ -32,6 +32,8 @@ export interface SupervisorRuntimeOptions {
   supervisorCwd?: string;
   /** Private local database shared with the persistent read-only workforce monitor. */
   supervisionDbPath?: string;
+  /** Private RecoveryEngine/service database. Tests and isolated installs must provide their own path. */
+  recoveryDbPath?: string;
   oracleConfigPath?: string;
   oracleDbPath?: string;
   store: StateStore;
@@ -158,11 +160,13 @@ export class SupervisorRuntime implements SupervisorBackend {
   private readonly owner = (caller: SupervisorCaller) => ({ ownerPrincipalId: `oauth-client:${caller.clientId}`, clientId: caller.clientId });
   private readonly supervisorCwd: string;
   private readonly supervisionDbPath: string;
+  private readonly recoveryDbPath: string;
   private readonly monitorRegistrationByProject = new Map<string, { expected: number; registered: number; failed: number }>();
 
   constructor(private readonly config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
     this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
     this.supervisionDbPath = options.supervisionDbPath ?? resolve(homedir(), ".local/state/token2oauth/supervision/inbox.sqlite");
+    this.recoveryDbPath = options.recoveryDbPath ?? resolve(homedir(), ".local/state/token2oauth/supervision/recovery.sqlite3");
     const spawnChild = options.bridgeOptions?.spawnChild ?? ((function (command: string, args?: readonly string[], spawnOptions?: any) {
       if (!args || args[0] !== "-m" || args[1] !== "snooze.bridge") throw new Error("Unexpected supervisor command");
       const code = "import os,runpy,sys; os.umask(0o177); sys.argv=['snooze.bridge',*sys.argv[1:]]; runpy.run_module('snooze.bridge',run_name='__main__')";
@@ -198,6 +202,33 @@ export class SupervisorRuntime implements SupervisorBackend {
       });
       child.stdin.on("error", () => {});
       child.stdin.end(payload === undefined ? "" : JSON.stringify(payload));
+    });
+  }
+
+  /** Read-only fixed-module projection. The HTTP request can select only its configured project, never a DB path. */
+  private async recoverySnapshot(projectId: string, owners: string[], after = 0, limit = 20): Promise<unknown> {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const python = process.env.PYTHON ?? "/usr/bin/python3";
+      const args = ["-m", "snooze.recovery_service", "--snapshot", "--db", this.recoveryDbPath,
+        "--project", projectId, "--owners", ...owners, "--after", String(after), "--limit", String(limit),
+        "--oracle-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")];
+      const child = nodeSpawn(python, args, { cwd: this.supervisorCwd,
+        env: { ...process.env, PYTHONPATH: this.supervisorCwd }, stdio: ["ignore", "pipe", "ignore"] });
+      const chunks: Buffer[] = [];
+      let size = 0;
+      const timer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      child.stdout.on("data", (chunk: Buffer | string) => {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += bytes.length;
+        if (size > 256 * 1024) child.kill("SIGKILL"); else chunks.push(bytes);
+      });
+      child.once("error", () => { clearTimeout(timer); rejectPromise(new Error("recovery_snapshot_unavailable")); });
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0) return rejectPromise(new Error("recovery_snapshot_unavailable"));
+        try { resolvePromise(JSON.parse(Buffer.concat(chunks, size).toString("utf8"))); }
+        catch { rejectPromise(new Error("recovery_snapshot_unavailable")); }
+      });
     });
   }
 
@@ -477,6 +508,11 @@ export class SupervisorRuntime implements SupervisorBackend {
         ["--project", project.projectId, "--after", "0", "--limit", "20", "--pool-config", this.options.oracleConfigPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
           "--pool-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")]);
     } catch { supervision = { available: false, workers: [], events: [], models: [], error: "supervision_unavailable" }; }
+    const recoveryOwners = project.clientIds.map((clientId) => `oauth-client:${clientId}`);
+    let recovery: unknown;
+    try { recovery = await this.recoverySnapshot(project.projectId, recoveryOwners, 0, 20); }
+    catch { recovery = { available: false, project: project.projectId, state: "unavailable", cursor: 0, decisions: [], pendingHandoffs: [], notifyReceipts: [], oracleAdvice: [] }; }
+    if (object(supervision)) supervision = { ...supervision, recovery };
     if (object(supervision)) supervision = { ...supervision, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 }) } };
     const rawCredit = parseJson(await this.bridge.request("GET", "/admin/api/v1/credit-admission"));
     const creditAdmission = { mode: rawCredit.mode === "strict" ? "strict" : "legacy", accounts: (Array.isArray(rawCredit.accounts) ? rawCredit.accounts.filter(object) : [])
@@ -512,6 +548,11 @@ export class SupervisorRuntime implements SupervisorBackend {
         ["--project", project.projectId, "--after", String(after), "--limit", String(limit), "--pool-config", this.options.oracleConfigPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
           "--pool-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")]);
     } catch { value = { available: false, project: project.projectId, workers: [], events: [], models: [], error: "supervision_unavailable" }; }
+    const owners = project.clientIds.map((clientId) => `oauth-client:${clientId}`);
+    let recovery: unknown;
+    try { recovery = await this.recoverySnapshot(project.projectId, owners, after, limit); }
+    catch { recovery = { available: false, project: project.projectId, state: "unavailable", cursor: after, decisions: [], pendingHandoffs: [], notifyReceipts: [], oracleAdvice: [] }; }
+    if (object(value)) value = { ...value, recovery };
     return boundedJson(object(value) ? { ...value, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 }) } } : value);
   }
   async acknowledgeSupervision(projectId: string, eventId: number): Promise<unknown> {

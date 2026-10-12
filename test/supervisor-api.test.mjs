@@ -122,13 +122,18 @@ test("existing revision-fenced admin control still rejects missing CSRF and dele
 test("supervision inbox requires admin auth, bounds pages, and CSRF-protects project event acknowledgments", async (t) => {
   const reads = [];
   const acks = [];
-  const f = await fixture(t, { callTool: async () => ({}), readSupervision: async (...args) => { reads.push(args); return { project: args[0], events: [], models: [] }; }, acknowledgeSupervision: async (...args) => { acks.push(args); return { acknowledged: true, eventId: args[1] }; } });
+  const f = await fixture(t, { callTool: async () => ({}), readSupervision: async (...args) => { reads.push(args); return { available: true, project: args[0], events: [], models: [], recovery: { available: true, project: args[0], cursor: 5, decisions: [{ eventId: "guidance-5", decision: { outcome: "human_handoff" } }], pendingHandoffs: [], notifyReceipts: [], oracleAdvice: [{ result: "api_key=should-be-redacted" }] } }; }, acknowledgeSupervision: async (...args) => { acks.push(args); return { acknowledged: true, eventId: args[1] }; } });
   const url = f.base + "/admin/api/v1/supervisor/project-s/inbox";
   assert.equal((await fetch(url)).status, 401);
   assert.equal((await fetch(url + "?after=-1", { headers: headers(f.cookie) })).status, 400);
   const page = await fetch(url + "?after=12&limit=4", { headers: headers(f.cookie) });
+  const payload = await page.json();
   assert.equal(page.status, 200);
   assert.deepEqual(reads, [["project-s", 12, 4]]);
+  assert.equal(payload.recovery.project, "project-s");
+  assert.equal(payload.recovery.cursor, 5);
+  assert.equal(payload.recovery.decisions[0].decision.outcome, "human_handoff");
+  assert.doesNotMatch(JSON.stringify(payload), /should-be-redacted/);
   const ackUrl = url + "/7/ack";
   const body = { method: "POST", headers: { ...headers(f.cookie), "content-type": "application/json" }, body: "{}" };
   assert.equal((await fetch(ackUrl, body)).status, 403);

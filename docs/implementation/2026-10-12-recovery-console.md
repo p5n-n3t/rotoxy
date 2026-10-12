@@ -1,0 +1,15 @@
+# Recovery console integration (2026-10-12)
+
+The authenticated project dashboard now reads the RecoveryService SQLite ledger through a fixed, read-only Python module invocation. The request supplies only a configured project identifier and bounded page cursor; it cannot select a database path or owner. Runtime derives the allowed owners from that project's configured OAuth client IDs (`oauth-client:<client-id>`). The existing `/token2oauth/admin/api/v1/supervisor/:projectId/inbox` route carries this projection alongside GuidanceInbox events and model status, preserving the mount prefix and existing admin-session boundary.
+
+## Private storage and monitor hookup
+
+Production defaults are `~/.local/state/token2oauth/supervision/recovery.sqlite3` and `~/.local/state/token2oauth/supervision/inbox.sqlite`. Keep the containing directory owner-only (`0700`) and databases/config owner-only (`0600`). Tests inject temporary recovery, inbox, and Oracle database paths; do not run tests against these operator paths.
+
+The existing monitor configuration remains backward-compatible. To consume registered GuidanceInbox incidents, set its private `recoveryServiceConfig` to an absolute path. That service JSON must set `inboxDb` to the same GuidanceInbox database, `stateDb` to `~/.local/state/token2oauth/supervision/recovery.sqlite3`, and define each configured runtime project with its exact project ID, unique scope, and explicit `owners` list containing only the corresponding `oauth-client:<client-id>` values. Start with `level: "observe"`, empty permissions/rules, `oracle_advice: false`, zero action budgets, and `headless_adapter_verified: false`. Give both config files mode `0600`; the parent directory must be private to the service owner. The monitor invokes `recovery_service --once` once per cycle when configured. A standalone `serve` process is an alternative, but do not run both against the same state database.
+
+The recovery projection includes scoped cursor/state, durable decisions, pending human handoffs, local notification receipts, and at most ten completed Oracle-advice rows. Oracle content is bounded and redacted, displayed as advisory, and never interpreted as commands. The dashboard performs no inference on its polling timer. Dormant-chat resumption remains unknown until an actual completion receipt is observed; this integration does not wake sessions or dispatch paid/cloud/headless actions.
+
+## Verification and remaining seams
+
+The authenticated inbox API retains admin authentication, no-store/security headers, bounded pagination, and CSRF on acknowledgments. The dashboard builds DOM nodes from text content, bounds rendered items, and checks that returned project IDs match the page. Runtime tests provide explicit temporary storage paths. Root integration still needs to install the optional private monitor/recovery configs, register the intended project/owner bindings, and validate a synthetic incident against the installed service. Live registrations, Oracle configuration, and session resumption were not changed or verified here.

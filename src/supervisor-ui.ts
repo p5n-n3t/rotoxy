@@ -133,6 +133,14 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;b
 .event time{font-family:var(--mono)}
 .supervision-event,.supervision-model{padding:12px;border:1px solid var(--line);border-radius:5px;background:var(--surface);margin:8px 0;min-width:0;overflow-wrap:anywhere}
 .supervision-event h3,.supervision-model h3{font-size:14px;margin:0 0 6px}
+.recovery-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:12px;min-width:0}
+.recovery-group{min-width:0;padding:10px;border:1px solid var(--line);border-radius:5px;background:var(--surface)}
+.recovery-group h4{font:600 12px/1.4 var(--mono);margin:0 0 8px;color:var(--muted)}
+.recovery-group h5{font-size:13px;margin:0 0 6px;overflow-wrap:anywhere}
+.recovery-cursor,.recovery-note,.advisory-label{font-size:12px;color:var(--muted)}
+.recovery-note{padding:8px 10px;background:var(--signal-soft);border-left:2px solid var(--signal)}
+.advisory-result{white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;padding:8px;background:var(--sunk);font-size:12px}
+.advisory-label{font-weight:650;color:var(--signal)}
 .supervision-field{font-size:12px;margin-top:3px;overflow-wrap:anywhere}
 .supervision-field strong{color:var(--muted);font-weight:600}
 .oracle-detail{margin-top:7px;padding:7px 9px;border-left:2px solid var(--signal);background:var(--sunk)}
@@ -370,8 +378,8 @@ function overviewLedger(snapshot: SupervisorSnapshot): string {
 }
 
 function supervisionPanel(url: string | undefined, csrfToken: string | undefined, projectId: string | undefined, nonce: string | undefined): string {
-  if (!url) return `<section class="panel" id="inbox"><h2>Durable supervision inbox</h2><p class="intro">Project-scoped event receipts and model inventory.</p><p class="empty">The authenticated inbox endpoint is not available on this page.</p></section>`;
-  return `<section class="panel" id="inbox"><h2>Durable supervision inbox</h2><p class="intro">Acknowledged event receipts and current model inventory for this project.</p><div id="supervision-feed" data-endpoint="${esc(url)}" data-project-id="${esc(projectId || "")}" data-csrf-token="${esc(csrfToken || "")}"><div class="live-bar"><span id="supervision-status" role="status" aria-live="polite">Connecting to the authenticated project inbox…</span><button id="supervision-refresh" type="button">Refresh inbox</button></div><div id="supervision-events" aria-live="polite"><p class="empty">Loading up to 20 events…</p></div><h3>Supervision models</h3><div id="supervision-models"><p class="empty">Loading model inventory…</p></div></div></section>${nonce ? renderSupervisionInboxScript(nonce) : ""}`;
+  if (!url) return `<section class="panel" id="inbox"><h2>Supervision &amp; recovery</h2><p class="intro">Project-scoped recovery decisions and handoffs.</p><p class="empty">The authenticated project API is not available on this page.</p></section>`;
+  return `<section class="panel" id="inbox"><h2>Supervision &amp; recovery</h2><p class="intro">Persisted decisions, human handoffs, notification receipts, and local diagnostics for this project.</p><div id="supervision-feed" data-endpoint="${esc(url)}" data-project-id="${esc(projectId || "")}" data-csrf-token="${esc(csrfToken || "")}"><div class="live-bar"><span id="supervision-status" role="status" aria-live="polite">Connecting to the authenticated project inbox…</span><button id="supervision-refresh" type="button">Refresh recovery state</button></div><section id="supervision-recovery" class="recovery-grid" aria-label="Persisted recovery state" aria-live="polite"><p class="empty">Loading bounded project recovery state…</p></section><h3>Inbox events</h3><div id="supervision-events" aria-live="polite"><p class="empty">Loading up to 20 events…</p></div><h3>Supervision models</h3><div id="supervision-models"><p class="empty">Loading model inventory…</p></div></div></section>${nonce ? renderSupervisionInboxScript(nonce) : ""}`;
 }
 
 function liveRefreshScript(options: SupervisorDashboardOptions): string {

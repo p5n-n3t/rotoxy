@@ -14,6 +14,7 @@ import sqlite3
 import stat
 import sys
 import time
+from urllib.parse import quote
 
 from snooze.guidance import GuidanceInbox
 from snooze.recovery import RecoveryEngine, RecoveryError
@@ -137,12 +138,22 @@ class RecoveryService:
                   INSERT OR IGNORE INTO recovery_service_cursor VALUES(1,0);
                   CREATE TABLE IF NOT EXISTS recovery_service_sources(
                     inbox_event_id INTEGER PRIMARY KEY, recovery_event_id TEXT, state TEXT NOT NULL,
-                    receipt TEXT NOT NULL, processed REAL NOT NULL);
+                    receipt TEXT NOT NULL, processed REAL NOT NULL, project TEXT, owner TEXT);
                   CREATE TABLE IF NOT EXISTS recovery_service_notifications(
                     recovery_event_id TEXT PRIMARY KEY, project TEXT NOT NULL, owner TEXT NOT NULL,
                     job TEXT NOT NULL, kind TEXT NOT NULL, created REAL NOT NULL);
                   CREATE TABLE IF NOT EXISTS recovery_service_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 """)
+                columns = {row[1] for row in db.execute("PRAGMA table_info(recovery_service_sources)")}
+                if "project" not in columns:
+                    db.execute("ALTER TABLE recovery_service_sources ADD COLUMN project TEXT")
+                if "owner" not in columns:
+                    db.execute("ALTER TABLE recovery_service_sources ADD COLUMN owner TEXT")
+                with self.inbox.connection() as inbox_db:
+                    registrations = inbox_db.execute("SELECT id,job,owner FROM guidance_events").fetchall()
+                for source in registrations:
+                    db.execute("UPDATE recovery_service_sources SET project=COALESCE(project,?),owner=COALESCE(owner,?) WHERE inbox_event_id=?",
+                               (source["job"], source["owner"], source["id"]))
             db.close()
             os.chmod(self.state_path, 0o600)
         finally:
@@ -218,8 +229,8 @@ class RecoveryService:
         if not project or not binding or binding["project"] != row["job"] or binding["owner"] != row["owner"]:
             receipt = {"eventId": event_id, "state": "handoff", "reason": "trusted_registration_or_project_policy_missing"}
             with self._connection() as db:
-                db.execute("INSERT OR IGNORE INTO recovery_service_sources VALUES(?,?,?, ?,?)",
-                           (source_id, None, "handoff", json.dumps(receipt, sort_keys=True), self.clock()))
+                db.execute("INSERT OR IGNORE INTO recovery_service_sources(inbox_event_id,recovery_event_id,state,receipt,processed,project,owner) VALUES(?,?,?,?,?,?,?)",
+                           (source_id, None, "handoff", json.dumps(receipt, sort_keys=True), self.clock(), row["job"], row["owner"]))
         else:
             kind = "idle" if row["kind"] == "idle_needs_review" else row["kind"]
             event = {"event_id": event_id, "scope": project["scope"], "project": row["job"], "job": row["job"],
@@ -227,8 +238,8 @@ class RecoveryService:
             self.engine.ingest(event)
             receipt = self.engine.run(event_id)
             with self._connection() as db:
-                db.execute("INSERT OR IGNORE INTO recovery_service_sources VALUES(?,?,?,?,?)",
-                           (source_id, event_id, receipt["state"], json.dumps(receipt, sort_keys=True), self.clock()))
+                db.execute("INSERT OR IGNORE INTO recovery_service_sources(inbox_event_id,recovery_event_id,state,receipt,processed,project,owner) VALUES(?,?,?,?,?,?,?)",
+                           (source_id, event_id, receipt["state"], json.dumps(receipt, sort_keys=True), self.clock(), row["job"], row["owner"]))
         # Ack only after the local receipt is durable. A crash before cursor advance replays safely.
         self.inbox.acknowledge(source_id, owner=row["owner"], job=row["job"])
         return receipt
@@ -276,13 +287,144 @@ class RecoveryService:
                 time.sleep(1)
 
 
+def _redacted_advice(value):
+    if not isinstance(value, str):
+        return None
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", value)
+    value = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", value)
+    value = re.sub(r"(?i)(api[_-]?key|token|secret|password)(\s*[:=]\s*)[^\s,;]+", r"\1\2[REDACTED]", value)
+    value = re.sub(r"(?i)\b(?:sk|ghp|gho|github_pat)_[A-Za-z0-9_]{12,}\b", "[REDACTED]", value)
+    return value[:1200]
+
+
+def read_recovery_snapshot(db_path, *, project, owners, after=0, limit=20, oracle_db_path=None):
+    """Read a project/owner-scoped, bounded projection without opening the DB for writes."""
+    if not isinstance(project, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", project):
+        raise ValueError("invalid_project")
+    if (not isinstance(owners, list) or not owners or len(owners) > 50 or
+            any(not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", owner) for owner in owners)):
+        raise ValueError("invalid_owners")
+    if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError("invalid_page")
+    path = Path(db_path)
+    try:
+        _private_directory(path.parent)
+        _private_file(path)
+        uri = "file:" + quote(str(path), safe="/") + "?mode=ro"
+        db = sqlite3.connect(uri, uri=True, timeout=2)
+        db.row_factory = sqlite3.Row
+    except (OSError, ValueError, sqlite3.Error):
+        return {"available": False, "project": project, "state": "unavailable", "cursor": after,
+                "decisions": [], "pendingHandoffs": [], "notifyReceipts": [], "oracleAdvice": []}
+    try:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        required = {"recovery_service_sources", "recovery_events", "recovery_actions", "recovery_service_cursor", "recovery_service_notifications", "recovery_advice"}
+        if not required <= tables:
+            return {"available": True, "project": project, "state": "not_initialized", "cursor": after,
+                    "decisions": [], "pendingHandoffs": [], "notifyReceipts": [], "oracleAdvice": []}
+        source_columns = {row[1] for row in db.execute("PRAGMA table_info(recovery_service_sources)")}
+        if not {"project", "owner"} <= source_columns:
+            return {"available": True, "project": project, "state": "upgrade_required", "cursor": after,
+                    "decisions": [], "pendingHandoffs": [], "notifyReceipts": [], "oracleAdvice": []}
+        marks = ",".join("?" for _ in set(owners))
+        owner_args = tuple(dict.fromkeys(owners))
+        args = (project, *owner_args)
+        rows = db.execute(f"""SELECT s.inbox_event_id,s.recovery_event_id,s.state AS source_state,s.processed,s.receipt,
+                    e.kind,e.severity,e.state AS event_state,e.decision,e.created,e.updated
+                    FROM recovery_service_sources s LEFT JOIN recovery_events e ON e.event_id=s.recovery_event_id
+                    WHERE s.project=? AND s.owner IN ({marks}) AND s.inbox_event_id>? ORDER BY s.inbox_event_id DESC LIMIT ?""",
+                          (*args, after, limit)).fetchall()
+        cursor = db.execute(f"SELECT COALESCE(MAX(inbox_event_id),0) FROM recovery_service_sources WHERE project=? AND owner IN ({marks})",
+                            args).fetchone()[0]
+        decisions = []
+        handoffs = []
+        for row in rows:
+            decision = None
+            if row["decision"]:
+                try:
+                    raw = json.loads(row["decision"])
+                    if isinstance(raw, dict):
+                        decision = {key: raw[key] for key in ("level", "outcome", "reason", "action", "attempt", "error")
+                                    if isinstance(raw.get(key), (str, int, bool)) and not isinstance(raw.get(key), float)}
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            if decision is None:
+                try:
+                    source_receipt = json.loads(row["receipt"])
+                    if isinstance(source_receipt, dict) and isinstance(source_receipt.get("reason"), str):
+                        decision = {"outcome": "human_handoff", "reason": source_receipt["reason"][:160]}
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            item = {"eventId": row["recovery_event_id"] or "guidance-" + str(row["inbox_event_id"]),
+                    "kind": row["kind"] or "unbound", "state": row["event_state"] or row["source_state"],
+                    "at": row["created"] or row["processed"], "decision": decision}
+            if decision or row["recovery_event_id"]:
+                decisions.append(item)
+            if row["source_state"] == "handoff" or row["event_state"] == "handoff":
+                handoffs.append(item)
+        notifications = [dict(row) for row in db.execute(
+            f"SELECT recovery_event_id AS eventId,project,kind,created AS at FROM recovery_service_notifications WHERE project=? AND owner IN ({marks}) ORDER BY created DESC LIMIT ?",
+            (*args, limit)).fetchall()]
+        advice_rows = db.execute(f"""SELECT a.event_id,a.job_id,a.state,a.error_code,a.created AS at,e.kind
+                    FROM recovery_advice a JOIN recovery_events e ON e.event_id=a.event_id
+                    JOIN recovery_service_sources s ON s.recovery_event_id=e.event_id
+                    WHERE s.project=? AND s.owner IN ({marks}) ORDER BY a.created DESC LIMIT ?""",
+                                 (*args, min(limit, 10))).fetchall()
+        advice = [{"eventId": row["event_id"], "jobId": row["job_id"], "status": row["state"], "error": row["error_code"],
+                   "kind": row["kind"], "at": row["at"]} for row in advice_rows]
+        state = rows[0]["event_state"] or rows[0]["source_state"] if rows else "waiting_for_events"
+        result = {"available": True, "project": project, "state": state, "cursor": cursor,
+                  "decisions": decisions[:limit], "pendingHandoffs": handoffs[:limit],
+                  "notifyReceipts": notifications, "oracleAdvice": advice}
+    finally:
+        db.close()
+    if oracle_db_path and advice:
+        oracle_path = Path(oracle_db_path)
+        try:
+            _private_directory(oracle_path.parent)
+            _private_file(oracle_path)
+            uri = "file:" + quote(str(oracle_path), safe="/") + "?mode=ro"
+            pool = sqlite3.connect(uri, uri=True, timeout=1)
+            pool.row_factory = sqlite3.Row
+            try:
+                for item in advice:
+                    job = pool.execute("SELECT status,result,actual_model,model,updated FROM pool_tasks WHERE id=?", (item["jobId"],)).fetchone()
+                    if job:
+                        item["status"] = job["status"]
+                        item["model"] = job["actual_model"] or job["model"]
+                        item["at"] = job["updated"]
+                        if job["status"] == "complete":
+                            item["result"] = _redacted_advice(job["result"])
+                            item["advisoryOnly"] = True
+            finally:
+                pool.close()
+        except (OSError, ValueError, sqlite3.Error):
+            pass
+    return result
+
+
 def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--project")
+    parser.add_argument("--owners", nargs="*")
+    parser.add_argument("--after", type=int, default=0)
+    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--oracle-db", type=Path)
+    parser.add_argument("--snapshot", action="store_true")
     parser.add_argument("command", nargs="?", choices=("serve",))
     parser.add_argument("--once", dest="once", action="store_true")
     args = parser.parse_args(argv)
+    if args.snapshot:
+        if not args.db or not args.project or args.owners is None:
+            parser.error("--snapshot requires trusted --db, --project and --owners arguments")
+        print(json.dumps(read_recovery_snapshot(args.db, project=args.project, owners=args.owners,
+              after=args.after, limit=args.limit, oracle_db_path=args.oracle_db), sort_keys=True))
+        return 0
+    if not args.config:
+        parser.error("--config is required for service mode")
     service = RecoveryService(_read_config(args.config))
     if args.once or args.command != "serve":
         print(json.dumps(service.run_once(), sort_keys=True))
