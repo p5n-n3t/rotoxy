@@ -23,3 +23,8 @@ Before `up`, inspect `tailscale serve status --json`, `tailscale funnel status`,
 ## Tests and remaining integration seam
 
 `node --check scripts/rotoxy-control.mjs`, `node --check test/rotoxy-control.test.mjs`, `node --test test/rotoxy-control.test.mjs` (5 passed), `git diff --check`, and the `install-plan` output smoke check passed. Tests set a temporary `HOME` and `TOKEN2OAUTH_CONFIG_DIR` before any possible `StateStore` construction; they never construct one or call systemd/Tailscale. They cover startup ordering, route preservation, refusal, explicit root migration, rollback, idempotent up, and CLI validation. Root integration owns verifying the exact installed local unit paths/configuration, the installed CLI wrapper handoff, real Tailscale foreground command behavior and route output, and native root/OAuth/MCP parity. Do that acceptance locally before replacing the old wrapper or stopping the old backend.
+
+
+## Gateway restart behavior
+
+The foreground Funnel wants the gateway for startup ordering and belongs to the manual ROTOXY target. It remains active during a backend restart, so the existing public URL recovers when the gateway is healthy; requests may briefly return a proxy error while the listener is unavailable. `rotoxy down` explicitly stops Funnel first, verifies that the owned route is withdrawn, and then stops the backend services. Neither unit has boot activation. This avoids the previous dependency behavior that withdrew Funnel whenever the gateway was stopped and left the target active without a public route.

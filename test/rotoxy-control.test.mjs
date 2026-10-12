@@ -125,3 +125,13 @@ test('reads foreground routes and ignores session keys when verifying their with
   assert.equal((await controller.status()).healthy, true);
   assert.equal((await controller.down()).ok, true);
 });
+
+
+test('manual Funnel lifecycle preserves exposure across backend restarts without boot activation', async () => {
+  const {readFile}=await import('node:fs/promises');
+  const unit=await readFile(new URL('../packaging/rotoxy-funnel.service',import.meta.url),'utf8');
+  assert.match(unit,/^Wants=token2oauth\.service$/m);
+  assert.match(unit,/^PartOf=rotoxy\.target$/m);
+  assert.doesNotMatch(unit,/^(Requires|BindsTo|WantedBy)=/m);
+  assert.match(unit,/^Restart=no$/m);
+});
