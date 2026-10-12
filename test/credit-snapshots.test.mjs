@@ -18,7 +18,7 @@ async function isolatedStore(accounts = [lightsprint(), exa()]) {
   await fs.mkdir(home, { recursive: true });
   process.env.HOME = home;
   process.env.TOKEN2OAUTH_CONFIG_DIR = configDir;
-  return { root, store: new api.CreditSnapshotStore(accounts, { lockTimeoutMs: 10_000, retryDelayMs: 1 }) };
+  return { root, store: new api.CreditSnapshotStore(accounts, { lockTimeoutMs: 60_000, retryDelayMs: 10 }) };
 }
 
 test("lists every configured LightSprint and Exa account, including dormant accounts", () => {

@@ -178,7 +178,7 @@ class RecoveryServiceTests(unittest.TestCase):
         home = self.root / "codex-home"
         home.mkdir(mode=0o700)
         project = self.root / "project"
-        project.mkdir()
+        project.mkdir(mode=0o700)
         executable = self.root / "codex-fake"
         capture = self.root / "codex-called"
         executable.write_text("#!/usr/bin/python3\nimport sys\nopen(%r,'w').write('called')\nprint('{\\\"type\\\":\\\"turn.completed\\\"}')\n" % str(capture))

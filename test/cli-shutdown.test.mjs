@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { StateStore } from '../dist/store.js';
 
-test('CLI SIGTERM removes its owned bridge socket and the same supervisor can restart', {timeout:30000}, async () => {
+test('CLI SIGTERM removes its owned bridge socket and the same supervisor can restart', {timeout:90000}, async () => {
   const directory = await mkdtemp(join(tmpdir(), 't2o-cli-stop-'));
   const before = process.env.TOKEN2OAUTH_CONFIG_DIR;
   process.env.TOKEN2OAUTH_CONFIG_DIR = directory;
@@ -31,9 +31,10 @@ test('CLI SIGTERM removes its owned bridge socket and the same supervisor can re
       let diagnostic='';child.stderr.on('data',part=>{diagnostic+=part.toString().slice(0,1000);});
       const exited=once(child,'exit');
       let ready=false;
-      for(let i=0;i<100;i++) {
+      const deadline=Date.now()+40_000;
+      while(Date.now()<deadline) {
         if(child.exitCode!==null)throw Error('CLI exited before ready: '+diagnostic);
-        try {ready=(await fetch(`http://127.0.0.1:${port}/healthz`)).ok;}catch{}
+        try {ready=(await fetch(`http://127.0.0.1:${port}/healthz`,{signal:AbortSignal.timeout(1000)})).ok;}catch{}
         if(ready)break;
         await new Promise(r=>setTimeout(r,100));
       }

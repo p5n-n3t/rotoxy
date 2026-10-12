@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, open, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { StateStore } from "./store.js";
 
@@ -30,7 +30,7 @@ export interface GuidanceAdapter {
   sendMessage(sessionId: string, message: string, clientMessageId: string): Promise<GuidanceAdapterResult>;
 }
 export interface GuidanceAdapterResult { classification: "accepted" | "rejected" | "ambiguous"; accountId: string; value?: unknown; reason?: string }
-interface ActionRow { key: string; projectId: string; workerId: string; requestId: string; digest: string; state: "reserved" | GuidanceState; reason?: string; requestedModel?: string; reportedModel?: string; createdAt: number; updatedAt: number }
+interface ActionRow { key: string; projectId: string; workerId: string; requestId: string; digest: string; state: "reserved" | GuidanceState; reason?: string; requestedModel?: string; reportedModel?: string; expectedPromptCount?: number; createdAt: number; updatedAt: number }
 interface ActionDoc { version: 1; actions: ActionRow[] }
 const EMPTY: ActionDoc = { version: 1, actions: [] };
 
@@ -68,9 +68,14 @@ export class WorkerGuidanceLedger {
     await mkdir(this.store.dir, { recursive: true, mode: 0o700 });
     await chmod(this.store.dir, 0o700).catch(() => undefined);
     const temp = `${this.path}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
-    await writeFile(temp, JSON.stringify(doc) + "\n", { mode: 0o600 });
-    await chmod(temp, 0o600);
-    await rename(temp, this.path);
+    const file = await open(temp, "wx", 0o600);
+    try { await file.writeFile(JSON.stringify(doc) + "\n"); await file.sync(); }
+    finally { await file.close(); }
+    try {
+      await rename(temp, this.path);
+      const directory = await open(this.store.dir, "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+    } finally { await unlink(temp).catch(() => undefined); }
   }
 
   async lookup(input: WorkerGuidanceInput, digest = payloadDigest(input)): Promise<WorkerGuidanceResult | undefined> {
@@ -92,12 +97,18 @@ export class WorkerGuidanceLedger {
         result = { send: false, result: existing.digest === digest ? completed(existing) : { requestId: input.requestId, state: "rejected", reason: "request_id_conflict" } };
         return;
       }
+      const blocked = doc.actions.find(row => row.projectId === input.projectId && row.workerId === input.workerId &&
+        (row.state === "reserved" || row.state === "ambiguous" || row.state === "accepted" && row.expectedPromptCount === input.expectedPromptCount));
+      if (blocked) {
+        result = {send:false,result:{requestId:input.requestId,state:"rejected",reason:blocked.state === "accepted" ? "prompt_count_consumed" : "worker_has_unreconciled_action"}};
+        return;
+      }
       if (doc.actions.length >= 10_000) {
         result = { send: false, result: { requestId: input.requestId, state: "rejected", reason: "ledger_full" } };
         return;
       }
       const now = Date.now();
-      doc.actions.push({ key, projectId: input.projectId, workerId: input.workerId, requestId: input.requestId, digest, state: "reserved", ...models, createdAt: now, updatedAt: now });
+      doc.actions.push({ key, projectId: input.projectId, workerId: input.workerId, requestId: input.requestId, digest, state: "reserved", expectedPromptCount:input.expectedPromptCount, ...models, createdAt: now, updatedAt: now });
       await this.write(doc);
       result = { send: true };
     });
@@ -138,7 +149,7 @@ function questionId(status: Record<string, unknown>): string | undefined {
 }
 function parked(status: Record<string, unknown>): boolean {
   const value = status.parkedQuestion;
-  return value === true || (typeof value === "string" && value.length > 0) || (object(value) && Object.keys(value).length > 0);
+  return value !== undefined && value !== null && value !== false && value !== "";
 }
 
 /** One-shot admin message to a configured, owned, idle existing session. Never answers native parked questions. */
@@ -176,6 +187,7 @@ export class WorkerGuidanceService {
     if (checked.classification !== "accepted" || checked.accountId !== worker.accountId || !status) {
       return { requestId: input.requestId, state: checked.classification === "ambiguous" ? "ambiguous" : "rejected", reason: "status_unavailable" };
     }
+    if (status.sessionId !== worker.sessionId) return {requestId:input.requestId,state:"rejected",reason:"session_identity_mismatch"};
     if (parked(status)) return { requestId: input.requestId, state: "rejected", reason: "native_question_answer_unsupported" };
     if (status.isOwner !== true || status.canSendMessage !== true || typeof rawState !== "string" || rawState.toLowerCase() !== "idle") {
       return { requestId: input.requestId, state: "rejected", reason: "worker_not_idle_owned_or_sendable" };

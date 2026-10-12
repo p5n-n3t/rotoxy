@@ -81,14 +81,16 @@ class GuidanceInbox:
                 owner TEXT, job TEXT, ack_at REAL, guidance_state TEXT, guidance_job TEXT,
                 submitted_at REAL, prompt_count INTEGER, question_json TEXT);
             ''')
+            db.execute('BEGIN IMMEDIATE')
             for table, columns in {
                 'watched_workers': {'prompt_count': 'INTEGER', 'question_json': 'TEXT'},
-                'guidance_events': {'prompt_count': 'INTEGER', 'question_json': 'TEXT'},
+                'guidance_events': {'prompt_count': 'INTEGER', 'question_json': 'TEXT', 'account_id':'TEXT', 'session_id':'TEXT'},
             }.items():
                 present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
                 for name, kind in columns.items():
                     if name not in present:
                         db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {kind}')
+            db.commit()
         self.path.chmod(0o600)
 
     def connection(self):
@@ -129,8 +131,9 @@ class GuidanceInbox:
             if not previous or previous['status'] != status or previous['model'] != model or previous['question_json'] != question_json:
                 kind = 'idle_needs_review' if status == 'idle' else status
                 guidance = 'queued' if status in {'failed', 'stalled', 'needs_instructions'} else 'inbox_only'
-                event = db.execute('INSERT INTO guidance_events(worker,kind,model,at,owner,job,guidance_state,prompt_count,question_json) VALUES(?,?,?,?,?,?,?,?,?)',
-                                   (worker, kind, model, now, owner, job, guidance, count, question_json)).lastrowid
+                binding = db.execute('SELECT account_id,session_id FROM monitor_registrations WHERE id=? AND project=? AND owner=?', (worker,job,owner)).fetchone()
+                event = db.execute('INSERT INTO guidance_events(worker,kind,model,at,owner,job,guidance_state,prompt_count,question_json,account_id,session_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                   (worker, kind, model, now, owner, job, guidance, count, question_json, binding['account_id'] if binding else None, binding['session_id'] if binding else None)).lastrowid
             db.commit()
             return {'eventId': event, 'state': status, 'model': model, 'promptCount': count,
                     'question': question, 'heartbeatAt': now}
@@ -221,6 +224,8 @@ class GuidanceInbox:
                 item = dict(row)
                 encoded = item.pop('question_json', None)
                 item['question'] = json.loads(encoded) if encoded else None
+                item['accountId'] = item.pop('account_id', None)
+                item['sessionId'] = item.pop('session_id', None)
                 output.append(item)
             return output
         finally: db.close()
@@ -329,7 +334,8 @@ def main():
         for row in events:
             item={k:row[k] for k in ('id','worker','kind','model','at','job','ack_at','guidance_state','guidance_job','submitted_at','prompt_count')}
             item['promptCount'] = item.pop('prompt_count')
-            item['question'] = json.loads(row['question_json']) if row['question_json'] else None
+            item['question'] = row.get('question')
+            item['accountId'], item['sessionId'] = row.get('accountId'), row.get('sessionId')
             task=None; result_text=None
             if row['guidance_job']:
                 try:

@@ -9,7 +9,7 @@ One gateway for authorized AI workspaces, model accounts, search tools and local
 - **Private workers:** a durable Oracle queue with health, assignments, model names and reported throughput.
 - **Codex profiles:** isolated official CLI sign-in, model discovery and reported AI quota windows. Automatic subscription pooling/dispatch is not enabled.
 
-The dashboard distinguishes reported values, historical snapshots and unknown metrics. Monitoring survives a closed chat while the service host remains online. Automatic recovery capabilities and client limitations are described in the [verified release checkpoint](docs/implementation/2026-10-12-rotoxy-release.md).
+The dashboard distinguishes reported values, historical snapshots and unknown metrics. Monitoring survives a closed chat while the service host remains online. Automatic recovery capabilities and client limitations are described in the [consolidation checkpoint](docs/implementation/2026-10-12-rotoxy-release.md) and the [actionable supervision update](docs/implementation/2026-10-12-actionable-supervision.md).
 
 ## Architecture
 
@@ -35,14 +35,14 @@ The dashboard distinguishes reported values, historical snapshots and unknown me
 
 ### Highlights
 
-- **One ChatGPT connection, many upstream credentials**
+- **One MCP connection, many upstream credentials**
 - OAuth authorization code flow with **PKCE S256**
 - Protected-resource and authorization-server metadata
 - Dynamic Client Registration (DCR)
 - Resource-bound short-lived gateway access tokens
 - Rotating refresh tokens
 - AES-256-GCM encryption for upstream bearer credentials at rest
-- No upstream bearer token is returned to ChatGPT or rendered back into the admin UI
+- No upstream bearer token is returned to downstream clients or rendered back into the admin UI
 - Streamable HTTP/SSE-friendly MCP proxy
 - MCP session affinity using <code>Mcp-Session-Id</code>
 - Smart 401 / 402 / 429 / 5xx handling and <code>Retry-After</code> support

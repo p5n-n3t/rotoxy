@@ -2,6 +2,8 @@
 
 ROTOXY is the unified product on the Token2OAuth codebase. The canonical repository remains `p5n-n3t/token2oauth` during migration because `p5n-n3t/rotoxy` already names the predecessor. Existing configuration directories, package identity and `/token2oauth` URLs remain compatible. This checkpoint describes verified behavior, not completion of the entire platform roadmap.
 
+The later [actionable supervision update](2026-10-12-actionable-supervision.md) supersedes the worker-question/manual-guidance and headless-adapter status below. It records separate current test and runtime evidence.
+
 ## Authentication and runtime
 
 The recurring ROTOXY client-token error came from two launchers competing for the same Tailscale listener. The predecessor installed a root proxy to port 2025 and could remove the gateway's mounts. The unified runtime now owns one foreground HTTPS Funnel route at `/`, targeting port 2030. The application accepts both root and `/token2oauth` paths. OAuth registration, authorization and token compatibility aliases use the original secured handlers.

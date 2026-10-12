@@ -259,7 +259,7 @@ export class SupervisorBridge {
     this.#supervisorCwd = resolve(options.supervisorCwd);
     this.#pythonExecutable = options.pythonExecutable ?? "python3";
     this.#enabled = options.enabled;
-    this.#startupTimeoutMs = validateLimit(options.startupTimeoutMs ?? 5_000, 30_000, "invalid_startup_timeout");
+    this.#startupTimeoutMs = validateLimit(options.startupTimeoutMs ?? 30_000, 30_000, "invalid_startup_timeout");
     this.#requestTimeoutMs = validateLimit(options.requestTimeoutMs ?? 15_000, MAX_TIMEOUT_MS, "invalid_request_timeout");
     this.#maxRequestBytes = validateLimit(options.maxRequestBytes ?? MAX_REQUEST_BYTES, MAX_REQUEST_BYTES, "invalid_request_limit");
     this.#maxResponseBytes = validateLimit(options.maxResponseBytes ?? MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES, "invalid_response_limit");

@@ -29,7 +29,8 @@
     "CHANGELOG.md",
     "scripts/rotoxy-control.mjs",
     "packaging/rotoxy*",
-    "install-rotoxy.sh"
+    "install-rotoxy.sh",
+    "scripts/verify-recovery-continuity.py"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts serve",

@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "recordedAt": "2026-10-12T18:19:37.143947+00:00",
+  "scope": "actionable supervision update; full platform roadmap remains incomplete",
+  "sourceBase": "e1d51cb24fd2ae00b3b111e40dd36462e4642f70",
+  "verification": {
+    "nodeRegression": {
+      "passed": 338,
+      "failed": 0,
+      "testConcurrency": 1
+    },
+    "python": {
+      "passed": 317,
+      "failed": 0,
+      "legacyResourceWarnings": true
+    },
+    "focusedIntegration": {
+      "passed": 37,
+      "failed": 0
+    },
+    "questionUi": {
+      "passed": 25,
+      "failed": 0
+    },
+    "browserFixture": {
+      "syntheticFixture": true,
+      "checks": [
+        {
+          "width": 1280,
+          "status": 200,
+          "pageOverflow": false,
+          "javascriptErrors": 0,
+          "idleGuidanceSubmitted": true,
+          "parkedQuestionHandoff": true,
+          "approvalControlsAbsent": true,
+          "keyboardTabs": true,
+          "adminBreadcrumb": true
+        },
+        {
+          "width": 390,
+          "status": 200,
+          "pageOverflow": false,
+          "javascriptErrors": 0,
+          "idleGuidanceSubmitted": true,
+          "parkedQuestionHandoff": true,
+          "approvalControlsAbsent": true,
+          "keyboardTabs": true,
+          "adminBreadcrumb": true
+        }
+      ]
+    },
+    "realGuidance": {
+      "passed": true,
+      "isolatedAdminHttpServer": true,
+      "realLightSprintExecution": true,
+      "csrfRejected": true,
+      "strictPolicyBlocked": true,
+      "providerAccepted": true,
+      "duplicateRequestReplayedReceipt": true,
+      "providerSends": 1,
+      "observedRunning": true,
+      "outputMarkerRetrieved": true,
+      "model": "gpt-6-luna",
+      "promptCountDelta": 1,
+      "observedCostDeltaUsd": 0.0007939999999999614,
+      "productionPolicyChanged": false
+    },
+    "localProcessContinuity": {
+      "passed": true,
+      "syntheticIncidents": true,
+      "providerCalls": 0,
+      "initiatorExited": true,
+      "supervisorRestarted": true,
+      "durableEvents": 4,
+      "notificationReceipts": 3,
+      "duplicateActions": 0,
+      "dormantWebHandoff": true,
+      "replayProcessed": 0,
+      "questionProjection": true,
+      "productionStateTouched": false
+    },
+    "packageAudit": {
+      "ok": true,
+      "mode": "offline package audit; no provider or private-config access",
+      "package": "token2oauth@0.2.0",
+      "archiveBytes": 1662193,
+      "archiveFiles": 378,
+      "pythonModulesIncluded": 52,
+      "pythonModulesImported": 13,
+      "checks": [
+        "temporary TypeScript build",
+        "all built dist files are in actual tarball",
+        "monitor script and compiled dependencies are packaged",
+        "all Snooze Python modules included",
+        "Oracle/guidance/credit imports",
+        "dashboard assets and license notices",
+        "no node_modules/frontend/private config",
+        "tarball matches npm pack inventory"
+      ]
+    },
+    "authenticatedCodexResume": {
+      "verified": false,
+      "installedVersion": "0.162.1",
+      "argumentParserAccepted": true
+    },
+    "startupAndShutdown": {
+      "passed": 15,
+      "failed": 0,
+      "realDelayedPythonStartup": true
+    }
+  },
+  "cloudWave": {
+    "observedOverlappingWorkers": 5,
+    "accounts": 4,
+    "implementationModel": "gpt-6-luna",
+    "architectureModel": "claude-opus-5-5",
+    "architectureArtifactDelivered": false,
+    "routineArtifactsIntegrated": true,
+    "nativeCreditCeilingVerified": false,
+    "purchasesOrTopUps": false,
+    "sessionsCheckedIdle": 5
+  },
+  "oracle": {
+    "completedAdvisoryTasks": 3,
+    "hosts": [
+      "ora1",
+      "ora3",
+      "ora5"
+    ],
+    "model": "qwen3.5:9b",
+    "decisionAuthority": false
+  },
+  "runtime": {
+    "deploymentVerified": false,
+    "manualLifecycle": true,
+    "bootEnabled": false,
+    "strictReadOnlyToolPolicyPreserved": true,
+    "nativeApprovalActionsEnabled": false,
+    "headlessAdapterEnabled": false
+  },
+  "remainingGaps": [
+    "Live parked-question schema and native approval semantics",
+    "Authoritative quota/budget evidence for automatic recovery",
+    "Authenticated headless resumption",
+    "Actual signed-in subscription pool dispatch",
+    "External supervisor failover during host outage",
+    "Provider concurrency limits and 24/35-worker proof",
+    "Broad analytics and clean-machine installation"
+  ],
+  "accountRegistry": {
+    "configured": 12,
+    "enabled": 11,
+    "disabled": 1,
+    "newAccountsEnabled": true,
+    "healthSource": "cached gateway state; not a fresh all-account authentication test"
+  }
+}

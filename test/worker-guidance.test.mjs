@@ -43,6 +43,7 @@ test("guidance preflights ownership/prompt state, gates policy, reserves once, a
       }
       const parkedQuestion = statusMode === "parked" ? { id: "q-parked" } : undefined;
       return { classification: "accepted", accountId: worker.accountId, value: { status: {
+        sessionId: statusMode === "wrong-session" ? "another-session" : sessionId,
         sessionStatus: statusMode === "busy" ? "running" : "idle", isOwner: statusMode !== "not-owner", canSendMessage: true,
         promptCount: statusMode === "changed" ? 8 : 7, questionId: "q-7", reportedModel: "gpt-6-luna", ...(parkedQuestion ? { parkedQuestion } : {}),
       } } };
@@ -76,6 +77,10 @@ test("guidance preflights ownership/prompt state, gates policy, reserves once, a
   assert.doesNotMatch(ledgerText, /private bounded instruction/, "durable ledger contains no message text");
   assert.match(ledgerText, /"digest"/);
 
+  statusMode = "wrong-session";
+  assert.equal((await service.submit({...input,workerId:"session-b",requestId:"wrong-session"})).reason,"session_identity_mismatch");
+  statusMode = "idle";
+  assert.equal((await service.submit({...input,requestId:"different-request-same-turn"})).reason,"prompt_count_consumed");
   statusMode = "parked";
   assert.equal((await service.submit({ ...input, workerId: "session-b", requestId: "request-parked" })).reason, "native_question_answer_unsupported");
   statusMode = "changed";
@@ -98,6 +103,7 @@ test("guidance preflights ownership/prompt state, gates policy, reserves once, a
   const ambiguousInput = { ...input, workerId: "session-c", requestId: "request-ambiguous" };
   assert.equal((await service.submit(ambiguousInput)).state, "ambiguous");
   assert.equal((await makeService().submit(ambiguousInput)).reason, "needs_reconciliation");
+  assert.equal((await makeService().submit({...ambiguousInput,requestId:"new-request-after-ambiguity"})).reason,"worker_has_unreconciled_action");
   assert.equal(sends.length, 2, "restart retry returns recorded ambiguity without another provider call");
 
   mode = "accepted";

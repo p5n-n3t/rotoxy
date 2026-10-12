@@ -14,6 +14,7 @@ import { SupervisorBridge, type SupervisorBridgeOptions } from "./supervisor-bri
 import type { SupervisorBackend, SupervisorCaller } from "./supervisor-api.js";
 import type { SupervisorAccountUsage, SupervisorEvent, SupervisorJob, SupervisorSnapshot, SupervisorTask, SupervisorUsage, SupervisorWorker } from "./supervisor-ui.js";
 import { evaluateToolCall } from "./tool-policy.js";
+import { normalizeParkedQuestion } from "./worker-observation.js";
 import { WorkerGuidanceLedger, WorkerGuidanceService, type WorkerGuidanceInput, type WorkerGuidanceResult } from "./worker-guidance.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -523,11 +524,14 @@ export class SupervisorRuntime implements SupervisorBackend {
       const observations = tasks.filter((task) => task.worker === session.sessionId).sort((a, b) => Number(b.usage?.observedAt ?? 0) - Number(a.usage?.observedAt ?? 0));
       const currentTask = observations.find((task) => !/complete|failed|cancelled|rejected/i.test(task.status)) ?? observations[0];
       const monitored = monitorBySession.get(session.sessionId);
+      const question = normalizeParkedQuestion(monitored?.question);
       const actualModel = currentTask?.reportedModel || (monitored?.modelSource === "observed" && typeof monitored.model === "string" ? monitored.model : undefined);
       return { id: session.sessionId, label: `Worker ${session.sessionId}`, workspace: session.workspaceId,
         status: typeof monitored?.state === "string" ? monitored.state : "unobserved", dispatchStatus: eligible ? "eligible" : "unavailable",
         accountId: session.accountId, accountLabel: typeof account?.label === "string" ? account.label : session.accountId,
         requestedModel: session.model, ...(actualModel ? { actualModel, model: actualModel } : {}),
+        ...(Number.isSafeInteger(monitored?.promptCount) ? {promptCount:Number(monitored?.promptCount)} : {}),
+        ...(question ? {question} : {}),
         ...(typeof monitored?.heartbeatAt === "number" ? { heartbeatAt: monitored.heartbeatAt } : {}),
         ...(typeof monitored?.lastProgressAt === "number" ? { lastProgressAt: monitored.lastProgressAt } : {}),
         ...(typeof monitored?.state === "string" ? { monitorState: monitored.state } : {}),

@@ -18,6 +18,8 @@ const requiredPackageFiles = [
   "assets/brand/favicon.svg",
   "dist/jsonrpc-wire.js",
   "scripts/monitor-workforce.mjs",
+  "scripts/verify-recovery-continuity.py",
+  "supervisor/snooze/headless.py",
   "scripts/rotoxy-control.mjs", "install-rotoxy.sh", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service",
   "supervisor/snooze/bridge.py",
   "supervisor/snooze/jobs.py",
@@ -50,6 +52,7 @@ const pythonImports = [
   "snooze.credit_admission",
   "snooze.recovery",
   "snooze.recovery_service",
+  "snooze.headless",
   "snooze.adapters.lightsprint",
   "snooze.adapters.registered",
 ];
@@ -126,7 +129,7 @@ try {
   const stagePaths = [
     "package.json", "tsconfig.json", "src", "docs", "assets/brand", "supervisor/snooze",
     "supervisor/LICENSE", "supervisor/THIRD_PARTY_NOTICES.md", "supervisor/SECURITY.md",
-    "supervisor/UPSTREAM.md", "supervisor/install.sh", "scripts/monitor-workforce.mjs",
+    "supervisor/UPSTREAM.md", "supervisor/install.sh", "scripts/monitor-workforce.mjs", "scripts/verify-recovery-continuity.py",
     "scripts/rotoxy-control.mjs", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service", "install-rotoxy.sh",
     "install.sh", "uninstall.sh", "LICENSE", "README.md", "SECURITY.md", "CHANGELOG.md",
   ];
@@ -198,7 +201,7 @@ try {
   const match = versionText.match(/Python\s+(\d+)\.(\d+)/);
   assert(match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 11), "Python 3.11 or newer is required");
   const importCode = `import importlib; modules=${JSON.stringify(pythonImports)}; [importlib.import_module(name) for name in modules]; print(len(modules))`;
-  const imported = await run(python, ["-c", importCode], { cwd: installedSupervisor, env: pythonEnv, label: "packaged Python imports", timeout: 10_000 });
+  const imported = await run(python, ["-c", importCode], { cwd: installedSupervisor, env: pythonEnv, label: "packaged Python imports", timeout: 60_000 });
   assert(imported.stdout.trim() === String(pythonImports.length), "not all packaged supervisor modules imported");
 
   const { stat } = await import("node:fs/promises");

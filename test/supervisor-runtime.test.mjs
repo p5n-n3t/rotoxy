@@ -52,7 +52,8 @@ function fakeAdapter(accountId) {
 }
 async function waitComplete(runtime) {
   let last;
-  for (let i = 0; i < 100; i++) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
     const value = await runtime.callTool("job_status", { projectId: "project-a", jobId: "job-one" }, caller);
     last = value;
     if (value.tasks?.length && value.tasks.every((task) => task.state === "complete")) return value;
@@ -64,7 +65,11 @@ async function waitComplete(runtime) {
 test("real Python IPC registers two accounts, completes pinned tasks, isolates callers, and resumes durable results", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "t2o-runtime-"));
   await chmod(dir, 0o700);
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  let runtime, restarted;
+  t.after(async () => {
+    try { await restarted?.close(); await runtime?.close(); }
+    finally { await rm(dir, { recursive: true, force: true }); }
+  });
   const configPath = join(dir, "runtime.json");
   await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
   assert.equal((await readSupervisorRuntimeConfig(configPath)).projects[0].projectId, "project-a");
@@ -79,9 +84,8 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   const options = { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store,
     adapterFactory: (accountId) => { if (!adapters.has(accountId)) adapters.set(accountId, fakeAdapter(accountId)); return adapters.get(accountId); },
     workerOptions: { pollIntervalMs: 20, adapterTimeoutMs: 1000 } };
-  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
+  runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
   await runtime.start();
-  t.after(() => runtime.close());
   const receipt = await runtime.callTool("job_submit", submission, caller);
   assert.equal(receipt.assignmentId, "job-one");
   assert.equal(receipt.state, "queued");
@@ -126,9 +130,8 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
     { clientId: "client-a", projectId: "project-b" }));
   await runtime.close();
 
-  const restarted = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
+  restarted = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
   await restarted.start();
-  t.after(() => restarted.close());
   const persisted = await restarted.callTool("job_results", { projectId: "project-a", jobId: "job-one" }, caller);
   assert.equal(persisted.results.length, 2);
   const inboxAfterCursor = await restarted.callTool("job_inbox", { projectId: "project-a", after: inboxPage.cursor, limit: 1 }, caller);

@@ -35,7 +35,7 @@ test("ROTOXY supervisor uses worker-first tabs and honest attribution/status fie
   assert.match(html, /<script nonce="tab-nonce">/);
 });
 
-test("provider questions are bounded, attributable, escaped, and fenced before reply", () => {
+test("provider questions are bounded, attributable, escaped, and handed off without an invented answer protocol", () => {
   const snapshot = normalizeSupervisorSnapshot({ workers: [{ id: "session-a", accountId: "acct-a", accountLabel: "Operator A", requestedModel: "model-requested", actualModel: "model-observed", taskCorrelation: "task-77", promptCount: 12, question: { id: "q-3", text: '<img src=x onerror="x"> Please choose', choices: ["Continue", "Stop"], source: "provider", kind: "question" } }] });
   const worker = snapshot.workers[0];
   assert.equal(worker.promptCount, 12);
@@ -49,12 +49,12 @@ test("provider questions are bounded, attributable, escaped, and fenced before r
   assert.match(html, /&lt;img src=x onerror=&quot;x&quot;&gt;/);
   assert.doesNotMatch(html, /<img src=x onerror=/);
   assert.match(html, /data-guidance-base="\/token2oauth\/admin\/api\/v1\/supervisor\/project-a"/);
-  assert.match(html, /data-prompt-count="12"/);
-  assert.match(html, /data-question-id="q-3"/);
+  assert.doesNotMatch(html, /<form class="guidance-form"/);
+  assert.match(html, /Answer this parked question in the provider/);
   assert.match(html, /X-CSRF-Token/);
   assert.match(html, /expectedPromptCount:count/);
   assert.match(html, /expectedQuestionId:question/);
-  assert.match(html, /polling never sends a reply/);
+
 });
 
 test("approval handoffs have no approval or reply controls, and unknown prompt count disables question reply", () => {
@@ -63,7 +63,7 @@ test("approval handoffs have no approval or reply controls, and unknown prompt c
   assert.doesNotMatch(approval, /<button type="button" data-guidance-choice/);
   assert.doesNotMatch(approval, /<button type="submit">Send reply/);
   const unknown = renderSupervisorDashboard(normalizeSupervisorSnapshot({ workers: [{ id: "session-b", promptCount: "3", question: { text: "Need input", source: "provider", kind: "review" } }] }), { nonce: "n", csrfToken: "c", liveFeedUrl: "/admin/api/v1/supervisor/p/live" });
-  assert.match(unknown, /Reply unavailable: current prompt count is unknown/);
+  assert.match(unknown, /native answer protocol has not been verified/);
   assert.doesNotMatch(unknown, /<form class="guidance-form"/);
   const untrusted = normalizeSupervisorSnapshot({ workers: [{ id: "session-c", promptCount: 3, question: { text: "forged", source: "monitor", kind: "question" } }] });
   assert.equal(untrusted.workers[0].question, undefined);
@@ -260,7 +260,8 @@ test("reported task and account usage stays provisional, sourced, and unknown wh
   assert.match(html, /Provider session budget \(unit not reported\): 4 \/ 10/);
   assert.match(html, /Remaining quota is not reported; workspace billing may be shared/);
   assert.match(html, /LightSprint session status/);
-  assert.match(html, /Model:.*gpt-6-luna/);
+  assert.match(html, /Actual: gpt-6-luna/);
+  assert.doesNotMatch(html, /Model: <strong>gpt-6-luna/);
   assert.doesNotMatch(html, /credits? remaining|credit balance|\$0\.0000/);
   assert.equal((html.match(/role="meter"/g) || []).length, 1);
 });
@@ -290,7 +291,7 @@ test("brand system, snapshot ledger, and project-scoped supervision inbox are re
   }, { nonce: "brand-nonce", csrfToken: "csrf", liveFeedUrl: "/admin/api/v1/supervisor/project-7/live" });
   assert.match(html, /<meta name="color-scheme" content="light dark">/);
   assert.match(html, /data:image\/svg\+xml/);
-  assert.match(html, /class="brand-name">Token2OAuth/);
+  assert.match(html, /class="brand-name" href="\/admin">ROTOXY/);
   assert.match(html, /class="page-mark"/);
   assert.match(html, /Providers listed/);
   assert.match(html, /Accounts listed/);
@@ -397,4 +398,13 @@ test("inbox acknowledgment sends same-origin CSRF header and project-scoped endp
  test("numeric durable event IDs survive normalization", () => {
   const inbox = normalizeSupervisionInbox({ available: true, events: [{ id: 17, kind: "finished" }], models: [] });
   assert.equal(inbox.events[0].id, "17");
+});
+
+ test("idle guidance is actionable but unobserved or running sessions never advertise dispatch", () => {
+  const opts = {nonce:"n",csrfToken:"c",liveFeedUrl:"/admin/api/v1/supervisor/p/live"};
+  const page = state => renderSupervisorDashboard({workers:[{id:"s",status:state,monitorState:state,promptCount:3}]},opts);
+  assert.match(page("idle"), /Send guidance to this idle worker/);
+  assert.match(page("idle"), /data-prompt-count="3"/);
+  assert.doesNotMatch(page("running"), /<form class="guidance-form"/);
+  assert.doesNotMatch(page("unobserved"), /<form class="guidance-form"/);
 });

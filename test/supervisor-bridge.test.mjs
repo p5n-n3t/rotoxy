@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { createServer } from "node:http";
@@ -296,4 +297,24 @@ test("credit admission diagnostics allow only the exact private read route", () 
   assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/credit-admission"), true);
   assert.equal(isAllowedSupervisorRoute("POST", "/admin/api/v1/credit-admission"), false);
   assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/credit-admission?accountId=other"), false);
+});
+
+// Real child startup can exceed five seconds on a loaded desktop.
+test("default bridge startup accepts delayed Python readiness and cleans up", {timeout:45000}, async (t) => {
+  const configDir = await mkdtemp(join(tmpdir(), "t2o-delayed-bridge-"));
+  const bridge = new SupervisorBridge({
+    enabled: true, configDir, supervisorCwd: join(process.cwd(), "supervisor"),
+    spawnChild: (command, args, options) => spawn(command, ["-c",
+      "import os,time,runpy,sys; os.umask(0o177); time.sleep(6); sys.argv=['snooze.bridge',*sys.argv[1:]]; runpy.run_module('snooze.bridge',run_name='__main__')",
+      ...args.slice(2)], options),
+  });
+  t.after(async () => {
+    try { await bridge.close(); }
+    finally { await rm(configDir, {recursive:true,force:true}); }
+  });
+  await bridge.start();
+  assert.equal(bridge.status().state, "running");
+  assert.equal(bridge.status().childRunning, true);
+  await bridge.close();
+  await assert.rejects(lstat(bridge.socketPath), {code:"ENOENT"});
 });
