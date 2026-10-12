@@ -1,0 +1,98 @@
+{
+  "at": "2026-10-12T03:13:11.177Z",
+  "cloudBatch": [
+    {
+      "assignment": "T2O-W3-AFFINITY",
+      "model": "gpt-6-luna",
+      "status": "idle-needs-review",
+      "observedCostDeltaUsd": 0.1467820000000002
+    },
+    {
+      "assignment": "T2O-W3-RECOVERY-UI",
+      "model": "gpt-6-luna",
+      "status": "idle-needs-review",
+      "observedCostDeltaUsd": 0.16019099999999997
+    },
+    {
+      "assignment": "T2O-W3-ORACLE-MCP",
+      "model": "gpt-6-luna",
+      "status": "idle-needs-review",
+      "observedCostDeltaUsd": 0.04971099999999995
+    },
+    {
+      "assignment": "T2O-W3-STRATEGY",
+      "model": "gpt-6-luna",
+      "status": "returned-unvalidated",
+      "observedCostDeltaUsd": 0.08671200000000004
+    }
+  ],
+  "frontier": {
+    "model": "claude-opus-5-5",
+    "status": "stopped",
+    "reason": "observed-cost-threshold",
+    "observedCostDeltaUsd": 1.6964959999999998,
+    "reasoningSetting": "unknown",
+    "integratedArtifact": false
+  },
+  "oracle": {
+    "singleCallBatch": true,
+    "completed": true,
+    "jobs": [
+      {
+        "host": "ora5",
+        "state": "complete",
+        "model": "qwen3.5:9b"
+      },
+      {
+        "host": "ora1",
+        "state": "complete",
+        "model": "qwen3.5:9b"
+      },
+      {
+        "host": "ora3",
+        "state": "complete",
+        "model": "qwen3.5:9b"
+      }
+    ],
+    "crossCallerDenied": true
+  },
+  "verification": {
+    "nodeTests": 294,
+    "pythonTests": 303,
+    "uiFixture": {
+      "desktopWidth": 1280,
+      "mobileWidth": 390,
+      "horizontalOverflow": false
+    },
+    "installedRecoverySnapshot": {
+      "available": true,
+      "state": "completed",
+      "cursor": 119,
+      "decisions": 20,
+      "notificationReceipts": 20,
+      "pendingHandoffs": 0,
+      "oracleAdvice": 0
+    },
+    "installedSystemdRestart": true,
+    "doctorLivePublic": "healthy",
+    "aws1": {
+      "architecture": "aarch64",
+      "cpus": 2,
+      "ramMiB": 1834,
+      "timer": "active and enabled",
+      "linger": true,
+      "tailnetOnly": true
+    },
+    "installedGatewayEphemeralOAuthRealUpstream": {
+      "operation": "GET /api/repos",
+      "repositoryCount": 10,
+      "publicClaudeGrantTested": false
+    }
+  },
+  "limitations": [
+    "Observed cost is delayed provider metadata, not a native credit ceiling or invoice.",
+    "The generic LightSprint REST session ownership repair is not integrated.",
+    "Claude Code cached OAuth grant needs reauthorization; prior release execution proof does not certify this release.",
+    "External AWS health observer does not own jobs or perform failover."
+  ]
+}
