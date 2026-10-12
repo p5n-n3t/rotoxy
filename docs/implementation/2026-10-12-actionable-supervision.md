@@ -4,6 +4,7 @@ This release extends the unified ROTOXY gateway with durable worker questions, m
 
 ## Delivered behavior
 
+- The monitoring daemon is bounded to three local observation children at a time, including multiple owners of one session. Private registration reads allow up to 1 MiB instead of the former 16 KiB bottleneck, and local IPC has a bounded 60-second allowance under host load. Failure logs identify the failing phase without payloads.
 - The read-only monitor retains bounded, redacted provider question context and prompt counts. New durable events capture the registered account/session binding; old events without it remain unknown. SQLite migration is additive and serialized.
 - The worker console shows the account, session, task correlation, requested model and observed model together. Questions and native approval/review requests become provider handoffs. The schema of a live parked question remains unverified.
 - An administrator can send one follow-up to an owned idle worker through a CSRF-protected route. Current session identity, prompt count, account eligibility and tool policy are checked immediately before admission. A private, fsynced action ledger reserves before mutation and returns durable receipts. Changing request IDs cannot bypass unresolved actions. Ambiguous delivery is never silently replayed.
