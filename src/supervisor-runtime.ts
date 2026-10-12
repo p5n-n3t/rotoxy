@@ -177,7 +177,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   private async guidanceCommand(command: string, payload?: unknown, extra: string[] = []): Promise<unknown> {
     return new Promise((resolvePromise, rejectPromise) => {
-      const python = process.env.PYTHON ?? "/usr/bin/python3";
+      const python = "/usr/bin/python3";
       const child = nodeSpawn(python, ["-m", "snooze.guidance", "--db", this.supervisionDbPath, ...extra, command], {
         cwd: this.supervisorCwd,
         env: { ...process.env, PYTHONPATH: this.supervisorCwd },
@@ -216,16 +216,17 @@ export class SupervisorRuntime implements SupervisorBackend {
         env: { ...process.env, PYTHONPATH: this.supervisorCwd }, stdio: ["ignore", "pipe", "ignore"] });
       const chunks: Buffer[] = [];
       let size = 0;
-      const timer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      let exceeded = false;
+      const timer = setTimeout(() => { exceeded = true; child.kill("SIGKILL"); }, 5_000);
       child.stdout.on("data", (chunk: Buffer | string) => {
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         size += bytes.length;
-        if (size > 256 * 1024) child.kill("SIGKILL"); else chunks.push(bytes);
+        if (size > 256 * 1024) { exceeded = true; child.kill("SIGKILL"); } else chunks.push(bytes);
       });
       child.once("error", () => { clearTimeout(timer); rejectPromise(new Error("recovery_snapshot_unavailable")); });
       child.once("close", (code) => {
         clearTimeout(timer);
-        if (code !== 0) return rejectPromise(new Error("recovery_snapshot_unavailable"));
+        if (code !== 0 || exceeded) return rejectPromise(new Error("recovery_snapshot_unavailable"));
         try { resolvePromise(JSON.parse(Buffer.concat(chunks, size).toString("utf8"))); }
         catch { rejectPromise(new Error("recovery_snapshot_unavailable")); }
       });
