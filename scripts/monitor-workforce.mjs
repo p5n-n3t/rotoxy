@@ -6,6 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StateStore } from '../dist/store.js';
 import { serverMessages } from '../dist/jsonrpc-wire.js';
+import { normalizeParkedQuestion } from '../dist/worker-observation.js';
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const configPath=process.argv[2];
@@ -48,7 +49,10 @@ async function observation(worker,state){
     const callId=++id;
     const r=await fetch(state.config.upstreamUrl,{method:'POST',headers:{authorization:'Bearer '+token,accept:'application/json, text/event-stream','content-type':'application/json',...(session?{'mcp-session-id':session,'mcp-protocol-version':'2025-06-18'}:{})},body:JSON.stringify({jsonrpc:'2.0',id:callId,method,params}),signal:AbortSignal.timeout(20000)});
     session=r.headers.get('mcp-session-id')||session;
-    const body=await r.text();if(body.length>1024*1024)throw Error('response_limit');
+    const reader=r.body?.getReader();if(!reader)throw Error('status_unavailable');
+    const chunks=[];let bytes=0;
+    while(true){const part=await reader.read();if(part.done)break;bytes+=part.value.byteLength;if(bytes>1024*1024){await reader.cancel();throw Error('response_limit');}chunks.push(Buffer.from(part.value));}
+    const body=Buffer.concat(chunks).toString('utf8');
     const value=serverMessages(r.headers.get('content-type'),body).find(x=>x.id===callId);
     if(!r.ok||!value||value.error||value.result?.isError)throw Error('status_unavailable');return value.result;
   }
@@ -58,8 +62,12 @@ async function observation(worker,state){
   const raw=JSON.parse(result.content.find(c=>c.type==='text').text);const s=raw.status;
   if(!s||s.sessionId!==worker.sessionId||s.isOwner!==true)return{state:'unavailable'};
   const allowed=['running','idle','failed','cancelled'];
+  const parked=s.parkedQuestion;
+  const needsInput=parked!==undefined&&parked!==null&&parked!==false&&parked!=='';
+  const question=needsInput?normalizeParkedQuestion(parked):undefined;
   return{state:allowed.includes(s.sessionStatus)?s.sessionStatus:'unknown',...(safe(s.model)?{model:s.model}:{}),
-    ...(Number.isSafeInteger(s.promptCount)&&s.promptCount>=0?{promptCount:s.promptCount}:{}),needsInput:!!s.parkedQuestion};
+    ...(Number.isSafeInteger(s.promptCount)&&s.promptCount>=0?{promptCount:s.promptCount}:{}),needsInput,
+    ...(question?{question}:{})};
 }
 async function check(){
   const state=await store.load();let checked=0,errors=0;

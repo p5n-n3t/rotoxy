@@ -13,6 +13,48 @@ import sqlite3
 import time
 from pathlib import Path
 
+MAX_QUESTION_BYTES = 2048
+QUESTION_KINDS = {'question', 'review', 'approval', 'unknown'}
+QUESTION_ID = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
+SECRET_PATTERNS = (
+    re.compile(r'\bBearer\s+[^\s,;]+', re.I),
+    re.compile(r'\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|credential)\s*[:=]\s*["\']?[^\s,;"\']+', re.I),
+    re.compile(r'\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b'),
+)
+
+
+def _safe_question_text(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    for pattern in SECRET_PATTERNS:
+        value = pattern.sub('[redacted]', value)
+    return value
+
+
+def normalize_question(value):
+    """Accept only the small normalized projection; unknown provider data is omitted."""
+    if not isinstance(value, dict):
+        return None
+    text = _safe_question_text(value.get('text'))
+    if text is None:
+        return None
+    raw_kind = value.get('kind')
+    result = {'text': text, 'source': 'provider',
+              'kind': raw_kind if isinstance(raw_kind, str) and raw_kind in QUESTION_KINDS else 'question'}
+    if isinstance(value.get('id'), str) and QUESTION_ID.fullmatch(value['id']):
+        result['id'] = value['id']
+    if 'choices' in value:
+        choices = value['choices']
+        if not isinstance(choices, list) or len(choices) > 12:
+            return None
+        safe_choices = [_safe_question_text(item) for item in choices]
+        if any(item is None for item in safe_choices):
+            return None
+        result['choices'] = safe_choices
+    if len(json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > MAX_QUESTION_BYTES:
+        return None
+    return result
+
 
 def identity(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', value):
@@ -28,7 +70,8 @@ class GuidanceInbox:
             db.executescript('''
               CREATE TABLE IF NOT EXISTS watched_workers(
                 id TEXT PRIMARY KEY, status TEXT, fingerprint TEXT, progress_at REAL,
-                heartbeat_at REAL, model TEXT, owner TEXT, job TEXT);
+                heartbeat_at REAL, model TEXT, owner TEXT, job TEXT,
+                prompt_count INTEGER, question_json TEXT);
               CREATE TABLE IF NOT EXISTS monitor_registrations(
                 id TEXT PRIMARY KEY, project TEXT NOT NULL, owner TEXT NOT NULL,
                 account_id TEXT NOT NULL, session_id TEXT NOT NULL,
@@ -36,8 +79,16 @@ class GuidanceInbox:
               CREATE TABLE IF NOT EXISTS guidance_events(
                 id INTEGER PRIMARY KEY, worker TEXT, kind TEXT, model TEXT, at REAL,
                 owner TEXT, job TEXT, ack_at REAL, guidance_state TEXT, guidance_job TEXT,
-                submitted_at REAL);
+                submitted_at REAL, prompt_count INTEGER, question_json TEXT);
             ''')
+            for table, columns in {
+                'watched_workers': {'prompt_count': 'INTEGER', 'question_json': 'TEXT'},
+                'guidance_events': {'prompt_count': 'INTEGER', 'question_json': 'TEXT'},
+            }.items():
+                present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+                for name, kind in columns.items():
+                    if name not in present:
+                        db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {kind}')
         self.path.chmod(0o600)
 
     def connection(self):
@@ -59,7 +110,9 @@ class GuidanceInbox:
         if model is not None: model = identity(model)
         count = observation.get('promptCount')
         if type(count) is not int or count < 0: count = None
-        fingerprint = json.dumps([status, model, count])
+        question = normalize_question(observation.get('question'))
+        question_json = json.dumps(question, ensure_ascii=False, sort_keys=True, separators=(',', ':')) if question else None
+        fingerprint = json.dumps([status, model, count, question_json], separators=(',', ':'))
         db = self.connection()
         try:
             db.execute('BEGIN IMMEDIATE')
@@ -68,18 +121,19 @@ class GuidanceInbox:
                 raise ValueError('worker_ownership_conflict')
             progress = previous['progress_at'] if previous and previous['fingerprint'] == fingerprint else now
             if status == 'running' and now - progress >= stall_seconds: status = 'stalled'
-            db.execute('INSERT INTO watched_workers VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
+            db.execute('INSERT INTO watched_workers(id,status,fingerprint,progress_at,heartbeat_at,model,owner,job,prompt_count,question_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
                        'status=excluded.status,fingerprint=excluded.fingerprint,progress_at=excluded.progress_at,'
-                       'heartbeat_at=excluded.heartbeat_at,model=excluded.model',
-                       (worker, status, fingerprint, progress, now, model, owner, job))
+                       'heartbeat_at=excluded.heartbeat_at,model=excluded.model,prompt_count=excluded.prompt_count,question_json=excluded.question_json',
+                       (worker, status, fingerprint, progress, now, model, owner, job, count, question_json))
             event = None
-            if not previous or previous['status'] != status or previous['model'] != model:
+            if not previous or previous['status'] != status or previous['model'] != model or previous['question_json'] != question_json:
                 kind = 'idle_needs_review' if status == 'idle' else status
                 guidance = 'queued' if status in {'failed', 'stalled', 'needs_instructions'} else 'inbox_only'
-                event = db.execute('INSERT INTO guidance_events(worker,kind,model,at,owner,job,guidance_state) VALUES(?,?,?,?,?,?,?)',
-                                   (worker, kind, model, now, owner, job, guidance)).lastrowid
+                event = db.execute('INSERT INTO guidance_events(worker,kind,model,at,owner,job,guidance_state,prompt_count,question_json) VALUES(?,?,?,?,?,?,?,?,?)',
+                                   (worker, kind, model, now, owner, job, guidance, count, question_json)).lastrowid
             db.commit()
-            return {'eventId': event, 'state': status, 'model': model, 'heartbeatAt': now}
+            return {'eventId': event, 'state': status, 'model': model, 'promptCount': count,
+                    'question': question, 'heartbeatAt': now}
         except BaseException:
             db.rollback()
             raise
@@ -141,7 +195,7 @@ class GuidanceInbox:
         try:
             rows = db.execute(
                 'SELECT r.id,r.account_id,r.session_id,r.model AS registered_model,w.status,w.model AS reported_model,'
-                'w.heartbeat_at,w.progress_at FROM monitor_registrations r LEFT JOIN watched_workers w '
+                'w.heartbeat_at,w.progress_at,w.prompt_count,w.question_json FROM monitor_registrations r LEFT JOIN watched_workers w '
                 'ON w.id=r.id AND w.owner=r.owner AND w.job=r.project '
                 f'WHERE r.project=? AND r.owner IN ({placeholders}) ORDER BY r.id',
                 (project, *safe_owners),
@@ -150,7 +204,8 @@ class GuidanceInbox:
                      'model':row['reported_model'] or row['registered_model'],
                      'modelSource':'observed' if row['reported_model'] else 'registered',
                      'state':row['status'] or 'unobserved','heartbeatAt':row['heartbeat_at'],
-                     'lastProgressAt':row['progress_at']} for row in rows]
+                     'lastProgressAt':row['progress_at'],'promptCount':row['prompt_count'],
+                     'question':json.loads(row['question_json']) if row['question_json'] else None} for row in rows]
         finally:
             db.close()
 
@@ -161,7 +216,13 @@ class GuidanceInbox:
             query, args = 'SELECT * FROM guidance_events WHERE id>?', [after]
             if owner is not None: query += ' AND owner=?'; args.append(identity(owner))
             if job is not None: query += ' AND job=?'; args.append(identity(job))
-            return [dict(r) for r in db.execute(query+' ORDER BY id LIMIT ?', (*args, limit))]
+            output = []
+            for row in db.execute(query+' ORDER BY id LIMIT ?', (*args, limit)):
+                item = dict(row)
+                encoded = item.pop('question_json', None)
+                item['question'] = json.loads(encoded) if encoded else None
+                output.append(item)
+            return output
         finally: db.close()
 
     def acknowledge(self, event_id, *, owner, job=None):
@@ -266,7 +327,9 @@ def main():
         pool=OraclePool(config_path=args.pool_config,db_path=args.pool_db)
         enriched=[]
         for row in events:
-            item={k:row[k] for k in ('id','worker','kind','model','at','job','ack_at','guidance_state','guidance_job','submitted_at')}
+            item={k:row[k] for k in ('id','worker','kind','model','at','job','ack_at','guidance_state','guidance_job','submitted_at','prompt_count')}
+            item['promptCount'] = item.pop('prompt_count')
+            item['question'] = json.loads(row['question_json']) if row['question_json'] else None
             task=None; result_text=None
             if row['guidance_job']:
                 try:

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+import sqlite3
 from snooze.guidance import GuidanceInbox
 
 
@@ -90,6 +91,57 @@ class GuidanceTests(unittest.TestCase):
             self.inbox.acknowledge(1,owner='client-a',job='project-b')
         self.inbox.acknowledge_project(1,owners=['client-b','client-a'],project='project-a')
         self.assertIsNotNone(self.inbox.inbox(owner='client-a',job='project-a')[0]['ack_at'])
+
+    def test_question_is_bounded_redacted_deduplicated_and_cleared(self):
+        self.inbox.register(worker='worker-a',project='job-a',owner='client-a',account='acct-a',session='session-a',model='qwen3.5:9b')
+        first=self.inbox.observe('worker-a',{'state':'idle','needsInput':True,'promptCount':3,
+            'question':{'text':'Please choose; api_key=never-store','choices':['Continue','Stop'],'kind':'approval'}},
+            owner='client-a',job='job-a',now=10)
+        self.assertEqual(first['state'],'needs_instructions')
+        self.assertEqual(first['question']['text'],'Please choose; [redacted]')
+        unchanged=self.inbox.observe('worker-a',{'state':'idle','needsInput':True,'promptCount':3,
+            'question':{'text':'Please choose; api_key=never-store','choices':['Continue','Stop'],'kind':'approval'}},
+            owner='client-a',job='job-a',now=11)
+        self.assertIsNone(unchanged['eventId'])
+        workers=self.inbox.project_workers(project='job-a',owners=['client-a'])
+        self.assertEqual(workers[0]['promptCount'],3)
+        self.assertEqual(workers[0]['question']['kind'],'approval')
+        self.assertEqual(self.inbox.project_workers(project='job-a',owners=['client-b']),[])
+        self.assertEqual(self.inbox.inbox(owner='client-b',job='job-a'),[])
+        self.assertEqual(self.inbox.inbox(owner='client-a',job='job-a')[0]['question']['text'],'Please choose; [redacted]')
+        changed=self.inbox.observe('worker-a',{'state':'idle','needsInput':True,'promptCount':4,
+            'question':{'text':'Provide the missing branch'}},owner='client-a',job='job-a',now=12)
+        self.assertIsNotNone(changed['eventId'])
+        self.assertEqual(self.inbox.inbox(owner='client-a',job='job-a')[-1]['question']['text'],'Provide the missing branch')
+        self.inbox.observe('worker-a',{'state':'idle','needsInput':True,'question':{'unrecognized':'raw private payload'}},
+                           owner='client-a',job='job-a',now=13)
+        self.assertIsNone(self.inbox.project_workers(project='job-a',owners=['client-a'])[0]['question'])
+        self.inbox.observe('worker-a',{'state':'idle','needsInput':False},owner='client-a',job='job-a',now=14)
+        self.assertIsNone(self.inbox.project_workers(project='job-a',owners=['client-a'])[0]['question'])
+        with self.inbox.connection() as db:
+            stored=db.execute('SELECT question_json,heartbeat_at FROM watched_workers WHERE id=?',('worker-a',)).fetchone()
+        self.assertIsNone(stored['question_json'])
+        self.assertEqual(stored['heartbeat_at'],14)
+
+    def test_oversized_question_is_omitted_but_needs_input_is_preserved(self):
+        result=self.inbox.observe('worker-a',{'state':'idle','needsInput':True,'question':{'text':'x'*3000}},
+                                  owner='client-a',job='job-a')
+        self.assertEqual(result['state'],'needs_instructions')
+        self.assertIsNone(result['question'])
+        self.assertIsNone(self.inbox.inbox()[0]['question'])
+
+    def test_existing_database_migrates_question_columns(self):
+        path=Path(self.temp.name)/'legacy.sqlite'
+        with sqlite3.connect(path) as db:
+            db.executescript('''CREATE TABLE watched_workers(id TEXT PRIMARY KEY,status TEXT,fingerprint TEXT,progress_at REAL,heartbeat_at REAL,model TEXT,owner TEXT,job TEXT);
+                CREATE TABLE monitor_registrations(id TEXT PRIMARY KEY,project TEXT NOT NULL,owner TEXT NOT NULL,account_id TEXT NOT NULL,session_id TEXT NOT NULL,model TEXT NOT NULL,registered_at REAL NOT NULL);
+                CREATE TABLE guidance_events(id INTEGER PRIMARY KEY,worker TEXT,kind TEXT,model TEXT,at REAL,owner TEXT,job TEXT,ack_at REAL,guidance_state TEXT,guidance_job TEXT,submitted_at REAL);''')
+        migrated=GuidanceInbox(path)
+        with migrated.connection() as db:
+            worker_cols={row[1] for row in db.execute('PRAGMA table_info(watched_workers)')}
+            event_cols={row[1] for row in db.execute('PRAGMA table_info(guidance_events)')}
+        self.assertTrue({'prompt_count','question_json'} <= worker_cols)
+        self.assertTrue({'prompt_count','question_json'} <= event_cols)
 
 
 if __name__=='__main__':unittest.main()
