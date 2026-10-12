@@ -1,0 +1,83 @@
+{
+  "verifiedAt": "2026-10-12",
+  "deployedRuntimeCodeCommit": "b7f165c",
+  "gatewayHealth": {
+    "public": true,
+    "accounts": 12,
+    "selectable": 11
+  },
+  "publicMcp": {
+    "publicMcpAuthenticated": true,
+    "server": {
+      "name": "lightsprint",
+      "version": "1.0.0"
+    },
+    "toolCount": 1,
+    "operation": "list repositories",
+    "repositoryCount": 10,
+    "at": "2026-10-12T00:02:26.359Z"
+  },
+  "claudeCode": {
+    "success": true,
+    "turns": 2,
+    "repositoryCount": 10,
+    "operation": "GET /api/repos",
+    "client": "Claude Code 2.1.286",
+    "reportedCostUsd": 0.011204349999999998
+  },
+  "monitor": {
+    "checkedRegistrations": 48,
+    "uniqueRemoteSessions": 8,
+    "upstreamStatusErrors": 0,
+    "intervalSeconds": 300,
+    "enabledAtLogin": true
+  },
+  "services": [
+    "token2oauth.service",
+    "token2oauth-oracle-pool.service",
+    "token2oauth-worker-monitor.service"
+  ],
+  "tests": {
+    "node": {
+      "passed": 289,
+      "failed": 0
+    },
+    "python": {
+      "passed": 297,
+      "failed": 0
+    },
+    "fixtureIsolationAfterFix": {
+      "passed": 2,
+      "operatorAccountsBefore": 12,
+      "operatorAccountsAfter": 12
+    },
+    "artifactAudit": {
+      "passed": true,
+      "archiveFiles": 311,
+      "pythonImports": 12
+    },
+    "commitSecretScan": {
+      "passed": true
+    }
+  },
+  "recoverySmoke": {
+    "syntheticIncident": true,
+    "eventsFirstPass": 1,
+    "eventsRestart": 0,
+    "oracleDiagnostic": "complete",
+    "oracleHost": "ora3",
+    "paidAction": false
+  },
+  "rollback": {
+    "privateBackupCreated": true,
+    "previousPackageRetained": true,
+    "productionRollbackExercised": false
+  },
+  "limitations": [
+    "Claude existing authorization has mcp scope; new job/web scopes require explicit renewed consent.",
+    "Session-specific calls require correct owning-account affinity; an unbound session-status call returned upstream403 and was not blindly retried.",
+    "A startup monitor pass failed; subsequent real passes checked48registrations with zero upstream status errors.",
+    "No automatic headless/cloud recovery adapter is enabled.",
+    "Native provider credit ceilings,24/35worker capacity,live Exa/Firecrawl/Tavily execution remain unverified."
+  ]
+}
