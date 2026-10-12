@@ -25,11 +25,11 @@ class HeadlessCodexTests(unittest.TestCase):
         self.executable.write_text(source)
         self.executable.chmod(0o700)
         return HeadlessCodex(executable=self.executable, project_dir=self.project,
-            codex_home=self.home, sessions=[("project-a", "owner-a", "session-a")], timeout_seconds=timeout)
+            codex_home=self.home, sessions={("project-a", "owner-a", "remote-session-a"): "0199a213-81c0-7800-8aa1-bbab2a035a53"}, timeout_seconds=timeout)
 
     def context(self):
-        return {"project": "project-a", "owner": "owner-a", "session": "session-a",
-                "job": "project-a", "kind": "failed", "severity": "failed"}
+        return {"event_id": "guidance-23", "project": "project-a", "owner": "owner-a",
+                "session": "remote-session-a", "job": "job-a", "kind": "failed", "severity": "failed"}
 
     def test_resume_is_fixed_read_only_and_passes_bounded_metadata_on_stdin(self):
         runner = self.runner("open(%r,'w').write(json.dumps({'argv':sys.argv,'env':dict(os.environ),'stdin':sys.stdin.read()}))\nprint(json.dumps({'type':'turn.completed'}))\n" % str(self.capture))
@@ -37,18 +37,21 @@ class HeadlessCodexTests(unittest.TestCase):
         self.assertEqual(result["state"], "accepted")
         captured = json.loads(self.capture.read_text())
         args = captured["argv"]
-        self.assertEqual(args[1:4], ["exec", "resume", "session-a"])
-        self.assertIn("read-only", args)
-        self.assertIn("never", args)
+        self.assertEqual(args, [str(self.executable), "--ask-for-approval", "never", "exec",
+            "--sandbox", "read-only", "resume", "0199a213-81c0-7800-8aa1-bbab2a035a53",
+            "--json", "--ignore-user-config", "-"])
         self.assertEqual(set(captured["env"]), {"HOME", "CODEX_HOME", "PATH", "LANG"})
-        self.assertEqual(json.loads(captured["stdin"]), {"project": "project-a", "job": "project-a", "kind": "failed", "severity": "failed"})
+        self.assertIn("Do not modify files", captured["stdin"])
+        self.assertIn('"event_id":"guidance-23"', captured["stdin"])
+        self.assertIn('"job":"job-a"', captured["stdin"])
 
     def test_unallowlisted_session_never_starts_process(self):
         runner = self.runner("open(%r,'w').write('started')" % str(self.capture))
-        context = self.context() | {"session": "other-session"}
-        result = runner(context, 2)
-        self.assertEqual(result["state"], "rejected")
-        self.assertFalse(self.capture.exists())
+        for changes in ({"session": "other-session"}, {"owner": "owner-b"}, {"project": "project-b"}):
+            with self.subTest(changes=changes):
+                result = runner(self.context() | changes, 2)
+                self.assertEqual(result["state"], "rejected")
+                self.assertFalse(self.capture.exists())
 
     def test_timeout_and_nonzero_exit_are_ambiguous(self):
         runner = self.runner("time.sleep(2)", timeout=0.1)

@@ -183,8 +183,11 @@ class RecoveryServiceTests(unittest.TestCase):
         capture = self.root / "codex-called"
         executable.write_text("#!/usr/bin/python3\nimport sys\nopen(%r,'w').write('called')\nprint('{\\\"type\\\":\\\"turn.completed\\\"}')\n" % str(capture))
         executable.chmod(0o700)
+        with self.inbox.connection() as db:
+            db.execute("UPDATE monitor_registrations SET model='gpt-6-luna' WHERE id=?", (self.worker,))
         headless = {"executable": str(executable), "projectDir": str(project), "codexHome": str(home),
-                    "sessions": [{"project": self.project, "owner": self.owner, "session": "session-a"}],
+                    "sessions": [{"project": self.project, "owner": self.owner, "session": "session-a",
+                                  "codexSession": "0199a213-81c0-7800-8aa1-bbab2a035a53"}],
                     "timeoutSeconds": 2}
         policy = self.config()["projects"][0]["policy"]
         policy.update(level="headless", permissions=["headless"], action_budget_usd=0.01,
@@ -223,6 +226,22 @@ class RecoveryServiceTests(unittest.TestCase):
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0][0], "completed")
         self.assertIn("codex-exec-resume", actions[0][1])
+
+    def test_headless_config_rejects_session_mapping_collisions_and_unsafe_executable(self):
+        config, _, _ = self.headless_config()
+        config["headless"]["sessions"].append({"project": "project-b", "owner": "owner-b",
+            "session": "remote-b", "codexSession": "0199a213-81c0-7800-8aa1-bbab2a035a53"})
+        path = self.root / "headless-config.json"
+        path.write_text(json.dumps(config))
+        path.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "headless_session_allowlist_collision"):
+            _read_config(path)
+        config["headless"]["sessions"].pop()
+        Path(config["headless"]["executable"]).chmod(0o777)
+        path.write_text(json.dumps(config))
+        path.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "headless_executable_unavailable"):
+            _read_config(path)
 
 
 if __name__ == "__main__":
