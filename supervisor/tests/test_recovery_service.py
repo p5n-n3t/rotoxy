@@ -24,6 +24,13 @@ class RecoveryServiceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self._old_home = os.environ.get("HOME")
+        self._old_config = os.environ.get("TOKEN2OAUTH_CONFIG_DIR")
+        os.environ["HOME"] = str(self.root / "home")
+        os.environ["TOKEN2OAUTH_CONFIG_DIR"] = str(self.root / "gateway-config")
+        Path(os.environ["HOME"]).mkdir(mode=0o700)
+        Path(os.environ["TOKEN2OAUTH_CONFIG_DIR"]).mkdir(mode=0o700)
+        self.addCleanup(self._restore_test_environment)
         self.inbox_path = self.root / "inbox.sqlite3"
         self.state_path = self.root / "service.sqlite3"
         self.inbox = GuidanceInbox(self.inbox_path)
@@ -44,6 +51,16 @@ class RecoveryServiceTests(unittest.TestCase):
 
     def service(self, **kwargs):
         return RecoveryService(self.config(**kwargs))
+
+    def _restore_test_environment(self):
+        if self._old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._old_home
+        if self._old_config is None:
+            os.environ.pop("TOKEN2OAUTH_CONFIG_DIR", None)
+        else:
+            os.environ["TOKEN2OAUTH_CONFIG_DIR"] = self._old_config
 
     def observe(self, state):
         return self.inbox.observe(self.worker, {"state": state}, owner=self.owner, job=self.project, now=1000)
@@ -156,6 +173,56 @@ class RecoveryServiceTests(unittest.TestCase):
         self.assertTrue(snapshot["oracleAdvice"][0]["advisoryOnly"])
         self.assertNotIn("secret-value", snapshot["oracleAdvice"][0]["result"])
         self.assertNotIn("topsecret", snapshot["oracleAdvice"][0]["result"])
+
+    def headless_config(self):
+        home = self.root / "codex-home"
+        home.mkdir(mode=0o700)
+        project = self.root / "project"
+        project.mkdir()
+        executable = self.root / "codex-fake"
+        capture = self.root / "codex-called"
+        executable.write_text("#!/usr/bin/python3\nimport sys\nopen(%r,'w').write('called')\nprint('{\\\"type\\\":\\\"turn.completed\\\"}')\n" % str(capture))
+        executable.chmod(0o700)
+        headless = {"executable": str(executable), "projectDir": str(project), "codexHome": str(home),
+                    "sessions": [{"project": self.project, "owner": self.owner, "session": "session-a"}],
+                    "timeoutSeconds": 2}
+        policy = self.config()["projects"][0]["policy"]
+        policy.update(level="headless", permissions=["headless"], action_budget_usd=0.01,
+                      budget_ceiling_usd=0.05, headless_adapter_verified=True)
+        config = self.config(policy=policy)
+        config["headless"] = headless
+        return config, capture, policy
+
+    def verified_resources(self, context):
+        import time
+        return {"verified": True, "quota": "available", "budgetVerified": True,
+                "observedAt": time.time(), "availableBudgetUsd": 0.05,
+                "project": context["project"], "job": context["job"],
+                "account": context["account"], "session": context["session"]}
+
+    def test_headless_is_opt_in_and_missing_resource_verifier_blocks_before_cli(self):
+        self.observe("failed")
+        config, capture, _ = self.headless_config()
+        receipt = RecoveryService(config).run_once()
+        self.assertEqual(receipt["processed"], 1)
+        self.assertFalse(capture.exists())
+        with sqlite3.connect(self.state_path) as db:
+            decision = db.execute("SELECT decision FROM recovery_events").fetchone()[0]
+        self.assertIn("resource_verifier_unavailable", decision)
+
+    def test_headless_executes_once_only_after_trusted_resource_verification(self):
+        self.observe("failed")
+        config, capture, _ = self.headless_config()
+        first = RecoveryService(config, resource_verifier=self.verified_resources).run_once()
+        second = RecoveryService(config, resource_verifier=self.verified_resources).run_once()
+        self.assertEqual(first["processed"], 1)
+        self.assertEqual(second["processed"], 0)
+        self.assertTrue(capture.exists())
+        with sqlite3.connect(self.state_path) as db:
+            actions = db.execute("SELECT state,receipt FROM recovery_actions WHERE action='headless'").fetchall()
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0][0], "completed")
+        self.assertIn("codex-exec-resume", actions[0][1])
 
 
 if __name__ == "__main__":
