@@ -91,6 +91,17 @@ export class CredentialPool {
     this.cleanupAffinity();
   }
 
+  /** Register a session owner supplied by trusted runtime configuration. Existing owners are immutable. */
+  registerSessionOwner(sessionId: string, accountId: string): { ok: boolean; ownerAccountId: string } {
+    if (typeof sessionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(sessionId) ||
+        typeof accountId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(accountId)) {
+      throw new TypeError("session ownership binding is invalid");
+    }
+    const binding = this.ownership.bindSession(sessionId, accountId);
+    if (!binding) throw new TypeError("session ownership binding is invalid");
+    return binding;
+  }
+
   private selectByStrategy(
     candidates: UpstreamAccount[],
     strategy: PoolStrategy,

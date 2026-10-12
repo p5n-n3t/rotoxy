@@ -279,11 +279,16 @@ export class McpProxy {
           "The upstream credential that owns this MCP session is no longer available. Start a new session."));
       }
     }
-    // A session id we have never seen (e.g. after a gateway restart): find
-    // the credential that recognises it. An upstream 404 for an unknown
-    // session is a pre-execution rejection, so trying the next credential
-    // cannot repeat a side effect.
-    const discoveringSession = Boolean(incomingSession) && resolution.kind === "unknown-session";
+    // Ownership is not established by a successful response: LightSprint's
+    // native status endpoint reports isOwner, while a generic MCP 200 may be
+    // a non-owner/tool error. This public route only speaks /mcp and cannot
+    // perform the account-pinned native status lookup. Unknown sessions must
+    // therefore be supplied by trusted runtime registration before dispatch.
+    if (resolution.kind === "unknown-session") {
+      record({ status: 404, attempts: 0, errorClass: "unknown-session" });
+      return res.status(404).json(rpcError(rpc?.messages[0]?.id, -32001,
+        "The owner of this MCP session is not known. Reconnect or register its trusted account binding."));
+    }
 
     const readOnlyTools = state.config.readOnlyTools || [];
     const safeToReplay = replaySafe(req, rpc, readOnlyTools);
@@ -291,9 +296,7 @@ export class McpProxy {
     const accountCount = Math.max(1, state.accounts.length);
     const maxAttempts = pinned
       ? 1
-      : discoveringSession
-        ? accountCount
-        : stateful && !state.config.failoverStateful
+      : stateful && !state.config.failoverStateful
           ? 1
           : Math.max(1, Math.min(state.config.maxFailoverAttempts, accountCount));
 
@@ -359,8 +362,13 @@ export class McpProxy {
         const upstreamSession = upstream.headers.get("mcp-session-id") || undefined;
 
         if (upstream.ok) {
-          this.pool.ownership.bindSession(upstreamSession, account.id);
-          if (discoveringSession) this.pool.ownership.bindSession(incomingSession, account.id);
+          const sessionBinding = upstreamSession ? this.pool.ownership.bindSession(upstreamSession, account.id) : undefined;
+          if (sessionBinding && !sessionBinding.ok) {
+            await upstream.body?.cancel().catch(() => undefined);
+            record({ accountId: account.id, status: 502, attempts, errorClass: "session-owner-conflict" });
+            return res.status(502).json(rpcError(rpc?.messages[0]?.id, -32001,
+              "The upstream returned a session identifier owned by another credential."));
+          }
           if (req.method === "DELETE" && incomingSession) this.pool.ownership.forgetSession(incomingSession);
           if (observeProtocolResponse) this.pool.bindSession(affinityKey, account.id);
           else await this.pool.success(account.id, upstream.status, affinityKey);
@@ -435,12 +443,6 @@ export class McpProxy {
         lastBody = text;
         lastHeaders = upstream.headers;
 
-        if (discoveringSession && upstream.status === 404) {
-          // This credential does not own the session; it is not unhealthy.
-          lastErrorClass = "session-not-found";
-          continue;
-        }
-
         const result = await this.pool.failure(
           account.id,
           { status: upstream.status, body: text, retryAfter: upstream.headers.get("retry-after") },
@@ -452,7 +454,7 @@ export class McpProxy {
           lastErrorClass = "not-replayed";
           break;
         }
-        if (stateful && !discoveringSession && !state.config.failoverStateful) break;
+        if (stateful && !state.config.failoverStateful) break;
       } catch (error: any) {
         if (abort.signal.reason?.name === "AbortError") {
           // The client went away; the credential did nothing wrong.
@@ -478,7 +480,7 @@ export class McpProxy {
           lastErrorClass = "not-replayed";
           break;
         }
-        if (stateful && !discoveringSession && !state.config.failoverStateful) break;
+        if (stateful && !state.config.failoverStateful) break;
       } finally {
         if (!streaming) {
           clearTimeout(timer);
