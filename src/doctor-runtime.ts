@@ -130,19 +130,27 @@ export async function collectDoctorSnapshot(
   if (options.publicMetadata) {
     const issuer = state.config.publicBaseUrl.replace(/\/$/, "");
     const oauth: NonNullable<DoctorSnapshot["oauth"]> = {
-      checked: true,
+      // Expectations and local registrations are known even when the public
+      // endpoint cannot be reached; only successful HTTP observations count
+      // as a completed public-metadata check.
+      checked: false,
       expectedIssuer: issuer,
       expectedResource: issuer + "/mcp",
       callbackUri: options.callbackUri || CHATGPT_CALLBACK_URI,
       registeredRedirectUris: [...new Set(state.oauthClients.flatMap((c) => c.redirectUris))],
     };
     try {
-      const meta = await (await fetch(issuer + "/.well-known/oauth-authorization-server", { signal: AbortSignal.timeout(8_000) })).json() as any;
-      const resource = await (await fetch(issuer + "/.well-known/oauth-protected-resource", { signal: AbortSignal.timeout(8_000) })).json() as any;
-      oauth.advertisedIssuer = typeof meta?.issuer === "string" ? meta.issuer : undefined;
-      oauth.observedResource = typeof resource?.resource === "string" ? resource.resource : undefined;
+      const metadataResponse = await fetch(issuer + "/.well-known/oauth-authorization-server", { signal: AbortSignal.timeout(8_000) });
+      const resourceResponse = await fetch(issuer + "/.well-known/oauth-protected-resource", { signal: AbortSignal.timeout(8_000) });
+      if (metadataResponse.ok && resourceResponse.ok) {
+        const meta = await metadataResponse.json() as any;
+        const resource = await resourceResponse.json() as any;
+        oauth.advertisedIssuer = typeof meta?.issuer === "string" ? meta.issuer : undefined;
+        oauth.observedResource = typeof resource?.resource === "string" ? resource.resource : undefined;
+        oauth.checked = true;
+      }
     } catch {
-      // Leave advertised values unset: the doctor reports them as unverified.
+      // Keep checked=false and expose no parsed values after transport/JSON errors.
     }
     snapshot.oauth = oauth;
   }
