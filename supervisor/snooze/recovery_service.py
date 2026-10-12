@@ -18,7 +18,7 @@ from urllib.parse import quote
 
 from snooze.guidance import GuidanceInbox
 from snooze.recovery import RecoveryEngine, RecoveryError
-from snooze.headless import HeadlessCodex
+from snooze.headless import CODEX_SESSION, HeadlessCodex, REMOTE_SESSION
 
 
 def _private_file(path: Path, *, required=True):
@@ -75,22 +75,39 @@ def _read_config(path: Path):
             if not isinstance(headless[key], str) or not Path(headless[key]).is_absolute():
                 raise ValueError("headless_paths_must_be_absolute")
         exe = Path(headless["executable"])
-        if not exe.is_file() or exe.is_symlink() or not os.access(exe, os.X_OK):
+        try:
+            exe_stat = exe.lstat()
+        except OSError:
+            raise ValueError("headless_executable_unavailable") from None
+        if (not stat.S_ISREG(exe_stat.st_mode) or exe_stat.st_uid not in {0, os.getuid()} or
+                exe_stat.st_mode & 0o022 or not os.access(exe, os.X_OK)):
             raise ValueError("headless_executable_unavailable")
         project_dir = Path(headless["projectDir"])
-        if not project_dir.is_dir() or project_dir.is_symlink():
+        try:
+            project_stat = project_dir.lstat()
+        except OSError:
+            raise ValueError("headless_project_directory_unavailable") from None
+        if (not stat.S_ISDIR(project_stat.st_mode) or project_stat.st_uid not in {0, os.getuid()} or
+                project_stat.st_mode & 0o022):
             raise ValueError("headless_project_directory_unavailable")
         _private_directory(Path(headless["codexHome"]))
         if type(headless["timeoutSeconds"]) is not int or not 1 <= headless["timeoutSeconds"] <= 300:
             raise ValueError("headless_timeout_invalid")
         sessions = headless["sessions"]
-        if not isinstance(sessions, list) or len(sessions) > 1000:
+        if not isinstance(sessions, list) or not 1 <= len(sessions) <= 1000:
             raise ValueError("headless_session_allowlist_invalid")
+        remote_bindings, local_sessions = set(), set()
         for item in sessions:
-            if not isinstance(item, dict) or set(item) != {"project", "owner", "session"} or any(
+            if not isinstance(item, dict) or set(item) != {"project", "owner", "session", "codexSession"} or any(
                     not isinstance(item[k], str) or not re.fullmatch(r"[A-Za-z0-9_.:@/-]{1,160}", item[k])
-                    for k in ("project", "owner")) or not isinstance(item["session"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item["session"]):
+                    for k in ("project", "owner")) or not isinstance(item["session"], str) or not REMOTE_SESSION.fullmatch(item["session"]) or not isinstance(item["codexSession"], str) or not CODEX_SESSION.fullmatch(item["codexSession"]):
                 raise ValueError("headless_session_allowlist_invalid")
+            remote = (item["project"], item["owner"], item["session"])
+            local = item["codexSession"].lower()
+            if remote in remote_bindings or local in local_sessions:
+                raise ValueError("headless_session_allowlist_collision")
+            remote_bindings.add(remote)
+            local_sessions.add(local)
     if not isinstance(config["projects"], list) or not 1 <= len(config["projects"]) <= 100:
         raise ValueError("project_config_invalid")
     seen, scopes = set(), set()
@@ -213,7 +230,7 @@ class RecoveryService:
             return acknowledge
         if action == "headless" and "headless" in self.config:
             cfg = self.config["headless"]
-            allowed = [(x["project"], x["owner"], x["session"]) for x in cfg["sessions"]]
+            allowed = {(x["project"], x["owner"], x["session"]): x["codexSession"] for x in cfg["sessions"]}
             runner = HeadlessCodex(executable=cfg["executable"], project_dir=cfg["projectDir"],
                 codex_home=cfg["codexHome"], sessions=allowed, timeout_seconds=cfg["timeoutSeconds"])
             def resume(context, timeout):
@@ -247,7 +264,7 @@ class RecoveryService:
         for row in self.inbox.registrations():
             for project in self.config["projects"]:
                 if row["project"] == project["project"] and row["owner"] in project["owners"]:
-                    can_resume = ("headless" in self.config and row["model"].lower() == "codex" and
+                    can_resume = ("headless" in self.config and
                                   (row["project"], row["owner"], row["session_id"]) in headless_allowlist)
                     self.engine.register_session(scope=project["scope"], project=row["project"], job=row["project"],
                         account=row["account_id"], session=row["session_id"], adapter="codex" if can_resume else "unverified")

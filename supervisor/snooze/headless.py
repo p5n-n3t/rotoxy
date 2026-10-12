@@ -12,7 +12,8 @@ import time
 
 MAX_CONTEXT = 4096
 MAX_OUTPUT = 64 * 1024
-SESSION = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+REMOTE_SESSION = re.compile(r"[A-Za-z0-9_.:@/-]{1,160}\Z")
+CODEX_SESSION = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 
 class HeadlessCodex:
@@ -23,7 +24,7 @@ class HeadlessCodex:
         self.executable = str(Path(executable))
         self.project_dir = str(Path(project_dir))
         self.codex_home = str(Path(codex_home))
-        self.sessions = frozenset(tuple(x) for x in sessions)
+        self.sessions = dict(sessions)
         self.timeout_seconds = timeout_seconds
         self.popen = popen
         self.clock = clock
@@ -31,17 +32,23 @@ class HeadlessCodex:
     def __call__(self, context, timeout_seconds):
         session = context.get("session")
         binding = (context.get("project"), context.get("owner"), session)
-        if not isinstance(session, str) or not SESSION.fullmatch(session) or binding not in self.sessions:
+        codex_session = self.sessions.get(binding)
+        if (not isinstance(session, str) or not REMOTE_SESSION.fullmatch(session) or
+                not isinstance(codex_session, str) or not CODEX_SESSION.fullmatch(codex_session)):
             return {"state": "rejected", "definitely_not_started": True}
         try:
             limit = min(self.timeout_seconds, max(1, int(timeout_seconds)))
-            metadata = {key: context.get(key) for key in ("project", "job", "kind", "severity")}
-            encoded = json.dumps(metadata, separators=(",", ":"), ensure_ascii=True).encode()
+            metadata = {key: context.get(key) for key in ("event_id", "project", "job", "kind", "severity")}
+            if any(not isinstance(value, str) for value in metadata.values()):
+                return {"state": "rejected", "definitely_not_started": True}
+            prompt = ("Review this incident and return concise advisory guidance only. Do not modify files, run shell commands, "
+                      "call external services, invoke tools, or change the remote session's ownership.\nIncident metadata (JSON):\n" +
+                      json.dumps(metadata, separators=(",", ":"), ensure_ascii=True))
+            encoded = prompt.encode("utf-8")
             if len(encoded) > MAX_CONTEXT:
                 return {"state": "rejected", "definitely_not_started": True}
-            argv = [self.executable, "exec", "resume", session, "--json", "--sandbox", "read-only",
-                    "--ask-for-approval", "never", "--ignore-user-config",
-                    "Review the incident metadata from stdin. Provide concise guidance only; do not make changes."]
+            argv = [self.executable, "--ask-for-approval", "never", "exec", "--sandbox", "read-only",
+                    "resume", codex_session, "--json", "--ignore-user-config", "-"]
             env = {"HOME": self.codex_home, "CODEX_HOME": self.codex_home,
                    "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
             proc = self.popen(argv, cwd=self.project_dir, env=env, stdin=subprocess.PIPE,
@@ -93,12 +100,7 @@ class HeadlessCodex:
                 if overflow:
                     break
             timed_out = self.clock() >= deadline
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
-            try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
+            _kill_and_reap(proc, kill=overflow or timed_out)
             if not selector.get_map() and proc.returncode == 0 and completed and not overflow and not timed_out:
                 return {"state": "accepted", "receipt": {"adapter": "codex-exec-resume",
                         "state": "turn-completed", "exit_code": 0, "bytes": output_bytes,
@@ -107,10 +109,7 @@ class HeadlessCodex:
                     "state": "execution-ambiguous", "exit_code": proc.returncode if proc.returncode is not None else -1,
                     "bytes": min(output_bytes, MAX_OUTPUT), "elapsed_ms": int((self.clock() - started) * 1000)}}
         except Exception:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            _kill_and_reap(proc, kill=True)
             return {"state": "ambiguous", "receipt": {"adapter": "codex-exec-resume", "state": "execution-ambiguous"}}
         finally:
             selector.close()
@@ -119,3 +118,21 @@ class HeadlessCodex:
                     stream.close()
                 except Exception:
                     pass
+
+
+def _kill_and_reap(proc, *, kill=False):
+    """Kill the isolated process group when needed, and always reap its leader."""
+    if kill:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    try:
+        proc.wait()
+    except ChildProcessError:
+        pass
