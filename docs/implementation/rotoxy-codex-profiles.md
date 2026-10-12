@@ -2,6 +2,8 @@
 
 Branch `codex/rotoxy-codex-profiles-20261012`, based on fetched full commit `a7b7a30545d2fdd90d845a3a2003eaa973926927`. This increment adds a local-user-controlled App Server manager only. Root owns admin routes, UI wiring, profile-selection policy, and task dispatch. No paid turns, operator login, production configuration, or deployment was exercised.
 
+Delivery evidence: implementation commit `7357b3cf82cb2f19b8b64e816916d0a90fb5e0e2` was pushed to `origin/codex/rotoxy-codex-profiles-20261012`; Git confirmed the new remote branch and upstream tracking. This checkpoint is updated by a follow-up commit/push.
+
 ## Contract for root wiring
 
 Construct `CodexProfiles` with an absolute configured Codex executable path and absolute Token2OAuth config directory. The executable must be a regular executable file whose configured name is `codex`/`codex.exe`; the manager supplies only `app-server --stdio`, disables shell execution, and passes a minimal environment with a profile-specific `CODEX_HOME`. `registerProfile(label)` creates a random ID and mode-0700 directory; the mode-0600 `codex-profiles.json` contains only ID, label, directory, and timestamps. Registry capacity is 16 profiles and 8 concurrently running App Server processes; each process has bounded JSONL frames, request timeouts, and at most four in-flight requests. It never opens, parses, copies, emits, or deletes Codex credential files.
