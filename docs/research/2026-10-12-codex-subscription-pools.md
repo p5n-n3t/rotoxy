@@ -1,0 +1,23 @@
+# Codex subscription profiles — research snapshot
+
+**Checked 2026-10-12.** No operator-local files, credentials, accounts, or processes were inspected. Entitlements and live limits remain account-specific; this is design research, not runtime verification.
+
+## Profiles, sign-in, and resume
+
+Run each official Codex CLI/App Server profile with a distinct `CODEX_HOME`; keep profile identity, process, and thread IDs together. Never copy or parse `auth.json`. CLI browser login is user-mediated. App Server supports `account/login/start` with `chatgptDeviceCode`; a person must visit the verification URL, enter the code, and authenticate. OpenAI says App Server authentication has never been permitted for commercial or hosted services. Keep this local-user-controlled unless the documented Sign in with ChatGPT program authorizes the deployment. Do not scrape credentials, use private endpoints/cookies, or rotate accounts to evade limits.
+
+Official `codex exec`/`codex resume`, SDK thread continuation, and App Server thread/turn APIs support unattended local execution and resume. Store only the profile reference and supported thread ID; do not assume a thread transfers between profiles. Token2OAuth's existing `clients configure codex` configures an MCP server, not ChatGPT model login.
+
+## Entitlements and quota evidence
+
+The official Codex pricing page (checked 2026-10-12) lists Free's GPT-6 Luna at Standard speed **in the desktop app, subject to rollout**; it does not promise Free CLI entitlement. Verify CLI availability after sign-in. Plus explicitly includes Codex CLI and lists GPT-6.1 Sol and GPT-6 Luna. Current Pro has no five-hour limit stated by the page; do not describe it as unlimited. For Plus and Standard Business, the page's **estimates**, not fixed caps, per five-hour period are: GPT-6 Astra 5–45, GPT-6.1 Sol 15–160, GPT-6 Sol 15–150, GPT-6 Luna 350–3,000 local messages. Cloud tasks may consume more; weekly limits may apply; context, task, speed, and model affect use.
+
+Use App Server `account/read` for signed-in account/plan and `model/list` for actual model/effort availability. `account/rateLimits/read` and its updates report returned windows only; absent buckets remain unknown (examples do not promise five-hour or weekly fields). `account/usage/read` is token activity, not subscription quota, cost, or remaining credits. API-key billing is separate; service status is not account entitlement. Never conflate these signals.
+
+## Sources and installed-code inspection
+
+Official docs accessed 2026-10-12: [CLI](https://developers.openai.com/codex/cli.md), [authentication and CODEX_HOME](https://developers.openai.com/codex/auth.md), [App Server](https://developers.openai.com/codex/app-server.md), [SDK](https://developers.openai.com/codex/sdk.md), [pricing/limits](https://developers.openai.com/codex/pricing.md), [Sign in with ChatGPT](https://developers.openai.com/siwc), [status](https://status.openai.com/).
+
+Inspected Token2OAuth at `a7b7a30545d2fdd90d845a3a2003eaa973926927`: [`pool.ts`](https://github.com/p5n-n3t/token2oauth/blob/a7b7a30545d2fdd90d845a3a2003eaa973926927/src/pool.ts) selects eligible bearer accounts with health, weights, affinity, and telemetry; [`provider-capabilities.ts`](https://github.com/p5n-n3t/token2oauth/blob/a7b7a30545d2fdd90d845a3a2003eaa973926927/src/provider-capabilities.ts) preserves observed/unknown capability and quota; [`store.ts`](https://github.com/p5n-n3t/token2oauth/blob/a7b7a305d2fdd90d845a3a2003eaa973926927/src/store.ts) encrypts upstream bearer tokens; [`cli.ts`](https://github.com/p5n-n3t/token2oauth/blob/a7b7a30545d2fdd90d845a3a2003eaa973926927/src/cli.ts) configures MCP.
+
+Selective reuse evidence: predecessor ROTOXY pinned at [`16d504e`](https://github.com/p5n-n3t/rotoxy/tree/16d504e9ac73300b759497ce8ecf1e886ac704a2), MIT, isolates `CODEX_HOME` and invokes official `codex login` in [`oauth-cli.ts`](https://github.com/p5n-n3t/rotoxy/blob/16d504e9ac73300b759497ce8ecf1e886ac704a2/src/oauth-cli.ts), and calls `codex exec` in [`workers.ts`](https://github.com/p5n-n3t/rotoxy/blob/16d504e9ac73300b759497ce8ecf1e886ac704a2/src/workers.ts). Its [logo](https://github.com/p5n-n3t/rotoxy/blob/16d504e9ac73300b759497ce8ecf1e886ac704a2/assets/rotoxy-logo.webp) was not copied. OpenAI Codex source is [Apache-2.0](https://github.com/openai/codex/blob/ddb33e34b278ca1b7d16d1e68f8ad363a2042f2e/LICENSE); OpenCode source is [MIT](https://github.com/anomalyco/opencode/blob/bcf23b6775c79a429b1511b255d6d88ab0248d4a/LICENSE). OpenCode's [login chooser](https://github.com/anomalyco/opencode/blob/bcf23b6775c79a429b1511b255d6d88ab0248d4a/packages/cli/src/commands/handlers/auth/login.ts) is a UX pattern, not evidence of subscription OAuth support.
