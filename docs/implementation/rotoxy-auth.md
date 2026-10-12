@@ -20,4 +20,4 @@ Compatibility documentation reference: [Claude Code MCP](https://code.claude.com
 
 `npm run build` passed. `node --test test/oauth-compat.test.mjs` passed (1 test covering root/prefix flows and doctor collection). The full `npm test` suite passed: 295 tests, 0 failures. The final focused run was repeated after adding explicit bad-PKCE rejection and consent-header assertions. Dependencies were reused from the shared checkout's `node_modules`; the isolated worktree itself did not run an install.
 
-Commit and push identifiers are recorded in the assignment response after publication.
+Implementation commit: `31d73d8d05e937bf1ce167157a02fe814daef2bc`. The branch push to `origin/codex/rotoxy-auth-20261012` succeeded. A following checkpoint-only commit records this publication evidence; its exact tip is reported in the assignment response.
