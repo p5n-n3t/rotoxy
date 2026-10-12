@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 from snooze.guidance import GuidanceInbox
 from snooze.recovery import RecoveryEngine, RecoveryError
+from snooze.headless import HeadlessCodex
 
 
 def _private_file(path: Path, *, required=True):
@@ -56,7 +57,7 @@ def _read_config(path: Path):
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("config_unavailable") from exc
     required = {"version", "inboxDb", "stateDb", "intervalSeconds", "maxEventsPerCycle", "projects"}
-    if not isinstance(config, dict) or set(config) - (required | {"poolConfig", "poolDb"}) or not required <= set(config):
+    if not isinstance(config, dict) or set(config) - (required | {"poolConfig", "poolDb", "headless"}) or not required <= set(config):
         raise ValueError("config_fields_invalid")
     if config["version"] != 1 or type(config["intervalSeconds"]) is not int or not 60 <= config["intervalSeconds"] <= 3600:
         raise ValueError("config_version_or_interval_invalid")
@@ -65,6 +66,31 @@ def _read_config(path: Path):
     for key in ("inboxDb", "stateDb", "poolConfig", "poolDb"):
         if key in config and (not isinstance(config[key], str) or not Path(config[key]).is_absolute()):
             raise ValueError("absolute_private_paths_required")
+    if "headless" in config:
+        headless = config["headless"]
+        fields = {"executable", "projectDir", "codexHome", "sessions", "timeoutSeconds"}
+        if not isinstance(headless, dict) or set(headless) != fields:
+            raise ValueError("headless_config_fields_invalid")
+        for key in ("executable", "projectDir", "codexHome"):
+            if not isinstance(headless[key], str) or not Path(headless[key]).is_absolute():
+                raise ValueError("headless_paths_must_be_absolute")
+        exe = Path(headless["executable"])
+        if not exe.is_file() or exe.is_symlink() or not os.access(exe, os.X_OK):
+            raise ValueError("headless_executable_unavailable")
+        project_dir = Path(headless["projectDir"])
+        if not project_dir.is_dir() or project_dir.is_symlink():
+            raise ValueError("headless_project_directory_unavailable")
+        _private_directory(Path(headless["codexHome"]))
+        if type(headless["timeoutSeconds"]) is not int or not 1 <= headless["timeoutSeconds"] <= 300:
+            raise ValueError("headless_timeout_invalid")
+        sessions = headless["sessions"]
+        if not isinstance(sessions, list) or len(sessions) > 1000:
+            raise ValueError("headless_session_allowlist_invalid")
+        for item in sessions:
+            if not isinstance(item, dict) or set(item) != {"project", "owner", "session"} or any(
+                    not isinstance(item[k], str) or not re.fullmatch(r"[A-Za-z0-9_.:@/-]{1,160}", item[k])
+                    for k in ("project", "owner")) or not isinstance(item["session"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item["session"]):
+                raise ValueError("headless_session_allowlist_invalid")
     if not isinstance(config["projects"], list) or not 1 <= len(config["projects"]) <= 100:
         raise ValueError("project_config_invalid")
     seen, scopes = set(), set()
@@ -96,7 +122,7 @@ def _read_config(path: Path):
 class RecoveryService:
     """Consumes bounded inbox pages; engine receipts make crashes idempotent."""
 
-    def __init__(self, config, *, oracle_pool=None, clock=time.time):
+    def __init__(self, config, *, oracle_pool=None, resource_verifier=None, clock=time.time):
         self.config, self.clock = config, clock
         inbox_path = Path(config["inboxDb"])
         _private_directory(inbox_path.parent)
@@ -106,6 +132,7 @@ class RecoveryService:
         _private_directory(self.state_path.parent, create=True)
         _private_file(self.state_path, required=False)
         self.oracle_pool = oracle_pool
+        self.resource_verifier = resource_verifier
         self.engine = None
         self._policy_digests = {}
         self._init_state()
@@ -184,17 +211,27 @@ class RecoveryService:
                 self.inbox.acknowledge(int(match.group(1)), owner=owner_for(context["event_id"]), job=context["job"])
                 return {"state": "accepted", "receipt": {"adapter": "guidance-inbox-ack", "state": "acknowledged"}}
             return acknowledge
+        if action == "headless" and "headless" in self.config:
+            cfg = self.config["headless"]
+            allowed = [(x["project"], x["owner"], x["session"]) for x in cfg["sessions"]]
+            runner = HeadlessCodex(executable=cfg["executable"], project_dir=cfg["projectDir"],
+                codex_home=cfg["codexHome"], sessions=allowed, timeout_seconds=cfg["timeoutSeconds"])
+            def resume(context, timeout):
+                owner = owner_for(context["event_id"])
+                return runner({**dict(context), "owner": owner}, timeout)
+            return resume
         return None
 
     def _setup_engine(self):
-        adapters = {name: fn for name in ("notify", "ack-inbox") if (fn := self._adapter(name))}
+        adapters = {name: fn for name in ("notify", "ack-inbox", "headless") if (fn := self._adapter(name))}
         if self.oracle_pool is None and any(p["policy"]["oracle_advice"] for p in self.config["projects"]):
             pool_config = Path(self.config["poolConfig"])
             _private_directory(pool_config.parent)
             _private_file(pool_config)
             from snooze.oracle_pool import OraclePool
             self.oracle_pool = OraclePool(config_path=self.config["poolConfig"], db_path=self.config["poolDb"])
-        self.engine = RecoveryEngine(self.state_path, adapters=adapters, oracle_pool=self.oracle_pool, clock=self.clock)
+        self.engine = RecoveryEngine(self.state_path, adapters=adapters, oracle_pool=self.oracle_pool,
+                                     resource_verifier=self.resource_verifier, clock=self.clock)
         for project in self.config["projects"]:
             policy = project["policy"]
             digest = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -206,11 +243,14 @@ class RecoveryService:
                 with self._connection() as db:
                     db.execute("INSERT INTO recovery_service_meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (meta_key, digest))
         # Bindings come only from the private GuidanceInbox registration table.
+        headless_allowlist = {(x["project"], x["owner"], x["session"]) for x in self.config.get("headless", {}).get("sessions", [])}
         for row in self.inbox.registrations():
             for project in self.config["projects"]:
                 if row["project"] == project["project"] and row["owner"] in project["owners"]:
+                    can_resume = ("headless" in self.config and row["model"].lower() == "codex" and
+                                  (row["project"], row["owner"], row["session_id"]) in headless_allowlist)
                     self.engine.register_session(scope=project["scope"], project=row["project"], job=row["project"],
-                        account=row["account_id"], session=row["session_id"], adapter="unverified")
+                        account=row["account_id"], session=row["session_id"], adapter="codex" if can_resume else "unverified")
 
     def _scope(self, project, owner):
         return next((item for item in self.config["projects"] if item["project"] == project and owner in item["owners"]), None)
