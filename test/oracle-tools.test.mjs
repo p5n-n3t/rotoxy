@@ -20,6 +20,16 @@ async function temporaryDirectory(t) {
   return path;
 }
 
+async function isolatedTools(t, options = {}) {
+  const root = await temporaryDirectory(t);
+  return new OracleTools({
+    supervisorCwd: join(process.cwd(), "supervisor"),
+    configPath: join(root, "config.json"),
+    dbPath: join(root, "queue.sqlite3"),
+    ...options,
+  });
+}
+
 function poolTask(id, status = "queued", extra = {}) {
   return {
     id, status, model: ORACLE_MODELS[0], source: "private prompt must not be returned", created: 100,
@@ -30,22 +40,25 @@ function poolTask(id, status = "queued", extra = {}) {
   };
 }
 
-test("exports four closed MCP tool definitions and exact name recognizer", () => {
-  assert.deepEqual(ORACLE_TOOL_DEFINITIONS.map((tool) => tool.name), ["oracle_catalog", "oracle_submit", "oracle_status", "oracle_result"]);
+test("exports six closed MCP tool definitions and exact name recognizer", () => {
+  assert.deepEqual(ORACLE_TOOL_DEFINITIONS.map((tool) => tool.name), ["oracle_catalog", "oracle_submit", "oracle_submit_batch", "oracle_cancel", "oracle_status", "oracle_result"]);
   assert.ok(ORACLE_TOOL_DEFINITIONS.every((tool) => tool.inputSchema.additionalProperties === false));
   assert.equal(isOracleToolName("oracle_submit"), true);
   assert.equal(isOracleToolName("job_submit"), false);
   assert.equal(isOracleToolName(null), false);
   assert.equal(oracleToolRequiredScope("oracle_submit"), "jobs:write");
+  assert.equal(oracleToolRequiredScope("oracle_submit_batch"), "jobs:write");
+  assert.equal(oracleToolRequiredScope("oracle_cancel"), "jobs:write");
   assert.equal(oracleToolRequiredScope("oracle_result"), "jobs:read");
 });
 
 test("submits prompt on stdin to fixed Python queue and returns safe queued metadata", async (t) => {
   const supervisorCwd = join(process.cwd(), "supervisor");
-  const configPath = "/tmp/private-oracle/config.json";
-  const dbPath = "/tmp/private-oracle/queue.sqlite3";
+  const root = await temporaryDirectory(t);
+  const configPath = join(root, "config.json");
+  const dbPath = join(root, "queue.sqlite3");
   const calls = [];
-  const tools = new OracleTools({ supervisorCwd, configPath, dbPath, commandRunner: async (command, args, request) => {
+  const tools = await isolatedTools(t, { supervisorCwd, configPath, dbPath, commandRunner: async (command, args, request) => {
     calls.push({ command, args, request });
     const id = args[args.indexOf("--id") + 1];
     return { exitCode: 0, stdout: JSON.stringify(poolTask(id, "queued", { model: args[args.indexOf("--model") + 1] })) };
@@ -65,9 +78,9 @@ test("submits prompt on stdin to fixed Python queue and returns safe queued meta
   assert.ok(!JSON.stringify(result).includes("private prompt"));
 });
 
-test("cached catalog never requests refresh and projects only approved models and fixed host IDs", async () => {
+test("cached catalog never requests refresh and projects only approved models and fixed host IDs", async (t) => {
   const calls = [];
-  const tools = new OracleTools({ commandRunner: async (command, args) => {
+  const tools = await isolatedTools(t, { commandRunner: async (command, args) => {
     calls.push([command, args]);
     return { exitCode: 0, stdout: JSON.stringify({ hosts: [
       { id: "ora1", ip: "private-ip", models: [ORACLE_MODELS[1], "unapproved-model"], updated: 20, assigned: 99 },
@@ -81,9 +94,9 @@ test("cached catalog never requests refresh and projects only approved models an
   assert.ok(!JSON.stringify(result).includes("private-ip"));
 });
 
-test("stable caller hash namespaces identical job IDs and status/result only query that namespace", async () => {
+test("stable caller hash namespaces identical job IDs and status/result only query that namespace", async (t) => {
   const calls = [];
-  const tools = new OracleTools({ commandRunner: async (_command, args) => {
+  const tools = await isolatedTools(t, { commandRunner: async (_command, args) => {
     calls.push([...args]);
     const id = args[args.indexOf("--id") + 1];
     if (args.includes("submit")) return { exitCode: 0, stdout: JSON.stringify(poolTask(id)) };
@@ -106,9 +119,76 @@ test("stable caller hash namespaces identical job IDs and status/result only que
   assert.equal(status.state, "complete");
 });
 
-test("rejects unknown keys, prompts over 4000 Unicode characters, and disallowed models before launch", async () => {
+test("batch submit forwards every independent task in one caller-namespaced atomic CLI request", async (t) => {
+  const calls = [];
+  const tools = await isolatedTools(t, { commandRunner: async (_command, args, request) => {
+    calls.push({ args: [...args], request });
+    const payload = JSON.parse(request.stdin);
+    return { exitCode: 0, stdout: JSON.stringify(payload.tasks.map((item) => poolTask(item.job_id, "queued", { model: item.model }))) };
+  } });
+  const input = { tasks: [
+    { jobId: "batch-a", prompt: "Independent prompt A" },
+    { jobId: "batch-b", prompt: "Independent prompt B", model: "gpt-oss:20b" },
+  ] };
+  const first = await tools.call("oracle_submit_batch", input, "caller-one");
+  const second = await tools.call("oracle_submit_batch", input, "caller-two");
+
+  assert.equal(calls.length, 2, "one subprocess call for each complete batch, never one call per item");
+  for (const call of calls) {
+    assert.deepEqual(call.args.slice(-2), ["submit-batch", "--stdin-json"]);
+    const payload = JSON.parse(call.request.stdin);
+    assert.equal(payload.tasks.length, 2);
+    assert.equal(payload.tasks[0].text, "Independent prompt A");
+    assert.equal(payload.tasks[1].text, "Independent prompt B");
+    assert.ok(payload.tasks.every((item) => /^o[0-9a-f]{44}:batch-[ab]$/.test(item.job_id)));
+    assert.ok(call.args.every((arg) => !arg.includes("Independent prompt")));
+  }
+  const firstIds = first.tasks.map((task) => task.jobId);
+  const secondIds = second.tasks.map((task) => task.jobId);
+  assert.deepEqual(firstIds, ["batch-a", "batch-b"]);
+  assert.deepEqual(secondIds, ["batch-a", "batch-b"]);
+  const rawIds = calls.map((call) => JSON.parse(call.request.stdin).tasks.map((item) => item.job_id));
+  assert.notDeepEqual(rawIds[0], rawIds[1], "same external IDs in different OAuth callers get isolated storage IDs");
+  assert.ok(first.tasks.every((task) => task.state === "queued"));
+});
+
+test("rejects malformed, duplicate, oversized and out-of-bound batches before enqueue", async (t) => {
   let calls = 0;
-  const tools = new OracleTools({ commandRunner: async () => { calls++; return { exitCode: 0, stdout: "{}" }; } });
+  const tools = await isolatedTools(t, { commandRunner: async () => { calls++; return { exitCode: 0, stdout: "[]" }; } });
+  await assert.rejects(tools.call("oracle_submit_batch", { tasks: [] }, "client"), (error) => error.code === "invalid_arguments");
+  await assert.rejects(tools.call("oracle_submit_batch", { tasks: Array.from({ length: 13 }, (_, i) => ({ jobId: `id-${i}`, prompt: "x" })) }, "client"), (error) => error.code === "invalid_arguments");
+  await assert.rejects(tools.call("oracle_submit_batch", { tasks: [{ jobId: "same", prompt: "one" }, { jobId: "same", prompt: "two" }] }, "client"), (error) => error.code === "invalid_arguments");
+  await assert.rejects(tools.call("oracle_submit_batch", { tasks: [{ jobId: "bad", prompt: "x", shell: "true" }] }, "client"), (error) => error.code === "invalid_arguments");
+  await assert.rejects(tools.call("oracle_submit_batch", { tasks: [{ jobId: "bad", prompt: "x", model: "unapproved" }] }, "client"), (error) => error.code === "model_not_allowed");
+  await assert.rejects(tools.call("oracle_submit_batch", { tasks: [{ jobId: "bad", prompt: "x" }], arbitrary: true }, "client"), (error) => error.code === "invalid_arguments");
+  assert.equal(calls, 0);
+});
+
+test("queued cancellation returns cancelled state and running cancellation is explicitly refused", async (t) => {
+  const calls = [];
+  const tools = await isolatedTools(t, { commandRunner: async (_command, args) => {
+    calls.push([...args]);
+    const id = args[args.indexOf("--id") + 1];
+    if (id.endsWith(":running-job")) return { exitCode: 2, stdout: JSON.stringify({ error: "task_inference_not_cancellable" }) };
+    if (args.includes("cancel")) return { exitCode: 0, stdout: JSON.stringify({ id, status: "cancelled", cancelled: true }) };
+    return { exitCode: 0, stdout: JSON.stringify(poolTask(id, "cancelled")) };
+  } });
+  const cancelled = await tools.call("oracle_cancel", { jobId: "queued-job" }, "client");
+  assert.deepEqual(cancelled, { jobId: "queued-job", state: "cancelled", cancelled: true });
+  assert.equal(calls[0].at(-3), "cancel");
+  const status = await tools.call("oracle_status", { jobId: "queued-job" }, "client");
+  assert.equal(status.state, "cancelled");
+  await assert.rejects(tools.call("oracle_cancel", { jobId: "running-job" }, "client"), (error) => {
+    assert.equal(error.code, "running_task_not_cancellable");
+    assert.equal(error.message, "running_task_not_cancellable");
+    return true;
+  });
+  assert.equal(calls.filter((args) => args.includes("cancel")).length, 2);
+});
+
+test("rejects unknown keys, prompts over 4000 Unicode characters, and disallowed models before launch", async (t) => {
+  let calls = 0;
+  const tools = await isolatedTools(t, { commandRunner: async () => { calls++; return { exitCode: 0, stdout: "{}" }; } });
   await assert.rejects(tools.call("oracle_catalog", { refresh: true }, "client"), (error) => error.code === "invalid_arguments");
   await assert.rejects(tools.call("oracle_submit", { jobId: "a", prompt: "x", arbitraryCommand: "ssh" }, "client"), (error) => error.code === "invalid_arguments");
   await assert.rejects(tools.call("oracle_submit", { jobId: "a", prompt: "😀".repeat(ORACLE_MAX_PROMPT_CHARS + 1) }, "client"), (error) => error.code === "invalid_arguments");
@@ -117,18 +197,18 @@ test("rejects unknown keys, prompts over 4000 Unicode characters, and disallowed
   assert.equal(calls, 0);
 });
 
-test("rejects cross-caller or malformed pool IDs and bounds provider result text", async () => {
-  const tools = new OracleTools({ commandRunner: async (_command, args) => {
+test("rejects cross-caller or malformed pool IDs and bounds provider result text", async (t) => {
+  const tools = await isolatedTools(t, { commandRunner: async (_command, args) => {
     const id = args[args.indexOf("--id") + 1];
     if (args.includes("status")) return { exitCode: 0, stdout: JSON.stringify(poolTask(id, "complete")) };
     return { exitCode: 0, stdout: JSON.stringify({ id: `o${"0".repeat(44)}:other-job`, status: "complete", result: "wrong tenant" }) };
   } });
-  const cross = new OracleTools({ commandRunner: async (_command, args) => {
+  const cross = await isolatedTools(t, { commandRunner: async (_command, args) => {
     return { exitCode: 0, stdout: JSON.stringify(poolTask(`o${"0".repeat(44)}:owned-job`, "complete")) };
   } });
   await assert.rejects(cross.call("oracle_status", { jobId: "owned-job" }, "client"), (error) => error.code === "job_not_found");
   const huge = "x".repeat(ORACLE_MAX_RESULT_BYTES + 1);
-  const tooLarge = new OracleTools({ commandRunner: async (_command, args) => {
+  const tooLarge = await isolatedTools(t, { commandRunner: async (_command, args) => {
     const id = args[args.indexOf("--id") + 1];
     if (args.includes("status")) return { exitCode: 0, stdout: JSON.stringify(poolTask(id, "complete")) };
     return { exitCode: 0, stdout: JSON.stringify({ id, status: "complete", result: huge }) };
@@ -136,11 +216,11 @@ test("rejects cross-caller or malformed pool IDs and bounds provider result text
   await assert.rejects(tooLarge.call("oracle_result", { jobId: "owned-job" }, "client"), (error) => error.code === "invalid_pool_response");
 });
 
-test("bounds stdout, discards stderr and returns safe command failures", async () => {
+test("bounds stdout, discards stderr and returns safe command failures", async (t) => {
   const huge = "x".repeat(1025);
-  const outputBounded = new OracleTools({ maxStdoutBytes: 1024, commandRunner: async () => ({ exitCode: 0, stdout: huge, stderr: "secret stderr" }) });
+  const outputBounded = await isolatedTools(t, { maxStdoutBytes: 1024, commandRunner: async () => ({ exitCode: 0, stdout: huge, stderr: "secret stderr" }) });
   await assert.rejects(outputBounded.call("oracle_catalog", {}, "client"), (error) => error.code === "output_too_large");
-  const failed = new OracleTools({ commandRunner: async () => { throw new Error("private prompt and credential"); } });
+  const failed = await isolatedTools(t, { commandRunner: async () => { throw new Error("private prompt and credential"); } });
   await assert.rejects(failed.call("oracle_catalog", {}, "client"), (error) => {
     assert.equal(error.code, "command_failed");
     assert.equal(error.message, "command_failed");
@@ -148,8 +228,8 @@ test("bounds stdout, discards stderr and returns safe command failures", async (
   });
 });
 
-test("enforces a timeout even for an injected runner", async () => {
-  const tools = new OracleTools({ timeoutMs: 100, commandRunner: async (_command, _args, request) => new Promise((_resolve, reject) => {
+test("enforces a timeout even for an injected runner", async (t) => {
+  const tools = await isolatedTools(t, { timeoutMs: 100, commandRunner: async (_command, _args, request) => new Promise((_resolve, reject) => {
     request.signal.addEventListener("abort", () => reject(new Error("stopped")), { once: true });
   }) });
   await assert.rejects(tools.call("oracle_catalog", {}, "client"), (error) => error.code === "command_timeout");
