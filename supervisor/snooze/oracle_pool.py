@@ -599,6 +599,10 @@ def main(argv: list[str] | None = None) -> int:
     submit.add_argument("--model", choices=APPROVED_MODELS, default=DEFAULT_MODEL)
     submit.add_argument("--id")
     submit.add_argument("--source")
+    batch = sub.add_parser("submit-batch", help="atomically queue independent tasks; never runs inference")
+    batch.add_argument("--stdin-json", action="store_true", required=True)
+    cancel = sub.add_parser("cancel", help="cancel queued work only")
+    cancel.add_argument("--id", required=True)
     status = sub.add_parser("status", help="show safe status metadata")
     status.add_argument("--id")
     results = sub.add_parser("results", help="read text result by ID, or latest available results")
@@ -618,6 +622,16 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "submit":
             text = Path(args.file).read_text(encoding="utf-8") if args.file and args.file != "-" else sys.stdin.read()
             _json(pool.submit(text, model=args.model, job_id=args.id, source=args.source))
+        elif args.command == "submit-batch":
+            payload = sys.stdin.buffer.read(512 * 1024 + 1)
+            if len(payload) > 512 * 1024:
+                raise ValueError("Batch input too large")
+            request = json.loads(payload)
+            if type(request) is not dict or set(request) != {"tasks"}:
+                raise ValueError("Invalid batch request")
+            _json(pool.submit_batch(request["tasks"]))
+        elif args.command == "cancel":
+            _json(pool.cancel(args.id))
         elif args.command == "status":
             _json(pool.status(args.id))
         elif args.command == "results":
@@ -640,7 +654,8 @@ def main(argv: list[str] | None = None) -> int:
                     stopped.wait(2)
         return 0
     except (PoolError, ValueError, KeyError, OSError) as exc:
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        # The bounded MCP bridge reads structured failures from stdout and discards stderr.
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 2
 
 

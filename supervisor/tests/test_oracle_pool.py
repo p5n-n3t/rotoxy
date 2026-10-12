@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import os
 import tempfile
 import threading
@@ -8,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from snooze.oracle_pool import (
+    _process_identity,
     APPROVED_MODELS,
     HOSTS,
     DEFAULT_MODEL,
@@ -51,6 +54,36 @@ class OraclePoolTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "private"
         self.transport = FakeTransport()
         self.pool = OraclePool(self.root / "config.json", self.root / "queue.sqlite3", self.transport)
+
+    def test_cli_batch_is_atomic_and_cancellation_is_structured(self):
+        def cli(command, payload=None):
+            result = subprocess.run([sys.executable, "-m", "snooze.oracle_pool",
+                "--config", str(self.pool.config_path), "--db", str(self.pool.db_path),
+                *command], input=json.dumps(payload) if payload else None,
+                text=True, capture_output=True, timeout=10)
+            return result.returncode, json.loads(result.stdout)
+        request = {"tasks": [{"job_id": "cli-a", "text": "first"},
+                             {"job_id": "cli-b", "text": "second"}]}
+        code, rows = cli(["submit-batch", "--stdin-json"], request)
+        self.assertEqual(code, 0)
+        self.assertEqual([r["id"] for r in rows], ["cli-a", "cli-b"])
+        self.assertEqual(cli(["submit-batch", "--stdin-json"], request)[0], 0)
+        code, error = cli(["submit-batch", "--stdin-json"], {"tasks": [
+            {"job_id": "cli-new", "text": "new"}, {"job_id": "cli-a", "text": "conflict"}]})
+        self.assertEqual(code, 2)
+        self.assertIn("different content", error["error"])
+        with self.assertRaises(KeyError):
+            self.pool.status("cli-new")
+        code, receipt = cli(["cancel", "--id", "cli-a"])
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt["status"], "cancelled")
+        self.assertTrue(receipt["cancelled"])
+        with self.pool._connect() as db:
+            db.execute("UPDATE pool_tasks SET status='running',claim_pid=?,claim_boot=?,claim_start=? WHERE id='cli-b'", _process_identity())
+            db.commit()
+        code, error = cli(["cancel", "--id", "cli-b"])
+        self.assertEqual(code, 2)
+        self.assertEqual(error["error"], "task_inference_not_cancellable")
 
     def test_default_private_state_and_fixed_ssh_policy(self):
         self.assertEqual(self.pool.config_path.stat().st_mode & 0o777, 0o600)
