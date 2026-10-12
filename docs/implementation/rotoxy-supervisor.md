@@ -1,0 +1,9 @@
+# ROTOXY supervisor console integration
+
+Based on `origin/main` at `a7b7a30545d2fdd90d845a3a2003eaa973926927`, this change reshapes the existing Token2OAuth supervisor page into a full-width, worker-first console with accessible Workers, Inbox, Recovery, and Handoffs tabs. It keeps the existing brand mark and mounted API/CSRF paths; it does not import the predecessor's unrelated legacy features.
+
+Each worker row correlates the configured account and session with the registered requested model, task assignment/task ID, monitor state, heartbeat, and an actual model only when an assignment or monitor reported it. Missing values remain “Unknown.” Existing monitor states such as `stalled` and `needs_instructions` are surfaced as reported. The page refreshes the project-scoped workers and events from the authenticated same-origin endpoint. It labels next-check timing and heartbeat freshness unknown when monitor cadence is not part of the data contract. It does not infer a wake from a heartbeat or an idle state.
+
+The monitor currently stores a waiting-for-instructions state but not the parked question text, approval context, or next scheduled check. This UI says that context is unavailable and offers no reply/approval control; the existing API has no authorized instruction-reply operation. Root integration can extend the trusted monitor projection to expose bounded context and scheduling evidence if that contract is added, while preserving project/owner scoping. No Python monitor/Oracle files, provider configuration, or deployment behavior changed here.
+
+Validation: TypeScript build, focused worker attribution/monitor-state tests, API auth and project-scoped live snapshot tests, dashboard layout/safety assertions, and `git diff --check`. API tests set both `HOME` and `TOKEN2OAUTH_CONFIG_DIR` to their temporary fixture directory before constructing `StateStore`.

@@ -471,14 +471,32 @@ export class SupervisorRuntime implements SupervisorBackend {
         ...(latest?.observedAt !== undefined ? { observedAt: latest.observedAt } : {}),
         ...(latest?.source ? { source: latest.source } : {}), ...(reported.some((task) => task.usage?.provisional === true) ? { provisional: true } : {}) };
     };
+    let supervision: unknown;
+    try {
+      supervision = await this.guidanceCommand("project-snapshot", { owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`) },
+        ["--project", project.projectId, "--after", "0", "--limit", "20", "--pool-config", this.options.oracleConfigPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
+          "--pool-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")]);
+    } catch { supervision = { available: false, workers: [], events: [], models: [], error: "supervision_unavailable" }; }
+    const monitorBySession = new Map<string, Record<string, unknown>>();
+    if (object(supervision) && Array.isArray(supervision.workers)) for (const row of supervision.workers.filter(object)) {
+      if (typeof row.sessionId === "string" && project.registeredSessions.some((session) => session.sessionId === row.sessionId)) monitorBySession.set(row.sessionId, row);
+    }
     const workers: SupervisorWorker[] = project.registeredSessions.map((session) => {
       const signal = accountSignal(state.accounts.find((account) => account.id === session.accountId), nativeTarget);
       const eligible = signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
+      const account = state.accounts.find((candidate) => candidate.id === session.accountId);
       const observations = tasks.filter((task) => task.worker === session.sessionId).sort((a, b) => Number(b.usage?.observedAt ?? 0) - Number(a.usage?.observedAt ?? 0));
       const currentTask = observations.find((task) => !/complete|failed|cancelled|rejected/i.test(task.status)) ?? observations[0];
-      return { id: session.sessionId, workspace: session.workspaceId, status: eligible ? "eligible" : "unavailable",
-        ...(currentTask ? { taskId: currentTask.id, ...(currentTask.usage ? { usage: currentTask.usage } : {}),
-          ...(currentTask.reportedModel ? { model: currentTask.reportedModel } : {}) } : {}) };
+      const monitored = monitorBySession.get(session.sessionId);
+      const actualModel = currentTask?.reportedModel || (monitored?.modelSource === "observed" && typeof monitored.model === "string" ? monitored.model : undefined);
+      return { id: session.sessionId, label: `Worker ${session.sessionId}`, workspace: session.workspaceId,
+        status: typeof monitored?.state === "string" ? monitored.state : "unobserved", dispatchStatus: eligible ? "eligible" : "unavailable",
+        accountId: session.accountId, accountLabel: typeof account?.label === "string" ? account.label : session.accountId,
+        requestedModel: session.model, ...(actualModel ? { actualModel, model: actualModel } : {}),
+        ...(typeof monitored?.heartbeatAt === "number" ? { heartbeatAt: monitored.heartbeatAt } : {}),
+        ...(typeof monitored?.lastProgressAt === "number" ? { lastProgressAt: monitored.lastProgressAt } : {}),
+        ...(typeof monitored?.state === "string" ? { monitorState: monitored.state } : {}),
+        ...(currentTask ? { taskId: currentTask.id, taskCorrelation: currentTask.id, ...(currentTask.usage ? { usage: currentTask.usage } : {}) } : {}) };
     });
     const providers = [{ id: "lightsprint", label: "LightSprint", status: accountIds.some((accountId) => {
       const signal = accountSignal(state.accounts.find((account) => account.id === accountId), nativeTarget);
@@ -503,12 +521,6 @@ export class SupervisorRuntime implements SupervisorBackend {
       .map((event) => ({ id: String(event.id ?? ""), at: typeof event.at === "string" || typeof event.at === "number" ? event.at : undefined,
         severity: typeof event.kind === "string" && /error|fail|ambiguous/i.test(event.kind) ? "warning" : "info", source: "supervisor",
         message: typeof event.kind === "string" ? event.kind.slice(0, 120) : "event" }));
-    let supervision: unknown;
-    try {
-      supervision = await this.guidanceCommand("project-snapshot", { owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`) },
-        ["--project", project.projectId, "--after", "0", "--limit", "20", "--pool-config", this.options.oracleConfigPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
-          "--pool-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")]);
-    } catch { supervision = { available: false, workers: [], events: [], models: [], error: "supervision_unavailable" }; }
     const recoveryOwners = project.clientIds.map((clientId) => `oauth-client:${clientId}`);
     let recovery: unknown;
     try { recovery = await this.recoverySnapshot(project.projectId, recoveryOwners, 0, 20); }

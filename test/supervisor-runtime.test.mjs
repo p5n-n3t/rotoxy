@@ -151,7 +151,7 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
     fundingSource: "shared", sandboxTier: "standard", observedAt, source: "lightsprint-session-status", provisional: true, budgetUnit: "unknown" });
   const assignment = { assignmentId: "job-usage", projectId: "project-a", state: "running", tasks: [
     { taskId: "task-one", state: "running", generation: 2, sessionId: "session-a", selectedAccountId: "acct-a", modelReported: "gpt-6-luna", usage: usage(0.12, 200) },
-    { taskId: "task-two", state: "running", generation: 1, sessionId: "session-a", selectedAccountId: "acct-a", modelReported: "gpt-6-luna", usage: usage(0.13, 300) },
+    { taskId: "task-two", state: "running", generation: 1, sessionId: "session-a", selectedAccountId: "acct-a", modelReported: "gpt-6.1", usage: usage(0.13, 300) },
     { taskId: "task-three", state: "queued", generation: 0, sessionId: "session-b", selectedAccountId: "acct-b", modelReported: "gpt-6-luna", usage: { reportedCostDeltaUsd: -1, maxBudget: 0 } },
   ] };
   runtime.bridge.request = async (_method, path) => {
@@ -162,6 +162,10 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
     if (path === "/admin/api/v1/projects/project-a/control") return { projectId: "project-a", state: "paused", paused: true, emergencyStop: false, maxConcurrency: 2, activeTaskCount: 1, revision: 4, updatedAt: 1 };
     throw new Error(`unexpected readAdmin request: ${path}`);
   };
+  runtime.guidanceCommand = async () => ({ available: true, workers: [
+    { sessionId: "session-a", state: "needs_instructions", model: "gpt-6.1", modelSource: "observed", heartbeatAt: 1791792000, lastProgressAt: 1791791000 },
+    { sessionId: "session-b", state: "stalled", model: "gpt-6-luna", modelSource: "observed", heartbeatAt: 1791790000, lastProgressAt: 1791780000 },
+  ], events: [], models: [] });
   runtime.bridge.status = () => ({ state: "ready" });
 
   const snapshot = await runtime.readAdmin("project-a");
@@ -176,7 +180,14 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
   assert.equal(accountA.usage.totalTaskGenerations, 2);
   assert.equal(accountA.usage.provisional, true);
   assert.equal(workerA.usage.reportedCostDeltaUsd, 0.13);
-  assert.equal(workerA.model, "gpt-6-luna");
+  assert.equal(workerA.model, "gpt-6.1");
+  assert.equal(workerA.accountId, "acct-a");
+  assert.equal(workerA.accountLabel, "acct-a");
+  assert.equal(workerA.requestedModel, "gpt-6-luna");
+  assert.equal(workerA.actualModel, "gpt-6.1");
+  assert.equal(workerA.taskCorrelation, "job-usage:task-two");
+  assert.equal(workerA.monitorState, "needs_instructions");
+  assert.equal(workerA.heartbeatAt, 1791792000);
   const workerB = accountB.workspaces.flatMap((workspace) => workspace.workers).find((worker) => worker.id === "session-b");
   assert.equal(workerB.model, "gpt-6-luna", "reported model survives missing usage metrics");
   assert.equal(workerB.usage, undefined);

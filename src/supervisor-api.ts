@@ -5,7 +5,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { adminEpoch, parseCookies, AdminSessions } from "./admin-session.js";
 import { validateJobToolArguments, type JobToolName } from "./job-submit.js";
 import { redact } from "./telemetry.js";
-import { normalizeSupervisorSnapshot, renderSupervisorDashboard, renderSupervisorEventFeed } from "./supervisor-ui.js";
+import { normalizeSupervisorSnapshot, renderSupervisorDashboard, renderSupervisorEventFeed, renderSupervisorWorkerView } from "./supervisor-ui.js";
 import type { StateStore } from "./store.js";
 
 export interface SupervisorCaller {
@@ -193,9 +193,14 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
     if (snapshot === undefined) return;
     const normalized = normalizeSupervisorSnapshot(snapshot);
     const options = dashboardOptions(req, res.locals.supervisorNonce, res.locals.supervisorCsrf);
+    const workers = renderSupervisorWorkerView(normalized.workers);
     return res.json({
       ok: true,
       eventsHtml: renderSupervisorEventFeed(normalized.events ?? [], options),
+      workersHtml: workers.html,
+      activeWorkers: workers.active,
+      attentionWorkers: workers.attention,
+      latestHeartbeat: workers.latestHeartbeat,
       supervisor: normalized.supervisor?.status ?? "unknown",
       orchestrator: normalized.orchestrator?.status ?? "unknown",
       observedAt: normalized.observedAt ?? null,
