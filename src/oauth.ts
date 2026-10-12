@@ -88,6 +88,29 @@ export class OAuthService {
       express.urlencoded({ extended: false, limit: "64kb" }),
       this.token,
     );
+
+    // Claude Code 2.1.286 uses the short OAuth endpoint names. Keep these as
+    // aliases to the same handlers so PKCE, issuer/resource binding, redirect
+    // checks, and token rotation cannot drift between endpoint spellings.
+    this.router.post("/register", express.json({ limit: "128kb" }), this.register);
+    this.router.use("/authorize", (_req, res, next) => {
+      res.setHeader("X-Frame-Options", "DENY");
+      res.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      next();
+    });
+    this.router.get("/authorize", this.authorizeGet);
+    this.router.post(
+      "/authorize",
+      express.urlencoded({ extended: false, limit: "64kb" }),
+      this.authorizePost,
+    );
+    this.router.post(
+      "/token",
+      express.urlencoded({ extended: false, limit: "64kb" }),
+      this.token,
+    );
   }
 
   /** Drop every pending authorization code (used after an admin rotation). */
