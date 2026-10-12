@@ -1,8 +1,8 @@
 # ROTOXY unification checkpoint — 2026-10-12
 
-Base: fetched `origin main` at `a7b7a30545d2fdd90d845a3a2003eaa973926927`; `git ls-remote origin refs/heads/main` resolved to the same commit and confirmed it is an ancestor of this worktree. Origin is `https://github.com/p5n-n3t/token2oauth.git`. Research branch: `codex/rotoxy-codex-research-20261012`. Only research/checkpoint docs changed; no runtime behavior or operator enrollment was tested. The first documentation commit's successful push is recorded below; the checkpoint follow-up push is reported with the final HEAD.
+Base: fetched `origin main` at `a7b7a30545d2fdd90d845a3a2003eaa973926927`; `git ls-remote origin refs/heads/main` resolved to the same commit and confirmed it is an ancestor of this worktree. Origin is `https://github.com/p5n-n3t/token2oauth.git`. Research branch: `codex/rotoxy-codex-research-20261012`. Only research/checkpoint docs changed; no runtime behavior or operator enrollment was tested.
 
-Push evidence: pending initial commit.
+Push evidence: `371f90d8ac6f94874921ac0889a6f2f3ffeb3bba` pushed to `origin/codex/rotoxy-codex-research-20261012`; Git reported a new remote branch and upstream tracking configured. This checkpoint line is a follow-up commit; its push is also confirmed in the task report.
 
 ## Five concrete shipping seams
 
