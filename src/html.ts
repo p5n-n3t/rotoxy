@@ -27,6 +27,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   { label: "Resources", items: [
     { key: "accounts", label: "Workspace accounts", href: "/admin#accounts" },
     { key: "models", label: "Models", href: "/admin/models" },
+    { key: "cloudflare", label: "Cloudflare AI", href: "/admin/cloudflare" },
     { key: "oracle", label: "Private workers", href: "/admin/oracle" },
     { key: "resources", label: "Search", href: "/admin/resources" },
     { key: "credits", label: "Credits", href: "/admin/credits" },
@@ -45,7 +46,7 @@ export function adminNav(base: string, active: string, groups: readonly NavGroup
     : `<span class="nav-link nav-unavailable" aria-disabled="true" title="${item.key === "jobs" ? "No standalone jobs page is mounted yet" : "Analytics is available as an authenticated JSON endpoint"}">${esc(item.label)}<small>${item.key === "jobs" ? "Unavailable" : "API only"}</small></span>`;
   const nav = groups.map((g) => `<section class="nav-group" aria-labelledby="nav-${esc(g.label.toLowerCase())}"><h2 class="nav-label" id="nav-${esc(g.label.toLowerCase())}">${esc(g.label)}</h2>${g.items.map(link).join("")}</section>`).join("");
   const actions = `<div class="rx-sidebar-end"><a class="btn secondary" href="${b}/">Gateway</a><form class="inline" method="post" action="${b}/admin/logout"><button class="secondary">Sign out</button></form></div>`;
-  return `<a class="rx-skip-link" href="#rx-main-content">Skip to content</a><aside class="rx-sidebar" aria-label="ROTOXY workspace navigation"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><span class="logo">${ROTOXY_MARK_SVG}</span><span><strong>ROTOXY</strong><span class="eyebrow">Token2OAuth gateway</span></span></a><div class="rx-workspace-id"><span class="eyebrow">Workspace</span><strong>Gateway workspace</strong></div><details class="rx-nav-details"><summary class="rx-mobile-menu">Menu <span aria-hidden="true">⌄</span></summary><div class="rx-nav-content"><nav class="rx-nav-groups" aria-label="Workspace navigation">${nav}</nav>${actions}</div></details></aside><header class="rx-page-context"><div><span class="eyebrow">Current page</span><strong class="rx-current-page">${esc(current)}</strong></div></header>`;
+  return `<a class="rx-skip-link" href="#rx-main-content">Skip to content</a><aside class="rx-sidebar" aria-label="ROTOXY workspace navigation"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><span class="logo">${ROTOXY_MARK_SVG}</span><span><strong>ROTOXY</strong><span class="eyebrow">AI workforce control</span></span></a><div class="rx-workspace-id"><span class="eyebrow">Workspace</span><strong>Gateway workspace</strong></div><details class="rx-nav-details"><summary class="rx-mobile-menu">Menu <span aria-hidden="true">⌄</span></summary><div class="rx-nav-content"><nav class="rx-nav-groups" aria-label="Workspace navigation">${nav}</nav>${actions}</div></details></aside><header class="rx-page-context"><div><span class="eyebrow">Current page</span><strong class="rx-current-page">${esc(current)}</strong></div></header>`;
 }
 
 /** Inject the session CSRF token into every POST form of an admin page. */

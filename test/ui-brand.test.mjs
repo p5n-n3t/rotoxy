@@ -14,19 +14,19 @@ const { page } = await import("../dist/ui.js");
 
 test("grouped navigation keeps every legacy admin URL and marks the active page", () => {
   const html = adminNav("https://gw.example/token2oauth", "supervisor");
-  assert.deepEqual(NAV_GROUPS.map((g) => g.label), ["Workspace", "Providers", "Models & APIs", "Operations", "Platform"]);
+  assert.deepEqual(NAV_GROUPS.map((g) => g.label), ["Command", "Resources", "Insights", "Settings"]);
   for (const path of ["/admin", "/admin/supervisor", "/admin/tools", "/admin/diagnostics", "/admin/security", "/admin/logout"]) {
     assert.ok(html.includes(`https://gw.example/token2oauth${path}"`), path);
   }
   assert.equal((html.match(/aria-current="page"/g) || []).length, 1);
   assert.match(html, /aria-current="page">Supervisor</);
-  assert.match(html, /role="group" aria-label="Models &amp; APIs"/);
+  assert.match(html, /class="nav-group" aria-labelledby="nav-resources"/);
 });
 
-test("ROTOXY brand renders with Token2OAuth compatibility subtitle and authored mark", () => {
+test("ROTOXY brand renders with application subtitle and authored mark", () => {
   const html = page("Pool", adminNav("", "pool"));
-  assert.match(html, /<strong>ROTOXY<\/strong><div class="eyebrow">Token2OAuth gateway<\/div>/);
-  assert.match(html, /<div class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"/);
+  assert.match(html, /<strong>ROTOXY<\/strong><span class="eyebrow">AI workforce control<\/span>/);
+  assert.match(html, /<span class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"/);
   assert.ok(html.includes(ROTOXY_MARK_SVG));
   assert.match(html, /<title>Pool · ROTOXY<\/title>/); // legacy URLs remain compatible
 });
@@ -40,9 +40,9 @@ test("nav escapes base and extra groups, and logout keeps CSRF", () => {
 
 test("shell CSS: compact grouped bar, no horizontal nav scroll, nowrap buttons, responsive and reduced motion", () => {
   const css = page("x", "").match(/<style>([\s\S]*)<\/style>/)[1];
-  assert.match(css, /\.topbar\{display:grid;grid-template-columns:auto minmax\(0,1fr\) auto/);
+  assert.match(css, /\.rx-sidebar\{position:fixed/);
   assert.match(css, /button,\.btn\{white-space:nowrap\}/);
-  assert.match(css, /@media\(max-width:620px\)\{\.groups\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /@media\(max-width:720px\)/);
   assert.doesNotMatch(css.slice(css.indexOf(".topbar")), /\.groups\{[^}]*overflow-x:auto/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.doesNotMatch(css, /animation:[^n!]*infinite/);

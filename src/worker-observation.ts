@@ -66,7 +66,7 @@ export type SessionObservation = {
 export function normalizeSessionObservation(status: unknown): SessionObservation {
   const row = typeof status === "object" && status !== null && !Array.isArray(status)
     ? status as Record<string, unknown> : {};
-  const reported = row.sessionStatus;
+  const reported = row.sessionStatus ?? row.status ?? row.state;
   const errorCode = normalizeExecutionError(row);
   const raw = typeof reported === "string" ? reported.toLowerCase() : "";
   const state: SessionObservation["state"] = errorCode || ["failed", "interrupted", "error"].includes(raw) ? "failed"

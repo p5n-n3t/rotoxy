@@ -22,8 +22,8 @@ test("admin pages share the relay-gate theme with light and dark palettes", () =
 test("legacy T2 text badge is replaced by the authored SVG mark, including shared nav", () => {
   const html = page("Pool", adminNav("https://gw.example", "pool"));
   assert.doesNotMatch(html, /<div class="logo">T2<\/div>/);
-  assert.match(html, /<div class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"/);
-  assert.match(html, /aria-current="page">Pool</);
+  assert.match(html, /<span class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"/);
+  assert.match(html, /aria-current="page">Overview</);
   assert.equal(brandMarkup("<p>no badge</p>"), "<p>no badge</p>");
 });
 

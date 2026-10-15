@@ -48,3 +48,9 @@ test('invalid error codes and terminal states fail closed', () => {
   assert.equal(normalizeSessionObservation({ sessionStatus: 'interrupted' }).state, 'failed');
   assert.equal(normalizeSessionObservation({ sessionStatus: 'idle' }).state, 'idle');
 });
+
+test("normalization preserves supported legacy status fields", () => {
+  assert.equal(normalizeSessionObservation({status:"idle"}).state,"idle");
+  assert.equal(normalizeSessionObservation({state:"running"}).state,"running");
+  assert.equal(normalizeSessionObservation({status:"idle",errorCode:"ACP_RELAY_DIED"}).state,"failed");
+});
