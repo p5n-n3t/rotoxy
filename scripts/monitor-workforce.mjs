@@ -6,7 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StateStore } from '../dist/store.js';
 import { serverMessages } from '../dist/jsonrpc-wire.js';
-import { normalizeSessionObservation } from '../dist/worker-observation.js';
+import { boundObservationDiagnostics, classifyObservationFailure, normalizeSessionObservation, WorkerObservationFailure } from '../dist/worker-observation.js';
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const configPath=process.argv[2];
@@ -42,31 +42,42 @@ function recoveryOnce(){return new Promise((yes,no)=>{
 });}
 async function observation(worker,state){
   const account=state.accounts.find(a=>a.id===worker.accountId);
-  if(!account)return{state:'unavailable'};
+  if(!account)throw new WorkerObservationFailure('account_missing');
   // The only remote paths are initialize and this exact bound status endpoint.
-  const token=await store.revealToken(account);let session;let id=0;
+  let token;try{token=await store.revealToken(account);}catch{throw new WorkerObservationFailure('account_unavailable');}let session;let id=0;
   async function rpc(method,params){
     const callId=++id;
-    const r=await fetch(state.config.upstreamUrl,{method:'POST',headers:{authorization:'Bearer '+token,accept:'application/json, text/event-stream','content-type':'application/json',...(session?{'mcp-session-id':session,'mcp-protocol-version':'2025-06-18'}:{})},body:JSON.stringify({jsonrpc:'2.0',id:callId,method,params}),signal:AbortSignal.timeout(20000)});
-    session=r.headers.get('mcp-session-id')||session;
-    const reader=r.body?.getReader();if(!reader)throw Error('status_unavailable');
-    const chunks=[];let bytes=0;
-    while(true){const part=await reader.read();if(part.done)break;bytes+=part.value.byteLength;if(bytes>1024*1024){await reader.cancel();throw Error('response_limit');}chunks.push(Buffer.from(part.value));}
-    const body=Buffer.concat(chunks).toString('utf8');
-    const value=serverMessages(r.headers.get('content-type'),body).find(x=>x.id===callId);
-    if(!r.ok||!value||value.error||value.result?.isError)throw Error('status_unavailable');return value.result;
+    try{
+      const r=await fetch(state.config.upstreamUrl,{method:'POST',headers:{authorization:'Bearer '+token,accept:'application/json, text/event-stream','content-type':'application/json',...(session?{'mcp-session-id':session,'mcp-protocol-version':'2025-06-18'}:{})},body:JSON.stringify({jsonrpc:'2.0',id:callId,method,params}),signal:AbortSignal.timeout(20000)});
+      session=r.headers.get('mcp-session-id')||session;
+      if(!r.ok){await r.body?.cancel().catch(()=>{});throw new WorkerObservationFailure('http_status',r.status);}
+      const reader=r.body?.getReader();if(!reader)throw new WorkerObservationFailure('malformed_protocol');
+      const chunks=[];let bytes=0;
+      while(true){const part=await reader.read();if(part.done)break;bytes+=part.value.byteLength;if(bytes>1024*1024){await reader.cancel();throw new WorkerObservationFailure('malformed_protocol');}chunks.push(Buffer.from(part.value));}
+      let messages;try{messages=serverMessages(r.headers.get('content-type'),Buffer.concat(chunks).toString('utf8'));}catch{throw new WorkerObservationFailure('malformed_protocol');}
+      const value=messages.find(x=>x.id===callId);
+      if(!value||value.error||value.result?.isError)throw new WorkerObservationFailure('malformed_protocol');return value.result;
+    }catch(error){
+      if(error instanceof WorkerObservationFailure)throw error;
+      throw new WorkerObservationFailure(error?.name==='TimeoutError'||error?.name==='AbortError'?'timeout':'transport_error');
+    }
   }
   const init=await rpc('initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'token2oauth-readonly-monitor',version:'1'}});
-  if(!init?.serverInfo)throw Error('initialize_failed');
+  if(!init?.serverInfo)throw new WorkerObservationFailure('malformed_protocol');
   const result=await rpc('tools/call',{name:'lightsprint_api',arguments:{method:'GET',path:'/api/agent-sessions/'+worker.sessionId+'/status'}});
-  const raw=JSON.parse(result.content.find(c=>c.type==='text').text);const s=raw.status;
-  if(!s||s.sessionId!==worker.sessionId||s.isOwner!==true)return{state:'unavailable'};
+  const content=Array.isArray(result?.content)?result.content.find(c=>c?.type==='text')?.text:undefined;
+  let raw;try{if(typeof content!=='string')throw Error();raw=JSON.parse(content);}catch{throw new WorkerObservationFailure('malformed_protocol');}
+  const s=raw?.status;
+  if(!s||typeof s!=='object'||Array.isArray(s))throw new WorkerObservationFailure('session_missing');
+  if(typeof s.sessionId!=='string')throw new WorkerObservationFailure('session_missing');
+  if(s.sessionId!==worker.sessionId)throw new WorkerObservationFailure('session_mismatch');
+  if(s.isOwner!==true)throw new WorkerObservationFailure('owner_mismatch');
   const observed=normalizeSessionObservation(s);
   return{...observed,...(safe(s.model)?{model:s.model}:{}),
     ...(Number.isSafeInteger(s.promptCount)&&s.promptCount>=0?{promptCount:s.promptCount}:{})};
 }
 async function check(){
-  phase="configuration";const state=await store.load();let checked=0,errors=0;
+  phase="configuration";const state=await store.load();let checked=0,errors=0;const observationFailures=[];
   phase='registrations';const registered=await python('registrations');
   const workers=[...cfg.workers,...(Array.isArray(registered?.workers)?registered.workers.filter(w=>
     ['id','project','owner','account_id','session_id'].every(k=>safe(w[k]))
@@ -78,7 +89,7 @@ async function check(){
   const unique=[...groups.values()];
   phase="observations";for(let i=0;i<unique.length&&!stopping;i+=3){
     await Promise.all(unique.slice(i,i+3).map(async group=>{
-      const representative=group[0];let o;try{o=await observation(representative,state);}catch{o={state:'unavailable'};errors++;}
+      const representative=group[0];let o;try{o=await observation(representative,state);}catch(error){o={state:'unavailable'};errors++;observationFailures.push({accountId:representative.accountId,sessionId:representative.sessionId,...classifyObservationFailure(error)});}
       // Bound child processes across owners as well as remote sessions.
       for(const worker of group)await python('observe',{worker:worker.id,observation:o,owner:worker.owner,job:worker.job});
       checked+=group.length;
@@ -86,7 +97,8 @@ async function check(){
   }
   phase='guidance';const guide=cfg.guide===true?await python('guide'):undefined;
   phase='recovery';const recovery=cfg.recoveryServiceConfig?await recoveryOnce():undefined;
-  console.log(JSON.stringify({at:new Date().toISOString(),checked,statusErrors:errors,guidanceSubmitted:guide?.submitted??0,recoveryProcessed:recovery?.processed??0}));
+  const diagnostics=boundObservationDiagnostics(observationFailures);
+  console.log(JSON.stringify({at:new Date().toISOString(),checked,statusErrors:errors,observationDiagnostics:diagnostics.items,observationDiagnosticsOmitted:diagnostics.omitted,guidanceSubmitted:guide?.submitted??0,recoveryProcessed:recovery?.processed??0}));
 }
 do{
   try{await check();}catch{console.error(JSON.stringify({at:new Date().toISOString(),error:'monitor_check_failed',phase}));if(process.argv.includes('--once'))process.exitCode=1;}
