@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { decryptSecret, encryptSecret, ensureMasterKey, randomToken } from "./crypto.js";
 import type { EncryptedSecret } from "./types.js";
 import type { StateStore } from "./store.js";
+import { boundedAccountCapacity, ResourceRoutingRulesStore } from "./resource-routing.js";
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/;
 const LABEL = /^[^\u0000-\u001f\u007f]{1,80}$/;
@@ -62,7 +63,8 @@ function viewOf({ secret: _secret, ...view }: CloudflareCredential): CloudflareC
 /** Encrypted Cloudflare account tokens; plaintext is returned only to the request adapter. */
 export class CloudflareCredentialStore {
   private readonly file: string;
-  constructor(private readonly store: StateStore) { this.file = join(store.dir, "cloudflare-ai-credentials.json"); }
+  readonly routingRules: ResourceRoutingRulesStore;
+  constructor(private readonly store: StateStore) { this.file = join(store.dir, "cloudflare-ai-credentials.json"); this.routingRules = new ResourceRoutingRulesStore(store); }
 
   private async read(): Promise<CredentialDocument> {
     try {
@@ -180,6 +182,7 @@ export class CloudflareAIAdapter {
   private readonly maxInflight: number;
   private readonly now: () => number;
   private readonly inflight = new Map<string, number>();
+  private readonly dispatched = new Map<string, number>();
   private cursor = 0;
   private recent: Array<{ accountId: string; model: string; at: number; durationMs: number; status: string; usage?: Record<string, number> }> = [];
   snapshot() { return { inflight: Object.fromEntries(this.inflight), recent: this.recent.map(row => ({ ...row, ...(row.usage ? { usage: { ...row.usage } } : {}) })) }; }
@@ -196,16 +199,30 @@ export class CloudflareAIAdapter {
   }
 
   private async acquire(model?: string): Promise<{ view: CloudflareCredentialView; token: string; release: () => void }> {
-    const all = await this.credentials.listCredentials();
-    const eligible = all.filter((account) => account.enabled && (account.cooldownUntil === undefined || account.cooldownUntil <= this.now()) &&
-      (model === undefined || account.allowedModels.includes(model)) && (this.inflight.get(account.id) ?? 0) < this.maxInflight);
+    const [all, rules] = await Promise.all([this.credentials.listCredentials(), this.credentials.routingRules.read()]);
+    const ruleFor = (id: string) => rules.resources[id];
+    const eligible = all.filter((account) => account.enabled && ruleFor(account.id)?.enabled !== false && (account.cooldownUntil === undefined || account.cooldownUntil <= this.now()) &&
+      (model === undefined || account.allowedModels.includes(model)) && (this.inflight.get(account.id) ?? 0) < boundedAccountCapacity(ruleFor(account.id)?.capacity, this.maxInflight));
     if (!eligible.length) {
       if (model && all.some((account) => account.enabled && account.allowedModels.includes(model))) throw new CloudflareAIError("no_eligible_account");
       throw new CloudflareAIError(model ? "model_not_allowed" : "no_eligible_account");
     }
-    const min = Math.min(...eligible.map((account) => this.inflight.get(account.id) ?? 0));
-    const ties = eligible.filter((account) => (this.inflight.get(account.id) ?? 0) === min);
-    const selected = ties[this.cursor++ % ties.length]!;
+    const weighted = eligible.some((account) => (ruleFor(account.id)?.weight ?? 1) !== 1);
+    let selected: CloudflareCredentialView;
+    if (weighted) {
+      const ordered = [...eligible].sort((a, b) => {
+        const score = (x: CloudflareCredentialView) => ((this.dispatched.get(x.id) ?? 0) + (this.inflight.get(x.id) ?? 0)) / (ruleFor(x.id)?.weight ?? 1);
+        return score(a) - score(b) || a.id.localeCompare(b.id);
+      });
+      const best = ordered[0]!;
+      const score = (x: CloudflareCredentialView) => ((this.dispatched.get(x.id) ?? 0) + (this.inflight.get(x.id) ?? 0)) / (ruleFor(x.id)?.weight ?? 1);
+      const ties = ordered.filter((x) => Math.abs(score(x) - score(best)) < 1e-9);
+      selected = ties[this.cursor++ % ties.length]!;
+    } else {
+      const min = Math.min(...eligible.map((account) => this.inflight.get(account.id) ?? 0));
+      const ties = eligible.filter((account) => (this.inflight.get(account.id) ?? 0) === min);
+      selected = ties[this.cursor++ % ties.length]!;
+    }
     this.inflight.set(selected.id, (this.inflight.get(selected.id) ?? 0) + 1);
     const release = () => {
       const count = this.inflight.get(selected.id) ?? 1;
@@ -213,8 +230,12 @@ export class CloudflareAIAdapter {
     };
     try {
       const credential = await this.credentials.credentialForRequest(selected.id);
+      const latestRules = await this.credentials.routingRules.read();
+      const latestRule = latestRules.resources[selected.id];
       if (!credential || !credential.view.enabled || (credential.view.cooldownUntil !== undefined && credential.view.cooldownUntil > this.now()) ||
+          latestRule?.enabled === false || (this.inflight.get(selected.id) ?? 0) > boundedAccountCapacity(latestRule?.capacity, this.maxInflight) ||
           (model !== undefined && !credential.view.allowedModels.includes(model))) throw new CloudflareAIError("no_eligible_account");
+      this.dispatched.set(selected.id, (this.dispatched.get(selected.id) ?? 0) + 1);
       return { ...credential, release };
     } catch (error) { release(); throw error; }
   }
