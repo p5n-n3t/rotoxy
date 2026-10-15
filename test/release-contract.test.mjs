@@ -31,3 +31,18 @@ test("published tarball includes install, runtime, and rollback guidance", async
   ]) assert.ok(files.has(required), `release tarball omits ${required}`);
   assert.ok(![...files].some((path) => /(^|\/)frontend\//.test(path)), "frontend development sources must stay out of the public package");
 });
+
+test("release verifiers use canonical ROTOXY bins and keep the boot smoke manual", async () => {
+  const [audit, install] = await Promise.all([
+    readFile(new URL("scripts/verify-release.mjs", root), "utf8"),
+    readFile(new URL("scripts/verify-package-install.mjs", root), "utf8"),
+  ]);
+  assert.match(audit, /packageJson\.name === "rotoxy"/);
+  assert.match(audit, /"rotoxy-cli": "dist\/cli\.js"/);
+  assert.match(install, /const packageName = "rotoxy"/);
+  assert.match(install, /node_modules.*rotoxy\$\{cliSuffix\}/);
+  assert.match(install, /node_modules.*rotoxy-cli\$\{cliSuffix\}/);
+  assert.match(install, /manual; no unit is enabled at boot/);
+  assert.match(install, /TOKEN2OAUTH_HOST: "127\.0\.0\.1"/);
+  assert.doesNotMatch(install, /token2oauth-package-smoke|token2oauth --help/i);
+});

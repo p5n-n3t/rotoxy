@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
+const expectedBins = { rotoxy: "scripts/rotoxy-control.mjs", "rotoxy-cli": "dist/cli.js" };
 const requiredPackageFiles = [
   "dist/cli.js",
   "dist/store.js",
@@ -99,7 +100,8 @@ function parsePackJson(text) {
 let scratch;
 try {
   assert(Number(process.versions.node.split(".")[0]) >= 22, "Node.js 22 or newer is required");
-  assert(packageJson.name === "token2oauth", "unexpected package name");
+  assert(packageJson.name === "rotoxy", "unexpected package name");
+  assert(JSON.stringify(packageJson.bin) === JSON.stringify(expectedBins), "package bin map does not match the canonical ROTOXY entrypoints");
   assert(packageJson.files?.includes("scripts/monitor-workforce.mjs"), "package files allowlist omits scripts/monitor-workforce.mjs");
 
   const compiler = join(repoRoot, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
@@ -107,7 +109,7 @@ try {
     throw new Error("TypeScript is not installed in this checkout; provide the lockfile-pinned dev dependencies first. This verifier never installs dependencies.");
   }
 
-  scratch = await mkdtemp(join(tmpdir(), "token2oauth-release-"));
+  scratch = await mkdtemp(join(tmpdir(), "rotoxy-release-"));
   await chmod(scratch, 0o700);
   const home = join(scratch, "home");
   const stage = join(scratch, "package-source");
@@ -157,6 +159,7 @@ try {
   });
   const metadata = parsePackJson(packed.stdout);
   assert(metadata, "npm pack returned an unsupported metadata shape");
+  assert(metadata.name === "rotoxy" && metadata.version === packageJson.version, "packed metadata does not match canonical package identity");
   const inventory = new Set(metadata.files.map((file) => file.path));
   const tarball = join(packDir, metadata.filename);
   const listing = await run("tar", ["-tzf", tarball], { cwd: scratch, env: commandEnv, label: "tar listing", timeout: 10_000 });
@@ -165,6 +168,10 @@ try {
   for (const path of requiredPackageFiles) {
     assert(inventory.has(path), `npm inventory is missing ${path}`);
     assert(archive.has(path), `actual tarball is missing ${path}`);
+  }
+  for (const path of Object.values(expectedBins)) {
+    assert(inventory.has(path), `npm inventory is missing declared bin target ${path}`);
+    assert(archive.has(path), `actual tarball is missing declared bin target ${path}`);
   }
   const builtFiles = (await listFiles(join(stage, "dist"))).map((path) => safeRelative(stage, path));
   assert(builtFiles.length > 0, "temporary build produced no dist files");

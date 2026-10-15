@@ -9,8 +9,9 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const packageName = "token2oauth";
 const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
+const packageName = "rotoxy";
+const expectedBins = { rotoxy: "scripts/rotoxy-control.mjs", "rotoxy-cli": "dist/cli.js" };
 const maxLogBytes = 256 * 1024;
 let scratch;
 let child;
@@ -129,17 +130,35 @@ try {
   }
   await run(python, ["--version"], { timeout: 5_000 });
 
-  scratch = await mkdtemp(join(tmpdir(), "token2oauth-package-smoke-"));
+  scratch = await mkdtemp(join(tmpdir(), "rotoxy-package-smoke-"));
   await chmod(scratch, 0o700);
   const packDir = join(scratch, "pack");
   const installPrefix = join(scratch, "install");
+  const homeDir = join(scratch, "home");
   const configDir = join(scratch, "config");
-  await Promise.all([mkdir(packDir, { mode: 0o700 }), mkdir(installPrefix, { mode: 0o700 }), mkdir(configDir, { mode: 0o700 })]);
+  const npmUserConfig = join(scratch, "empty.npmrc");
+  const npmGlobalConfig = join(scratch, "empty-global.npmrc");
+  const npmCache = join(scratch, "npm-cache");
+  await Promise.all([mkdir(packDir, { mode: 0o700 }), mkdir(installPrefix, { mode: 0o700 }), mkdir(homeDir, { mode: 0o700 }), mkdir(configDir, { mode: 0o700 }), mkdir(npmCache, { mode: 0o700 }), writeFile(npmUserConfig, "", { mode: 0o600 }), writeFile(npmGlobalConfig, "", { mode: 0o600 })]);
+  assert(packageJson.name === packageName, "package identity is not rotoxy");
+  assert(JSON.stringify(packageJson.bin) === JSON.stringify(expectedBins), "package bin map does not match the canonical ROTOXY entrypoints");
+  const isolatedEnv = {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: homeDir,
+    TMPDIR: scratch,
+    TOKEN2OAUTH_CONFIG_DIR: configDir,
+    ROTOXY_PREFIX: "",
+    NPM_CONFIG_USERCONFIG: npmUserConfig,
+    NPM_CONFIG_GLOBALCONFIG: npmGlobalConfig,
+    NPM_CONFIG_CACHE: npmCache,
+    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+  };
 
   // npm >=12 may emit a single object; older versions emit a one-element array.
-  const packed = await run(npm, ["pack", "--json", "--pack-destination", packDir], { timeout: 120_000 });
+  const packed = await run(npm, ["pack", "--json", "--pack-destination", packDir], { timeout: 120_000, env: isolatedEnv });
   const metadata = normalizePackJson(JSON.parse(packed.stdout));
   assert(metadata && typeof metadata.filename === "string" && Array.isArray(metadata.files), "npm pack returned an unsupported JSON shape");
+  assert(metadata.name === packageName && metadata.version === packageJson.version, "packed artifact identity differs from package.json");
   const tarball = join(packDir, metadata.filename);
   const packFiles = new Set(metadata.files.map((file) => file.path));
   const archiveText = (await run("tar", ["-tzf", tarball], { timeout: 10_000 })).stdout;
@@ -156,6 +175,7 @@ try {
     assert(packFiles.has(required), `npm pack inventory is missing ${required}`);
     assert(archiveFiles.has(required), `actual tarball is missing ${required}`);
   }
+  for (const target of Object.values(expectedBins)) assert(archiveFiles.has(target), `actual tarball is missing declared bin target ${target}`);
   assert([...packFiles].some((path) => /^supervisor\/snooze\/static\/assets\/ui\/.*\.js$/.test(path)), "packaged UI JavaScript is missing");
   assert([...packFiles].some((path) => /^supervisor\/snooze\/static\/assets\/ui\/.*\.css$/.test(path)), "packaged UI stylesheet is missing");
   assert([...packFiles].some((path) => /^supervisor\/snooze\/static\/assets\/ui\/.*\.woff2$/.test(path)), "packaged UI fonts are missing");
@@ -166,19 +186,28 @@ try {
   }
   assert(metadata.files.every((file) => archiveFiles.has(file.path)), "tarball contents do not match npm pack inventory");
 
-  await run(npm, ["install", tarball, "--ignore-scripts", "--prefix", installPrefix, "--no-audit", "--no-fund"], { timeout: 120_000 });
+  await run(npm, ["install", tarball, "--ignore-scripts", "--prefix", installPrefix, "--no-audit", "--no-fund"], { timeout: 120_000, env: isolatedEnv });
   const installed = join(installPrefix, "node_modules", packageName);
-  const cliShim = join(installPrefix, "node_modules", ".bin", process.platform === "win32" ? "token2oauth.cmd" : "token2oauth");
-  const cliHelp = await run(cliShim, ["--help"], { cwd: scratch, timeout: 10_000 });
-  assert(/Usage: token2oauth/i.test(cliHelp.stdout), "installed token2oauth --help did not show CLI usage");
+  const cliSuffix = process.platform === "win32" ? ".cmd" : "";
+  process.env.HOME = homeDir;
+  process.env.TOKEN2OAUTH_CONFIG_DIR = configDir;
+  process.env.ROTOXY_PREFIX = installed;
+  const installedEnv = { ...isolatedEnv, ROTOXY_PREFIX: installed };
+  const wrapperHelp = await run(join(installPrefix, "node_modules", ".bin", `rotoxy${cliSuffix}`), ["--help"], { cwd: scratch, timeout: 10_000, env: installedEnv });
+  assert(/Usage: rotoxy/i.test(wrapperHelp.stdout), "installed rotoxy wrapper did not forward to the canonical CLI");
+  const cliHelp = await run(join(installPrefix, "node_modules", ".bin", `rotoxy-cli${cliSuffix}`), ["--help"], { cwd: scratch, timeout: 10_000, env: installedEnv });
+  assert(/Usage: rotoxy/i.test(cliHelp.stdout), "installed rotoxy-cli --help did not show canonical CLI usage");
+  const installPlan = await run(join(installPrefix, "node_modules", ".bin", `rotoxy${cliSuffix}`), ["install-plan"], { cwd: scratch, timeout: 10_000, env: installedEnv });
+  const plan = JSON.parse(installPlan.stdout);
+  assert(plan.mode === "manual; no unit is enabled at boot", "install plan must remain explicit/manual with boot disabled");
+  assert(!installPlan.stdout.includes("systemctl --user enable"), "install plan unexpectedly enables a user service");
   const supervisorDir = join(installed, "supervisor");
   await run(python, ["-m", "snooze.bridge", "--help"], {
     cwd: supervisorDir,
-    env: { ...process.env, PYTHONPATH: supervisorDir, PYTHONDONTWRITEBYTECODE: "1" },
+    env: { ...installedEnv, PYTHONPATH: supervisorDir, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1" },
     timeout: 10_000,
   });
 
-  process.env.TOKEN2OAUTH_CONFIG_DIR = configDir;
   const { StateStore } = await import(pathToFileURL(join(installed, "dist", "store.js")).href);
   const stateStore = new StateStore();
   adminPassword = randomBytes(32).toString("base64url");
@@ -186,7 +215,7 @@ try {
   adminPassword = "";
 
   const port = await reservePort();
-  const serverEnv = { ...process.env, TOKEN2OAUTH_CONFIG_DIR: configDir, PYTHONDONTWRITEBYTECODE: "1" };
+  const serverEnv = { ...installedEnv, TOKEN2OAUTH_HOST: "127.0.0.1", TOKEN2OAUTH_PORT: String(port), PYTHONDONTWRITEBYTECODE: "1" };
   child = spawn(process.execPath, [join(installed, "dist", "cli.js"), "serve", "--host", "127.0.0.1", "--port", String(port)], {
     cwd: scratch,
     env: serverEnv,
@@ -206,7 +235,7 @@ try {
     package: `${packageJson.name}@${packageJson.version}`,
     archiveBytes: tarStat.size,
     files: archiveFiles.size,
-    checks: ["built CLI, static UI, and all checked licenses included", "no caches, node_modules, or private config", "installed CLI help", "installed Python bridge help", "fresh state initialization", "loopback /healthz", "owned server child stopped with SIGTERM"],
+    checks: ["canonical rotoxy package and both installed bins", "built CLI, static UI, and checked licenses included", "no caches, node_modules, or private config", "manual install plan leaves boot disabled", "installed Python bridge help", "isolated fresh state initialization", "explicit loopback /healthz", "owned server child stopped with SIGTERM"],
   }, null, 2));
 } catch (error) {
   await stopOwnedChild().catch(() => undefined);
