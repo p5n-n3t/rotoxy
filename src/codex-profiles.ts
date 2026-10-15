@@ -62,8 +62,10 @@ export interface CodexProfilesOptions {
   maxInFlight?: number;
 }
 
-interface Registry { version: 1; profiles: CodexProfile[] }
+interface ProfileAuditEntry { action: "profile_removed"; profileId: string; at: number }
+interface Registry { version: 1; profiles: CodexProfile[]; audit?: ProfileAuditEntry[] }
 interface PendingLogin { loginId: string; state: DeviceLoginState }
+const MAX_PROFILE_AUDIT = 500;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -186,6 +188,8 @@ export class CodexProfiles {
   private readonly snapshots = new Map<string, CodexProfileSnapshot>();
   private readonly logins = new Map<string, PendingLogin>();
   private readonly threadOwners = new Map<string, string>();
+  private readonly profileOperations = new Map<string, number>();
+  private readonly removingProfiles = new Set<string>();
 
   constructor(private readonly options: CodexProfilesOptions) {
     if (!isAbsolute(options.codexBinary) || !["codex", "codex.exe"].includes(basename(options.codexBinary).toLowerCase())) throw new Error("codexBinary must be an absolute path to the trusted Codex binary");
@@ -223,7 +227,12 @@ export class CodexProfiles {
           profiles.push({ id: p.id, label: p.label, profileDir: join(this.profileRoot, p.id), createdAt: p.createdAt, updatedAt: p.updatedAt });
         }
       }
-      this.registry = { version: 1, profiles };
+      const audit = Array.isArray(raw?.audit) ? raw.audit.flatMap((entry) => {
+        const item = record(entry);
+        return item?.action === "profile_removed" && typeof item.profileId === "string" && PROFILE_ID.test(item.profileId) && Number.isSafeInteger(item.at)
+          ? [{ action: "profile_removed" as const, profileId: item.profileId, at: item.at as number }] : [];
+      }).slice(-MAX_PROFILE_AUDIT) : [];
+      this.registry = { version: 1, profiles, audit };
       try { await chmod(this.registryPath, 0o600); } catch (error: any) { if (error?.code !== "ENOENT") throw error; }
       for (const profile of profiles) {
         await mkdir(profile.profileDir, { recursive: true, mode: 0o700 });
@@ -291,7 +300,28 @@ export class CodexProfiles {
       profiles.push({ id: item.id, label: item.label, profileDir: join(this.profileRoot, item.id), createdAt: item.createdAt, updatedAt: item.updatedAt });
     }
     if (profiles.length > CODEX_MAX_PROFILES) throw new Error("Codex profile registry is invalid");
-    this.registry = { version: 1, profiles };
+    const audit = raw?.audit === undefined ? [] : Array.isArray(raw.audit) ? raw.audit.flatMap((entry) => {
+      const item = record(entry);
+      if (!item || item.action !== "profile_removed" || typeof item.profileId !== "string" || !PROFILE_ID.test(item.profileId) || !Number.isSafeInteger(item.at)) {
+        throw new Error("Codex profile registry audit is invalid");
+      }
+      return [{ action: "profile_removed" as const, profileId: item.profileId, at: item.at as number }];
+    }).slice(-MAX_PROFILE_AUDIT) : (() => { throw new Error("Codex profile registry audit is invalid"); })();
+    this.registry = { version: 1, profiles, audit };
+  }
+
+  private async reloadOwnershipForWrite(): Promise<void> {
+    let parsed: unknown;
+    try { parsed = JSON.parse(await readFile(this.ownershipPath, "utf8")); }
+    catch (error: any) { if (error?.code !== "ENOENT") throw new Error("Codex thread ownership registry is invalid"); }
+    const raw = record(parsed);
+    if (raw === undefined && parsed !== undefined || raw && (raw.version !== 1 || !record(raw.owners))) throw new Error("Codex thread ownership registry is invalid");
+    this.threadOwners.clear();
+    for (const [threadId, profileId] of Object.entries((raw?.owners || {}) as Record<string, unknown>)) {
+      if (/^[A-Za-z0-9_-]{1,160}$/.test(threadId) && typeof profileId === "string" && this.registry!.profiles.some((p) => p.id === profileId)) {
+        this.threadOwners.set(threadId, profileId);
+      }
+    }
   }
 
   private async mutateProfiles<T>(fn: (profiles: CodexProfile[]) => T | Promise<T>): Promise<T> {
@@ -337,6 +367,46 @@ export class CodexProfiles {
 
   async renameProfile(profileId: string, label: string): Promise<CodexProfile> { return this.updateProfile(profileId, { label }); }
 
+  /** Remove only the registry entry. The isolated CODEX_HOME is deliberately retained for recovery. */
+  async removeProfile(profileId: string): Promise<void> {
+    if (!PROFILE_ID.test(profileId)) throw new TypeError("Codex profile ID is invalid");
+    if (this.removingProfiles.has(profileId)) throw new Error("Codex profile removal is already in progress");
+    this.removingProfiles.add(profileId);
+    try {
+      await this.ready();
+      await this.withRegistryLock(async () => {
+        await this.reloadRegistryForWrite();
+        await this.reloadOwnershipForWrite();
+        const index = this.registry!.profiles.findIndex((profile) => profile.id === profileId);
+        if (index < 0) throw new Error("Codex profile not found");
+        if (this.profileOperations.get(profileId)) throw new Error("Codex profile has an in-flight operation");
+        if (this.logins.get(profileId)?.state === "pending") throw new Error("Codex profile has a pending device login");
+        if ([...this.threadOwners.values()].includes(profileId)) throw new Error("Codex profile still owns Codex threads");
+        const transport = this.transports.get(profileId);
+        if (transport) {
+          await transport.close();
+          this.transports.delete(profileId);
+        }
+        this.opening.delete(profileId);
+        this.snapshots.delete(profileId);
+        this.logins.delete(profileId);
+        this.registry!.profiles.splice(index, 1);
+        this.registry!.audit = [...(this.registry!.audit || []), { action: "profile_removed" as const, profileId, at: this.now() }].slice(-MAX_PROFILE_AUDIT);
+        await this.save();
+      });
+    } finally { this.removingProfiles.delete(profileId); }
+  }
+
+  private async withProfileOperation<T>(profileId: string, operation: () => Promise<T>): Promise<T> {
+    if (this.removingProfiles.has(profileId)) throw new Error("Codex profile is being removed");
+    this.profileOperations.set(profileId, (this.profileOperations.get(profileId) || 0) + 1);
+    try { return await operation(); }
+    finally {
+      const remaining = (this.profileOperations.get(profileId) || 1) - 1;
+      if (remaining) this.profileOperations.set(profileId, remaining); else this.profileOperations.delete(profileId);
+    }
+  }
+
   private profile(id: string): CodexProfile {
     const profile = this.registry?.profiles.find((entry) => entry.id === id);
     if (!profile) throw new Error("Codex profile not found"); return profile;
@@ -370,27 +440,32 @@ export class CodexProfiles {
   }
 
   async startDeviceLogin(profileId: string): Promise<DeviceLoginPrompt> {
-    if (this.logins.get(profileId)?.state === "pending") throw new Error("Codex device login is already pending for this profile");
-    const t = await this.transport(profileId);
-    let result: Record<string, unknown>;
-    try { result = await this.request(t, "account/login/start", { type: "chatgptDeviceCode" }); }
-    catch { throw new Error("Codex device login could not be started"); }
-    const url = safeString(result.verificationUrl, 256), userCode = safeString(result.userCode, 32), loginId = safeString(result.loginId, 128);
-    if (url !== "https://auth.openai.com/codex/device" || !userCode || !/^[A-Z0-9-]{4,16}$/.test(userCode) || !loginId) throw new Error("Codex returned an unsupported device login response");
-    this.logins.set(profileId, { loginId, state: "pending" });
-    return { verificationUrl: "https://auth.openai.com/codex/device", userCode };
+    return this.withProfileOperation(profileId, async () => {
+      if (this.logins.get(profileId)?.state === "pending") throw new Error("Codex device login is already pending for this profile");
+      const t = await this.transport(profileId);
+      let result: Record<string, unknown>;
+      try { result = await this.request(t, "account/login/start", { type: "chatgptDeviceCode" }); }
+      catch { throw new Error("Codex device login could not be started"); }
+      const url = safeString(result.verificationUrl, 256), userCode = safeString(result.userCode, 32), loginId = safeString(result.loginId, 128);
+      if (url !== "https://auth.openai.com/codex/device" || !userCode || !/^[A-Z0-9-]{4,16}$/.test(userCode) || !loginId) throw new Error("Codex returned an unsupported device login response");
+      this.logins.set(profileId, { loginId, state: "pending" });
+      return { verificationUrl: "https://auth.openai.com/codex/device", userCode };
+    });
   }
 
   getDeviceLoginState(profileId: string): DeviceLoginState | "not_started" { return this.logins.get(profileId)?.state ?? "not_started"; }
 
   async cancelDeviceLogin(profileId: string): Promise<void> {
-    const login = this.logins.get(profileId); if (!login || login.state !== "pending") return;
-    const t = await this.transport(profileId);
-    try { await this.request(t, "account/login/cancel", { loginId: login.loginId }); login.state = "cancelled"; }
-    catch { throw new Error("Codex device login could not be cancelled"); }
+    return this.withProfileOperation(profileId, async () => {
+      const login = this.logins.get(profileId); if (!login || login.state !== "pending") return;
+      const t = await this.transport(profileId);
+      try { await this.request(t, "account/login/cancel", { loginId: login.loginId }); login.state = "cancelled"; }
+      catch { throw new Error("Codex device login could not be cancelled"); }
+    });
   }
 
   async refreshProfile(profileId: string): Promise<CodexProfileSnapshot> {
+    return this.withProfileOperation(profileId, async () => {
     const t = await this.transport(profileId);
     let account: Record<string, unknown>, modelsResult: Record<string, unknown>, limitsResult: Record<string, unknown>;
     try {
@@ -428,19 +503,24 @@ export class CodexProfiles {
       profile.updatedAt = snapshot.capturedAt;
     });
     return structuredClone(snapshot);
+    });
   }
 
   /** Returns candidates only. Caller/operator must explicitly choose the profile; unknown quota is ineligible. */
   async eligibleProfiles(modelId: string, maxAgeMs = 5 * 60_000): Promise<string[]> {
     await this.ready(); const now = this.now();
-    return [...this.snapshots.values()].filter((s) => s.authMode === "chatgpt" && now - s.capturedAt <= maxAgeMs && s.models.some((m) => m.id === modelId) && s.rateWindows.length > 0 && s.rateWindows.every((w) => w.usedPercent !== undefined) && !s.rateWindows.some((w) => w.exhausted)).map((s) => s.profileId);
+    return [...this.snapshots.values()].filter((s) => !this.removingProfiles.has(s.profileId) && s.authMode === "chatgpt" && now - s.capturedAt <= maxAgeMs && s.models.some((m) => m.id === modelId) && s.rateWindows.length > 0 && s.rateWindows.every((w) => w.usedPercent !== undefined) && !s.rateWindows.some((w) => w.exhausted)).map((s) => s.profileId);
   }
 
   async bindThread(threadId: string, profileId: string): Promise<void> {
-    await this.ready(); this.profile(profileId);
+    await this.ready();
     if (!/^[A-Za-z0-9_-]{1,160}$/.test(threadId)) throw new Error("invalid Codex thread ID");
-    const owner = this.threadOwners.get(threadId); if (owner && owner !== profileId) throw new Error("Codex thread belongs to another profile");
-    this.threadOwners.set(threadId, profileId); await this.saveOwnership();
+    await this.withRegistryLock(async () => {
+      await this.reloadRegistryForWrite(); await this.reloadOwnershipForWrite();
+      this.profile(profileId);
+      const owner = this.threadOwners.get(threadId); if (owner && owner !== profileId) throw new Error("Codex thread belongs to another profile");
+      this.threadOwners.set(threadId, profileId); await this.saveOwnership();
+    });
   }
 
   async profileForThread(threadId: string): Promise<string | undefined> { await this.ready(); return this.threadOwners.get(threadId); }
@@ -451,13 +531,14 @@ export class CodexProfiles {
   }
 }
 
-export function renderCodexProfilesPage(profiles: CodexProfile[], snapshots: CodexProfileSnapshot[] = []): string {
+export function renderCodexProfilesPage(profiles: CodexProfile[], snapshots: CodexProfileSnapshot[] = [], base = ""): string {
+  const action = `${base.replace(/\/$/, "")}/admin/codex/action`;
   const byId = new Map(snapshots.map((s) => [s.profileId, s]));
   const rows = profiles.map((p) => {
     const snapshot = byId.get(p.id);
     const status = snapshot?.authMode === "chatgpt" ? `Connected${snapshot.planType ? ` · ${htmlEscape(snapshot.planType)}` : ""}` : "Not verified";
     const models = snapshot?.models.map((m) => htmlEscape(m.id)).join(", ") || "No model snapshot";
-    return `<tr><th scope="row">${htmlEscape(p.label)}</th><td>${status}</td><td>${models}</td></tr>`;
+    return `<tr><th scope="row">${htmlEscape(p.label)}</th><td>${status}</td><td>${models}</td><td><form method="post" action="${htmlEscape(action)}"><input type="hidden" name="id" value="${htmlEscape(p.id)}"><label>Rename profile<input name="label" value="${htmlEscape(p.label)}" required maxlength="80"></label><button name="action" value="rename">Save name</button> <button class="secondary" name="action" value="remove">Remove profile</button></form></td></tr>`;
   }).join("");
-  return `<section class="card"><h1>Codex profiles</h1><p>Each profile uses a separate CODEX_HOME. Sign-in requires the user to complete Codex device verification.</p><table><thead><tr><th>Profile</th><th>Account</th><th>Available models</th></tr></thead><tbody>${rows || '<tr><td colspan="3">No profiles registered</td></tr>'}</tbody></table></section>`;
+  return `<section class="card"><h1>Codex profiles</h1><p>Each profile uses a separate CODEX_HOME. Sign-in requires the user to complete Codex device verification. Removing a profile removes its registry entry and leaves its private CODEX_HOME on disk.</p><table><thead><tr><th>Profile</th><th>Account</th><th>Available models</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No profiles registered</td></tr>'}</tbody></table></section>`;
 }
