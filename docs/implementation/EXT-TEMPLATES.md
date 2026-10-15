@@ -1,0 +1,11 @@
+# Fixed OpenAI-compatible inference presets
+
+Verified 2026-10-16 against official documentation: OpenAI Chat Completions reference at https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create/ and OpenRouter chat completion reference at https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion (both returned HTTP 200). Their fixed API origins are `https://api.openai.com/v1` and `https://openrouter.ai/api/v1`; requests use `/chat/completions`.
+
+`InferenceProviderStore` in `src/inference-providers.ts` provides encrypted add/list/update/remove for OpenAI and OpenRouter account credentials. Views contain labels, provider, enabled state, and allowed models but never keys. Persistence uses the StateStore lock, the existing master-key encryption helper, atomic file replacement, and mode 0600. A model is eligible only when explicitly listed; an empty allowlist denies all inference.
+
+`OpenAICompatibleInferenceAdapter.complete({ provider, model, body })` routes only to the fixed preset origin, selects eligible credentials with fair round-robin and a per-account in-flight cap, bounds request/response bytes and timeout, rejects redirects, and makes one provider call without retrying ambiguous outcomes. 402/429 responses cool down the selected account. The adapter accepts JSON chat-completion requests only; `stream: true` and non-JSON provider responses are unsupported. It does not turn consumer subscriptions into provider credentials and has no arbitrary URL option.
+
+`createInferenceProviderAdminRouter(store, sessions)` exports the `/admin/inference` page router. Root must mount it under the configured base path. It uses the existing admin session epoch, synchronizer CSRF token, URL-encoded body cap, and escaped shared page helpers. The page supports account create, update, and removal; saved API tokens are never rendered. Root still owns server mounting and choosing where to expose an inference consumer route.
+
+Focused tests use isolated temporary `HOME` and `TOKEN2OAUTH_CONFIG_DIR`, synthetic credentials, and injected fetch; no live provider calls are made. `npm run build`, `node --test test/inference-providers.test.mjs test/inference-provider-admin.test.mjs` are the intended checks; the full suite is not part of this bounded assignment.
