@@ -32,9 +32,21 @@ test("applies available time/account filters and marks missing request dimension
 
   const unsupported = projectAnalytics({ gatewayEvents: events }, { filters: { provider: "provider-a", model: "model-a", client: "client-a", jobId: "job-a" } });
   assert.equal(unsupported.requests.count.availability, "unavailable");
-  assert.deepEqual(unsupported.filters.unsupportedForRequests, ["provider", "model", "client", "jobId"]);
+  assert.deepEqual(unsupported.filters.unsupportedForRequests, ["provider", "model", "jobId"]);
   assert.equal(unsupported.requests.count.value, null);
-  assert.match(unsupported.requests.count.reason, /no provider, model, client, jobId association/);
+  assert.match(unsupported.requests.count.reason, /no provider, model, jobId association/);
+});
+
+test("filters requests by recorded client and counts unknown-client records excluded", () => {
+  const result = projectAnalytics({ gatewayEvents: [
+    gateway({ clientId: "client-a", latencyMs: 8 }),
+    gateway({ clientId: "client-b", outcome: "error", latencyMs: 80 }),
+    gateway({ clientId: undefined, latencyMs: 900 }),
+  ] }, { filters: { client: "client-a" } });
+  assert.equal(result.requests.count.value, 1);
+  assert.equal(result.requests.durationP50.value, 8);
+  assert.equal(result.filters.excludedUnknownClientRecords, 1);
+  assert.deepEqual(result.filters.unsupportedForRequests, []);
 });
 
 test("uses actual supervisor delivery outcomes and leaves unsupported worker intervals unavailable", () => {

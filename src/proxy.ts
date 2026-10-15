@@ -180,6 +180,7 @@ export class McpProxy {
         kind: "request",
         method: described.method,
         tool: described.tool,
+        clientId: claims?.client_id,
         accountId: input.accountId,
         status: input.status,
         latencyMs: Date.now() - startedAt,
@@ -355,7 +356,7 @@ export class McpProxy {
           upstream.ok && observeTasks && upstream.body && req.method !== "HEAD" &&
           !(wantsToolsList && req.method !== "HEAD"),
         );
-        if (!observeProtocolResponse) this.recordAttempt(account.id, described, upstream.status, attemptStarted);
+        if (!observeProtocolResponse) this.recordAttempt(account.id, described, upstream.status, attemptStarted, undefined, claims?.client_id);
         const upstreamSession = upstream.headers.get("mcp-session-id") || undefined;
 
         if (upstream.ok) {
@@ -411,7 +412,7 @@ export class McpProxy {
               }
               healthObserved = true;
               observedProtocolErrorClass = errorClass;
-              this.recordAttempt(account.id, described, upstream.status, attemptStarted, errorClass);
+              this.recordAttempt(account.id, described, upstream.status, attemptStarted, errorClass, claims?.client_id);
             },
           )] : [];
           // pipeline() destroys every stage on error, so an upstream reset or
@@ -423,7 +424,7 @@ export class McpProxy {
               // HTTP-success health accounting for an interrupted stream.
               healthObserved = true;
               void this.pool.success(account.id, upstream.status, affinityKey).catch(() => undefined);
-              this.recordAttempt(account.id, described, upstream.status, attemptStarted, "stream-interrupted");
+              this.recordAttempt(account.id, described, upstream.status, attemptStarted, "stream-interrupted", claims?.client_id);
             }
             finished(error && error.code !== "ERR_STREAM_PREMATURE_CLOSE" ? error : undefined);
           });
@@ -461,7 +462,7 @@ export class McpProxy {
         }
         const timedOut = error?.name === "TimeoutError";
         const code = error?.cause?.code || error?.code;
-        this.recordAttempt(account.id, described, undefined, attemptStarted, timedOut ? "timeout" : "transport");
+        this.recordAttempt(account.id, described, undefined, attemptStarted, timedOut ? "timeout" : "transport", claims?.client_id);
         lastStatus = timedOut ? 504 : 502;
         lastHeaders = undefined;
         lastBody = JSON.stringify({
@@ -505,11 +506,13 @@ export class McpProxy {
     status: number | undefined,
     startedAt: number,
     errorClass?: string,
+    clientId?: string,
   ): void {
     this.telemetry?.recordGateway({
       kind: "attempt",
       method: described.method,
       tool: described.tool,
+      clientId,
       accountId,
       status,
       latencyMs: Date.now() - startedAt,

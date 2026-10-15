@@ -34,6 +34,11 @@ test("admin analytics requires an admin session and labels global metrics withou
   assert.equal(body.projection.requests.count.value, 1);
   assert.equal(body.projection.requests.durationP50.value, 10);
   assert.equal(body.projection.filters.requested.accountId, "acct-a");
+  built.telemetry.recordGateway({ kind: "request", method: "tools/call", clientId: "client-a", status: 200, latencyMs: 12 });
+  built.telemetry.recordGateway({ kind: "request", method: "tools/call", status: 200, latencyMs: 13 });
+  const clientFiltered = await (await fetch(base + "/admin/api/v1/analytics?client=client-a", { headers: { cookie: `t2o_admin=${session}` } })).json();
+  assert.equal(clientFiltered.projection.requests.count.value, 1);
+  assert.equal(clientFiltered.projection.filters.excludedUnknownClientRecords, 3, "records without trusted client attribution are explicitly excluded");
   const unsupported = await (await fetch(base + "/admin/api/v1/analytics?provider=exa", { headers: { cookie: `t2o_admin=${session}` } })).json();
   assert.equal(unsupported.projection.requests.count.availability, "unavailable");
   assert.deepEqual(unsupported.projection.filters.unsupportedForRequests, ["provider"]);

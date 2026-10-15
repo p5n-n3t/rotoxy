@@ -247,6 +247,8 @@ export interface GatewayEventInput {
   at?: number | Date | string;
   method?: string;
   tool?: string;
+  /** Verified OAuth access-token client_id; never derived from request content. */
+  clientId?: string;
   accountId?: string;
   pool?: string;
   requestId?: string;
@@ -268,6 +270,7 @@ export interface GatewayEvent {
   at: number;
   method?: string;
   tool?: string;
+  clientId?: string;
   accountId?: string;
   pool?: string;
   requestId?: string;
@@ -408,8 +411,8 @@ export interface AggregateStats {
   latency: LatencyStats;
 }
 
-export type Dimension = "kind" | "method" | "tool" | "accountId" | "pool";
-export const DIMENSIONS: readonly Dimension[] = ["kind", "method", "tool", "accountId", "pool"];
+export type Dimension = "kind" | "method" | "tool" | "clientId" | "accountId" | "pool";
+export const DIMENSIONS: readonly Dimension[] = ["kind", "method", "tool", "clientId", "accountId", "pool"];
 export const OTHER_BUCKET = "(other)";
 export const UNSET_BUCKET = "(none)";
 
@@ -648,6 +651,7 @@ export class TelemetryRecorder {
       at: toEpochMs(input.at, this.now()),
       method: cleanDimension(input.method),
       tool: cleanDimension(input.tool),
+      clientId: cleanDimension(input.clientId, 128)?.slice(0, 128),
       accountId: cleanDimension(input.accountId),
       pool: cleanDimension(input.pool),
       requestId: cleanDimension(input.requestId, 64),

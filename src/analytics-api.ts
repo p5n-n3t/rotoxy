@@ -12,9 +12,9 @@ function queryNumber(value: unknown): number | undefined {
   return parsed;
 }
 
-function dimension(value: unknown): string | undefined {
+function dimension(value: unknown, maxLength = 160): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "string" || value.length > 160 || !value.trim()) throw new RangeError("invalid dimension filter");
+  if (typeof value !== "string" || value.length > maxLength || !value.trim()) throw new RangeError("invalid dimension filter");
   return value.trim();
 }
 
@@ -28,7 +28,7 @@ export function createAnalyticsApiRouter(store: StateStore, sessions: AdminSessi
       const filters: AnalyticsFilters = {
         from: queryNumber(req.query.from), to: queryNumber(req.query.to),
         provider: dimension(req.query.provider), accountId: dimension(req.query.accountId),
-        model: dimension(req.query.model), client: dimension(req.query.client), jobId: dimension(req.query.jobId),
+        model: dimension(req.query.model), client: dimension(req.query.client, 128), jobId: dimension(req.query.jobId),
       };
       const projection = projectAnalytics({ gatewayEvents: telemetry.recent({ limit: 2000 }), providerUsage: telemetry.latestProviderUsage() }, { filters });
       res.setHeader("Cache-Control", "no-store");

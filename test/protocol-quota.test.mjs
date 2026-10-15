@@ -39,7 +39,7 @@ function mockUpstream() {
   return { server, calls, responses };
 }
 
-async function setup() {
+async function setup({ clientId = "trusted-client" } = {}) {
   const previousConfigDir = process.env.TOKEN2OAUTH_CONFIG_DIR;
   const dir = await mkdtemp(join(tmpdir(), "t2o-protocol-quota-"));
   process.env.TOKEN2OAUTH_CONFIG_DIR = dir;
@@ -61,7 +61,7 @@ async function setup() {
   const proxy = new McpProxy(store, pool, telemetry);
   const app = express();
   app.all("/mcp", express.raw({ type: "*/*", limit: "2mb" }), (req, res, next) => {
-    res.locals.oauthClaims = { sub: "test-client" };
+    res.locals.oauthClaims = { sub: "test-client", client_id: clientId };
     void proxy.handler(req, res, next);
   });
   const gateway = createHttpServer(app);
@@ -79,14 +79,35 @@ async function setup() {
   };
 }
 
-async function call(base, name, id, session) {
+async function call(base, name, id, session, spoofClient = false) {
   const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
   if (session) headers["mcp-session-id"] = session;
+  if (spoofClient) headers["x-oauth-client-id"] = "header-spoof";
   return fetch(base + "/mcp", {
     method: "POST", headers,
-    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name } }),
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name }, ...(spoofClient ? { clientId: "body-spoof" } : {}) }),
   });
 }
+
+test("MCP telemetry attributes requests and attempts only to verified OAuth client claims", async () => {
+  const env = await setup({ clientId: "verified-client" });
+  try {
+    const response = await call(env.base, "ordinary", 71, undefined, true);
+    assert.equal(response.status, 200);
+    await response.text();
+    const events = env.telemetry.recent({ limit: 10 });
+    const request = events.find((event) => event.kind === "request");
+    const attempt = events.find((event) => event.kind === "attempt");
+    assert.ok(request, JSON.stringify(events));
+    assert.ok(attempt, JSON.stringify(events));
+    assert.equal(request.clientId, "verified-client");
+    assert.equal(attempt.clientId, "verified-client");
+    assert.notEqual(request.clientId, "body-spoof");
+    assert.notEqual(request.clientId, "header-spoof");
+  } finally {
+    await env.teardown();
+  }
+});
 
 test("HTTP 200 protocol quota errors cool the owner without replaying or rewriting the response", async () => {
   const env = await setup();
