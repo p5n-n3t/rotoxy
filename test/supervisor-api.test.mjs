@@ -168,6 +168,27 @@ test("supervision inbox requires admin auth, bounds pages, and CSRF-protects pro
   assert.deepEqual(acks, [["project-s", 7]]);
 });
 
+test("compact project summary requires admin auth, bounds query/output, and delegates only its project scope", async (t) => {
+  const reads = [];
+  const summaryWorkers = Array.from({ length: 250 }, (_, index) => ({ id: `worker-${index}`, state: "idle" }));
+  const f = await fixture(t, { callTool: async () => ({}), readCompactSummary: async (...args) => {
+    reads.push(args);
+    return { project: args[0], workers: summaryWorkers, events: [{ error: "api_key=do-not-return" }], cursor: args[1], hasMore: false };
+  } });
+  const url = f.base + "/admin/api/v1/supervisor/project-s/summary";
+  assert.equal((await fetch(url)).status, 401);
+  assert.equal((await fetch(url + "?after=-1", { headers: headers(f.cookie) })).status, 400);
+  assert.equal((await fetch(url + "?limit=21", { headers: headers(f.cookie) })).status, 400);
+  const response = await fetch(url + "?after=12&limit=4", { headers: headers(f.cookie) });
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(reads, [["project-s", 12, 4]]);
+  assert.equal(payload.project, "project-s");
+  assert.ok(payload.workers.length <= 200, "redactor caps arrays and marks omitted entries");
+  assert.ok(Buffer.byteLength(JSON.stringify(payload)) < 512 * 1024);
+  assert.doesNotMatch(JSON.stringify(payload), /do-not-return/);
+});
+
 test("Supervisor entry requires admin auth and lists only safe configured project links", async (t) => {
   const f = await fixture(t, { callTool: async () => ({}), listProjects: () => ["token2oauth", "<script>bad</script>"] });
   const denied = await fetch(f.base + "/admin/supervisor", { redirect: "manual" });

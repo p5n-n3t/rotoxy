@@ -31,6 +31,7 @@ export interface SupervisorBackend {
   readAdmin?(projectId: string): Promise<unknown>;
   controlAdmin?(input: SupervisorControlInput): Promise<unknown>;
   readSupervision?(projectId: string, after: number, limit: number): Promise<unknown>;
+  readCompactSummary?(projectId: string, after: number, limit: number): Promise<unknown>;
   acknowledgeSupervision?(projectId: string, eventId: number): Promise<unknown>;
   /** Admin-only one-shot message to a configured existing worker session. */
   guidanceAdmin?(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult>;
@@ -220,6 +221,23 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
     try {
       const result = safeAdminSnapshot(await backend.readSupervision(projectId, Number(afterRaw), Number(limitRaw)));
       if (!result) return res.status(502).json({ error: "snapshot_unavailable" });
+      return res.json(result.value);
+    } catch { return res.status(404).json({ error: "project_unavailable" }); }
+  });
+
+  router.get("/admin/api/v1/supervisor/:projectId/summary", requireAdmin, async (req, res) => {
+    const projectId = req.params.projectId;
+    const afterRaw = queryValue(req, "after", 20) || "0";
+    const limitRaw = queryValue(req, "limit", 3) || "20";
+    const after = Number(afterRaw);
+    const limit = Number(limitRaw);
+    if (typeof projectId !== "string" || !projectId || projectId.length > 200) return res.status(404).json({ error: "project_unavailable" });
+    if (!/^(?:0|[1-9][0-9]{0,15})$/.test(afterRaw) || !Number.isSafeInteger(after) ||
+        !/^(?:[1-9]|1[0-9]|20)$/.test(limitRaw)) return res.status(400).json({ error: "invalid_summary_query" });
+    if (!backend?.readCompactSummary) return res.status(503).json({ error: "supervisor_unavailable" });
+    try {
+      const result = safeAdminSnapshot(await backend.readCompactSummary(projectId, after, limit));
+      if (!result) return res.status(502).json({ error: "summary_unavailable" });
       return res.json(result.value);
     } catch { return res.status(404).json({ error: "project_unavailable" }); }
   });

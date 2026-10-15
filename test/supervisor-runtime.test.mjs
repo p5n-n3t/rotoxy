@@ -200,6 +200,49 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
   assert.equal("quota" in accountA, false);
 });
 
+test("compact summary derives owners from configured project, validates bounds, and caps the IPC result", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-runtime-summary-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const runtime = new SupervisorRuntime(config, { configPath: join(dir, "unused.json"), configDir: dir,
+    supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"),
+    recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"),
+    oracleDbPath: join(dir, "oracle.sqlite"), store });
+  const calls = [];
+  runtime.guidanceCommand = async (...args) => {
+    calls.push(args);
+    return { project: args[2][1], workers: [], events: [], cursor: Number(args[2][3]), hasMore: false };
+  };
+  assert.deepEqual(await runtime.readCompactSummary("project-a", 12, 4),
+    { project: "project-a", workers: [], events: [], cursor: 12, hasMore: false });
+  assert.deepEqual(calls[0], ["compact-summary", { owners: ["oauth-client:client-a", "oauth-client:client-b"] },
+    ["--project", "project-a", "--after", "12", "--limit", "4"]]);
+  await runtime.readCompactSummary("project-b", 0, 20);
+  assert.deepEqual(calls[1][1], { owners: ["oauth-client:client-a"] }, "owner list comes from the selected project's private config");
+  await assert.rejects(runtime.readCompactSummary("not-configured", 0, 20), /invalid compact summary/);
+  await assert.rejects(runtime.readCompactSummary("project-a", -1, 20), /invalid compact summary/);
+  await assert.rejects(runtime.readCompactSummary("project-a", 0, 21), /invalid compact summary/);
+  runtime.guidanceCommand = async () => ({ project: "project-a", oversized: "x".repeat(520 * 1024) });
+  await assert.rejects(runtime.readCompactSummary("project-a", 0, 20), /supervisor response exceeds configured bounds/);
+});
+
+test("compact summary runs the existing Python CLI and filters workers to configured project owners", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-runtime-summary-cli-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const runtime = new SupervisorRuntime(config, { configPath: join(dir, "unused.json"), configDir: dir,
+    supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"),
+    recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"),
+    oracleDbPath: join(dir, "oracle.sqlite"), store });
+  await runtime.guidanceCommand("sync-project", { project: "project-a", workers: [
+    { worker: "worker-a", owner: "oauth-client:client-a", account: "acct-a", session: "session-a", model: "gpt-6-luna" },
+    { worker: "worker-b", owner: "oauth-client:client-b", account: "acct-b", session: "session-b", model: "gpt-6-luna" },
+  ] });
+  const projectA = await runtime.readCompactSummary("project-a");
+  assert.equal(projectA.project, "project-a");
+  assert.deepEqual(projectA.workers.map((worker) => worker.id), ["worker-a", "worker-b"]);
+  const projectB = await runtime.readCompactSummary("project-b");
+  assert.deepEqual(projectB.workers, [], "project filter excludes another project even when the owner overlaps");
+});
+
 test("admin project controls use configured project scope and revision-fenced durable bridge route", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "t2o-runtime-controls-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -607,6 +607,17 @@ export class SupervisorRuntime implements SupervisorBackend {
     if (object(value)) value = { ...value, recovery };
     return boundedJson(object(value) ? { ...value, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 }) } } : value);
   }
+  async readCompactSummary(projectId: string, after = 0, limit = 20): Promise<unknown> {
+    const project = this.config.projects.find((item) => item.projectId === projectId);
+    if (!project || !project.clientIds.length || !Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 20) {
+      throw new JobInputError("invalid compact summary request");
+    }
+    const owners = project.clientIds.map((clientId) => `oauth-client:${clientId}`);
+    const value = await this.guidanceCommand("compact-summary", { owners }, [
+      "--project", project.projectId, "--after", String(after), "--limit", String(limit),
+    ]);
+    return boundedJson(value, 512 * 1024);
+  }
   async acknowledgeSupervision(projectId: string, eventId: number): Promise<unknown> {
     const project = this.config.projects.find((item) => item.projectId === projectId);
     if (!project || !Number.isSafeInteger(eventId) || eventId < 1) throw new JobInputError("invalid supervision acknowledgment");
