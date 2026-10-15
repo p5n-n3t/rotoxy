@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { StateStore } from "./store.js";
+import { ResourceRoutingRulesStore } from "./resource-routing.js";
 import { CloudflareAIAdapter, CloudflareAIError, CloudflareCredentialStore } from "./cloudflare-ai.js";
 import { ModelCredentialStore, type ModelCredentialView } from "./model-credentials.js";
 
@@ -133,6 +134,7 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
   const router = express.Router();
   const modelCredentials = new ModelCredentialStore(store);
   const cloudflareCredentials = new CloudflareCredentialStore(store);
+  const routingRules = new ResourceRoutingRulesStore(store);
   const cloudflare = options.cloudflareAdapter ?? new CloudflareAIAdapter(cloudflareCredentials);
   const ollamaFetch = options.ollamaFetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 15_000;
@@ -142,22 +144,24 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
   const catalogFlights = new Map<string, Promise<CatalogResult>>();
 
   const getCatalogVersion = async (): Promise<CatalogVersion> => {
-    const [modelAccounts, cloudflareAccounts, modelFileVersion, cloudflareFileVersion] = await Promise.all([
+    const [modelAccounts, cloudflareAccounts, modelFileVersion, cloudflareFileVersion, rules, rulesFileVersion] = await Promise.all([
       modelCredentials.listCredentials(), cloudflareCredentials.listCredentials(),
       fileVersion(join(store.dir, "model-credentials.json")), fileVersion(join(store.dir, "cloudflare-ai-credentials.json")),
+      routingRules.read(), fileVersion(routingRules.path),
     ]);
     // Use public account metadata and file inode/timestamps only. Never read or hash credential contents.
     const metadata = {
       modelAccounts: modelAccounts.map(({ id, enabled, createdAt, cooldownUntil }) => ({ id, enabled, createdAt, cooldownUntil })).sort((a, b) => a.id.localeCompare(b.id)),
       cloudflareAccounts: cloudflareAccounts.map(({ id, enabled, createdAt, cooldownUntil, allowedModels }) => ({ id, enabled, createdAt, cooldownUntil, allowedModels: [...allowedModels].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
-      files: [modelFileVersion, cloudflareFileVersion],
+      files: [modelFileVersion, cloudflareFileVersion, rulesFileVersion],
+      routing: rules.resources,
     };
     const digest = createHash("sha256").update(JSON.stringify(metadata)).digest("hex");
     return {
       digest,
-      cloudflareModels: cloudflareAccounts.filter(account => account.enabled).flatMap(account => account.allowedModels.map(model => `cloudflare/${model}`)),
+      cloudflareModels: cloudflareAccounts.filter(account => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now()).flatMap(account => account.allowedModels.map(model => `cloudflare/${model}`)),
       ollamaConfigured: modelAccounts.length > 0,
-      ollamaAccounts: modelAccounts.filter(account => account.enabled && (account.cooldownUntil ?? 0) <= now()),
+      ollamaAccounts: modelAccounts.filter(account => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now()),
     };
   };
 
@@ -253,14 +257,20 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
     parseBody(req, res, (parseError?: unknown) => {
       if (parseError) return error(res, 413, "request_too_large");
       void (async () => {
-        if (!Buffer.isBuffer(req.body) || req.body.length === 0) return next();
+        const token = bearer(req);
+        if (!token || !await modelCredentials.authorizeToken(token, "model:invoke", now())) {
+          res.setHeader("WWW-Authenticate", 'Bearer scope="model:invoke"');
+          return error(res, 401, "unauthorized");
+        }
+
+        if (!Buffer.isBuffer(req.body) || req.body.length === 0) return error(res, 400, "invalid_request");
         let body: Record<string, unknown>;
         try {
           const parsed: unknown = JSON.parse(req.body.toString("utf8"));
-          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return next();
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return error(res, 400, "invalid_request");
           body = parsed as Record<string, unknown>;
-        } catch { return next(); }
-        if (typeof body.model !== "string" || body.model.length > 240) return next();
+        } catch { return error(res, 400, "invalid_request"); }
+        if (typeof body.model !== "string" || !body.model || body.model.length > 240) return error(res, 400, "invalid_model");
         if (body.model.startsWith("ollama/")) {
           const model = body.model.slice("ollama/".length);
           if (!model || /[\r\n\0]/.test(model)) return error(res, 400, "invalid_model");
@@ -270,11 +280,6 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
         }
         if (!body.model.startsWith("cloudflare/")) return next();
 
-        const token = bearer(req);
-        if (!token || !await modelCredentials.authorizeToken(token, "model:invoke", now())) {
-          res.setHeader("WWW-Authenticate", 'Bearer scope="model:invoke"');
-          return error(res, 401, "unauthorized");
-        }
         if (Object.keys(body).some(key => !["model", "messages", "max_tokens", "temperature", "stream", "stream_options"].includes(key))) return error(res, 400, "unsupported_parameter");
         if (body.stream !== undefined && typeof body.stream !== "boolean") return error(res, 400, "invalid_request");
         const streaming = body.stream === true;

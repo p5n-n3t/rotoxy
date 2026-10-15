@@ -200,6 +200,8 @@ test("Ollama namespaced and raw models pass once to the existing gateway; Cloudf
   let calls = 0;
   const cloudflareAdapter = { run: async () => { calls++; throw new CloudflareAIError("upstream_ambiguous"); } };
   const { api, base, forwarded } = await fixture(t, { cloudflareAdapter });
+  assert.equal((await fetch(`${base}/v1/chat/completions`, {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({model:"ollama/qwen3:8b",messages:[{role:"user",content:"hi"}]})})).status,401);
+  assert.equal(forwarded.length,0);
   const invoke = await api.modelCredentials.issueToken({ scopes: ["model:invoke"], expiresInSeconds: 3600 });
   const send = async model => fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${invoke.token}`, "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }] }) });
   assert.equal((await (await send("ollama/qwen3:8b")).json()).passedToLegacyGateway, true);
