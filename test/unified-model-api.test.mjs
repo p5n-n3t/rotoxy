@@ -119,8 +119,16 @@ test("Ollama catalog applies each account's exact routing allowlist; absent allo
     const model = init.headers.authorization.endsWith("account-a-token") ? "qwen3:8b" : "raw/legacy-model";
     return Response.json({ object: "list", data: [{ id: model }, { id: "not-an-exact-match" }] });
   } });
-  const accountA = await api.modelCredentials.addCredential("account A", "synthetic-account-a-token");
-  const accountB = await api.modelCredentials.addCredential("account B", "synthetic-account-b-token");
+  const addRoutableAccount = async (label, token) => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const account = await api.modelCredentials.addCredential(label, token);
+      if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(account.id)) return account;
+      await api.modelCredentials.removeCredential(account.id);
+    }
+    throw new Error("could not create a resource-rule-compatible test account id");
+  };
+  const accountA = await addRoutableAccount("account A", "synthetic-account-a-token");
+  const accountB = await addRoutableAccount("account B", "synthetic-account-b-token");
   const rules = new ResourceRoutingRulesStore(store);
   await rules.replace({ version: 1, resources: {
     [accountA.id]: { allowedModels: ["qwen3:8b"], enabled: true, weight: 1 },
