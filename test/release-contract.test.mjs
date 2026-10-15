@@ -20,7 +20,9 @@ test("published tarball includes install, runtime, and rollback guidance", async
   const metadata = (Array.isArray(packed) ? packed : [packed, ...Object.values(packed ?? {})])
     .find((row) => row && Array.isArray(row.files));
   assert.ok(metadata, "npm pack must provide a file inventory");
-  assert.equal(manifest.bin.token2oauth, "dist/cli.js");
+  assert.equal(manifest.name, "rotoxy");
+  assert.equal(manifest.bin["rotoxy-cli"], "dist/cli.js");
+  assert.equal(manifest.bin.rotoxy, "scripts/rotoxy-control.mjs");
   const files = new Set(metadata.files.map((file) => file.path));
   for (const required of [
     "install.sh", "install-rotoxy.sh", "scripts/rotoxy-control.mjs", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service", "uninstall.sh", "supervisor/install.sh",

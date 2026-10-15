@@ -8,7 +8,7 @@ import test from "node:test";
 test("npm pack includes the embedded Snooze runtime and excludes development payloads", () => {
   const raw = execFileSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], { encoding: "utf8" });
   const parsed = JSON.parse(raw);
-  const archive = Array.isArray(parsed) ? parsed[0] : parsed.token2oauth;
+  const archive = Array.isArray(parsed) ? parsed[0] : parsed.rotoxy;
   assert.ok(archive && Array.isArray(archive.files), "npm returned no package file inventory");
   const files = new Set(archive.files.map((file) => file.path));
   for (const required of [

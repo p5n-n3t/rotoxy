@@ -1,12 +1,12 @@
 {
-  "name": "token2oauth",
+  "name": "rotoxy",
   "version": "0.2.0",
   "description": "ROTOXY: pooled AI gateways, distributed jobs, persistent supervision and private workers.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "token2oauth": "dist/cli.js",
-    "rotoxy": "scripts/rotoxy-control.mjs"
+    "rotoxy": "scripts/rotoxy-control.mjs",
+    "rotoxy-cli": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -65,5 +65,9 @@
     "@types/node": "^24.0.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/p5n-n3t/rotoxy.git"
   }
 }
