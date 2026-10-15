@@ -57,7 +57,7 @@ export interface AnalyticsBucket {
 export interface AnalyticsProjection {
   source: "token2oauth-telemetry-and-supervisor";
   window: { from: number | null; to: number | null; gatewayEventsConsidered: number; gatewaySourceProvided: boolean; recordsCapped: boolean };
-  filters: { requested: AnalyticsFilters; unsupportedForRequests: string[] };
+  filters: { requested: AnalyticsFilters; unsupportedForRequests: string[]; excludedUnknownClientRecords: number };
   requests: {
     count: AvailableMetric<number>;
     successCount: AvailableMetric<number>;
@@ -83,7 +83,7 @@ export interface AnalyticsProjection {
     provider: "job records only; not attached to gateway requests";
     account: "gateway accountId, provider-usage accountId, job/task account";
     model: "provider-usage and task records only; not attached to gateway requests";
-    client: "unavailable in current gateway/job snapshot";
+    client: "verified OAuth client_id on gateway events; unknown client events are excluded when filtering; not attached to supervisor jobs/tasks";
     job: "supervisor job records only; not attached to gateway requests";
   };
 }
@@ -131,7 +131,7 @@ function cap<T>(items: readonly T[], max: number): { items: T[]; capped: boolean
 }
 
 function unsupportedRequestFilters(filters: AnalyticsFilters): string[] {
-  return (["provider", "model", "client", "jobId"] as const).filter((key) => filters[key] !== undefined);
+  return (["provider", "model", "jobId"] as const).filter((key) => filters[key] !== undefined);
 }
 
 /** Pure, bounded projection. It never inspects prompt/body/message fields. */
@@ -151,8 +151,11 @@ export function projectAnalytics(input: AnalyticsInput, options: AnalyticsOption
   const boundedSupervisor = cap(input.supervisorEvents ?? [], maxRecords);
   const capped = [boundedGateway, boundedUsage, boundedJobs, boundedTasks, boundedSupervisor].some((set) => set.capped);
 
-  const requests = boundedGateway.items.filter((event) => event.kind === "request" &&
-    inWindow(timestamp(event.at), filters) && (filters.accountId === undefined || event.accountId === filters.accountId));
+  const inRequestWindow = (event: GatewayEvent) => event.kind === "request" && inWindow(timestamp(event.at), filters) &&
+    (filters.accountId === undefined || event.accountId === filters.accountId);
+  const requestCandidates = boundedGateway.items.filter(inRequestWindow);
+  const excludedUnknownClientRecords = filters.client === undefined ? 0 : requestCandidates.filter((event) => !validDimension(event.clientId)).length;
+  const requests = requestCandidates.filter((event) => filters.client === undefined || event.clientId === filters.client);
   const unsupported = unsupportedRequestFilters(filters);
   const filterReason = unsupported.length ? `Gateway requests have no ${unsupported.join(", ")} association in the current telemetry schema.` : undefined;
   const requestCount = requests.length;
@@ -276,7 +279,7 @@ export function projectAnalytics(input: AnalyticsInput, options: AnalyticsOption
   return {
     source: "token2oauth-telemetry-and-supervisor",
     window: { from, to, gatewayEventsConsidered: boundedGateway.items.length, gatewaySourceProvided: input.gatewayEvents !== undefined, recordsCapped: capped },
-    filters: { requested: { ...filters }, unsupportedForRequests: unsupported },
+    filters: { requested: { ...filters }, unsupportedForRequests: unsupported, excludedUnknownClientRecords },
     requests: {
       count: requestMetric(requestCount, "requests"), successCount: requestMetric(successes, "requests"), errorCount: requestMetric(errors, "requests"),
       durationP50: latencyMetric(0.5), durationP95: latencyMetric(0.95), durationP99: latencyMetric(0.99),
@@ -289,7 +292,7 @@ export function projectAnalytics(input: AnalyticsInput, options: AnalyticsOption
       provider: "job records only; not attached to gateway requests",
       account: "gateway accountId, provider-usage accountId, job/task account",
       model: "provider-usage and task records only; not attached to gateway requests",
-      client: "unavailable in current gateway/job snapshot",
+      client: "verified OAuth client_id on gateway events; unknown client events are excluded when filtering; not attached to supervisor jobs/tasks",
       job: "supervisor job records only; not attached to gateway requests",
     },
   };

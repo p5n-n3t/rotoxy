@@ -52,6 +52,14 @@ test("recorder memory stays bounded under heavy traffic", () => {
   assert.equal(rec.summary().window.droppedFromRing, 9_990);
 });
 
+test("gateway client attribution is a bounded optional dimension", () => {
+  const rec = new TelemetryRecorder({ capacity: 2, now: clock() });
+  const event = rec.recordGateway({ kind: "request", status: 200, clientId: ` ${"c".repeat(200)} ` });
+  assert.equal(event.clientId.length, 128);
+  assert.equal(rec.summary().by.clientId[event.clientId].count, 1);
+  assert.equal("clientId" in rec.recordGateway({ kind: "request", status: 200 }), false);
+});
+
 // --- redaction -------------------------------------------------------------
 
 test("secret keys are recognized without catching usage counters", () => {
