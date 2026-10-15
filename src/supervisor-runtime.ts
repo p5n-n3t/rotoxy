@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { PROVIDER_PROFILES } from "./provider-capabilities.js";
 import { createJobWorker, type JobBridge, type JobWorkerOptions, type PinnedJobsAdapter } from "./job-worker.js";
 import { JobInputError, validateJobToolArguments, type JobTaskInput, type JobToolName } from "./job-submit.js";
@@ -20,6 +21,21 @@ import { WorkerGuidanceLedger, WorkerGuidanceService, type WorkerGuidanceInput, 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const MAX_CONFIG = 64 * 1024;
+type RuntimeStateGroup = "supervision" | "oracle-pool";
+const STATE_FILES: Record<RuntimeStateGroup, string[]> = {
+  supervision: ["inbox.sqlite", "recovery.sqlite3"],
+  "oracle-pool": ["config.json", "queue.sqlite3"],
+};
+/** Existing legacy persistence remains authoritative until the explicit root-owned migration. */
+export function runtimeStateRoot(group: RuntimeStateGroup, home = homedir()): string {
+  const canonical = join(home, ".local", "state", "rotoxy");
+  const legacy = join(home, ".local", "state", "token2oauth");
+  const hasKnownState = (root: string) => STATE_FILES[group].some((relative) => existsSync(join(root, group, relative)));
+  if (hasKnownState(canonical)) return canonical;
+  if (hasKnownState(legacy)) return legacy;
+  return canonical;
+}
+export function runtimeStatePath(group: RuntimeStateGroup, ...parts: string[]): string { return join(runtimeStateRoot(group), group, ...parts); }
 type RegisteredSession = { sessionId: string; accountId: string; model: string; workspaceId: string };
 type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[] };
 export interface SupervisorRuntimeConfig {
@@ -169,8 +185,8 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   constructor(private readonly config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
     this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
-    this.supervisionDbPath = options.supervisionDbPath ?? resolve(homedir(), ".local/state/token2oauth/supervision/inbox.sqlite");
-    this.recoveryDbPath = options.recoveryDbPath ?? resolve(homedir(), ".local/state/token2oauth/supervision/recovery.sqlite3");
+    this.supervisionDbPath = options.supervisionDbPath ?? runtimeStatePath("supervision", "inbox.sqlite");
+    this.recoveryDbPath = options.recoveryDbPath ?? runtimeStatePath("supervision", "recovery.sqlite3");
     this.workerGuidance = new WorkerGuidanceService({
       ledger: new WorkerGuidanceLedger(options.store, options.configDir),
       findWorker: (projectId, workerId) => {
@@ -241,7 +257,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       const python = "/usr/bin/python3";
       const args = ["-m", "snooze.recovery_service", "--snapshot", "--db", this.recoveryDbPath,
         "--project", projectId, "--owners", ...owners, "--after", String(after), "--limit", String(limit),
-        "--oracle-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")];
+        "--oracle-db", this.options.oracleDbPath ?? runtimeStatePath("oracle-pool", "queue.sqlite3")];
       const child = nodeSpawn(python, args, { cwd: this.supervisorCwd,
         env: { ...process.env, PYTHONPATH: this.supervisorCwd }, stdio: ["ignore", "pipe", "ignore"] });
       const chunks: Buffer[] = [];
@@ -510,8 +526,8 @@ export class SupervisorRuntime implements SupervisorBackend {
     let supervision: unknown;
     try {
       supervision = await this.guidanceCommand("project-snapshot", { owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`) },
-        ["--project", project.projectId, "--after", "0", "--limit", "20", "--pool-config", this.options.oracleConfigPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
-          "--pool-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")]);
+        ["--project", project.projectId, "--after", "0", "--limit", "20", "--pool-config", this.options.oracleConfigPath ?? runtimeStatePath("oracle-pool", "config.json"),
+          "--pool-db", this.options.oracleDbPath ?? runtimeStatePath("oracle-pool", "queue.sqlite3")]);
     } catch { supervision = { available: false, workers: [], events: [], models: [], error: "supervision_unavailable" }; }
     const monitorBySession = new Map<string, Record<string, unknown>>();
     if (object(supervision) && Array.isArray(supervision.workers)) for (const row of supervision.workers.filter(object)) {
@@ -597,8 +613,8 @@ export class SupervisorRuntime implements SupervisorBackend {
     let value: unknown;
     try {
       value = await this.guidanceCommand("project-snapshot", { owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`) },
-        ["--project", project.projectId, "--after", String(after), "--limit", String(limit), "--pool-config", this.options.oracleConfigPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
-          "--pool-db", this.options.oracleDbPath ?? resolve(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3")]);
+        ["--project", project.projectId, "--after", String(after), "--limit", String(limit), "--pool-config", this.options.oracleConfigPath ?? runtimeStatePath("oracle-pool", "config.json"),
+          "--pool-db", this.options.oracleDbPath ?? runtimeStatePath("oracle-pool", "queue.sqlite3")]);
     } catch { value = { available: false, project: project.projectId, workers: [], events: [], models: [], error: "supervision_unavailable" }; }
     const owners = project.clientIds.map((clientId) => `oauth-client:${clientId}`);
     let recovery: unknown;
