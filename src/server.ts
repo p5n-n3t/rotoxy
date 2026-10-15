@@ -1,3 +1,4 @@
+import { createCloudflareRouter } from "./cloudflare-admin.js";
 import { OracleTools } from "./oracle-tools.js";
 import express from "express";
 import { join } from "node:path";
@@ -54,6 +55,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const router = express.Router();
   router.use(oauth.router);
   router.use(modelGateway.router);
+  router.use(createCloudflareRouter(store, sessions, modelGateway.credentials).router);
   router.use(createControlPlaneAdminRouter(store, sessions, modelGateway.credentials, fileURLToPath(new URL("../supervisor/", import.meta.url)), codexProfiles, modelGateway.snapshot));
   router.use(createResourceConnectionsRouter(store, sessions));
   router.use(createAnalyticsApiRouter(store, sessions, telemetry));

@@ -181,6 +181,8 @@ export class CloudflareAIAdapter {
   private readonly now: () => number;
   private readonly inflight = new Map<string, number>();
   private cursor = 0;
+  private recent: Array<{ accountId: string; model: string; at: number; durationMs: number; status: string; usage?: Record<string, number> }> = [];
+  snapshot() { return { inflight: Object.fromEntries(this.inflight), recent: this.recent.map(row => ({ ...row, ...(row.usage ? { usage: { ...row.usage } } : {}) })) }; }
 
   constructor(private readonly credentials: CloudflareCredentialStore, options: CloudflareAIOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
@@ -222,7 +224,7 @@ export class CloudflareAIAdapter {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await this.fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${account.view.accountId}${path}`, {
-        method, signal: controller.signal,
+        method, signal: controller.signal, redirect: "error",
         headers: { authorization: `Bearer ${account.token}`, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
@@ -270,14 +272,28 @@ export class CloudflareAIAdapter {
     try { json = JSON.stringify(input.input); } catch { throw new CloudflareAIError("invalid_request"); }
     if (Buffer.byteLength(json, "utf8") > 1_000_000) throw new CloudflareAIError("invalid_request");
     const account = await this.acquire(input.model);
+    const started = this.now();
+    let status = "failed";
+    let usage: Record<string, number> | undefined;
     try {
-      const requestInput: Record<string, unknown> = { ...input.input };
+      const requestInput: Record<string, unknown> = { ...input.input, max_tokens: input.input.max_tokens ?? this.maxTokens };
       if (requestInput.max_tokens !== undefined) {
         if (!Number.isSafeInteger(requestInput.max_tokens) || Number(requestInput.max_tokens) < 1) throw new CloudflareAIError("invalid_request");
         requestInput.max_tokens = Math.min(Number(requestInput.max_tokens), this.maxTokens);
       }
       const encodedModel = input.model.split("/").map((part) => encodeURIComponent(part)).join("/");
-      return await this.request(account, `/ai/run/${encodedModel}`, "POST", requestInput);
-    } finally { account.release(); }
+      const response = await this.request(account, `/ai/run/${encodedModel}`, "POST", requestInput);
+      const raw = (response as any)?.result?.usage;
+      if (raw && typeof raw === "object") {
+        usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens", "neurons"].filter(key => typeof raw[key] === "number" && Number.isFinite(raw[key]) && raw[key] >= 0).map(key => [key, raw[key]]));
+      }
+      status = "succeeded";
+      return response;
+    } catch (error) { status = error instanceof CloudflareAIError ? error.code : "failed"; throw error; }
+    finally {
+      account.release();
+      this.recent.push({ accountId: account.view.id, model: input.model, at: started, durationMs: Math.max(0, this.now() - started), status, ...(usage ? { usage } : {}) });
+      if (this.recent.length > 100) this.recent.shift();
+    }
   }
 }
