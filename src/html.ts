@@ -19,28 +19,36 @@ export interface NavItem { key: string; label: string; href: string }
 export interface NavGroup { label: string; items: readonly NavItem[] }
 
 /**
- * Grouped admin navigation. Only routes that exist today are linked; root adds
- * Jobs, Oracle, Search and Clients items here when their pages are wired.
- * Every legacy URL is unchanged.
+ * Shared ROTOXY workspace navigation. Entries without a route are deliberately
+ * rendered as unavailable text; never send an operator to a fabricated page.
  */
 export const NAV_GROUPS: readonly NavGroup[] = [
-  { label: "Workspace", items: [{ key: "pool", label: "Pool", href: "/admin" }] },
-  { label: "Providers", items: [{ key: "accounts", label: "Accounts", href: "/admin#accounts" }, { key: "credits", label: "Credits", href: "/admin/credits" }] },
-  { label: "Models & APIs", items: [{ key: "models", label: "Models", href: "/admin/models" }, { key: "resources", label: "Search", href: "/admin/resources" }, { key: "codex", label: "Codex", href: "/admin/codex" }, { key: "tools", label: "Tools", href: "/admin/tools" }] },
-  { label: "Operations", items: [{ key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }, { key: "oracle", label: "Oracle", href: "/admin/oracle" }] },
-  { label: "Platform", items: [{ key: "security", label: "Security", href: "/admin/security" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
+  { label: "Command", items: [{ key: "pool", label: "Overview", href: "/admin" }, { key: "jobs", label: "Jobs", href: "" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
+  { label: "Resources", items: [
+    { key: "accounts", label: "Workspace accounts", href: "/admin#accounts" },
+    { key: "models", label: "Models", href: "/admin/models" },
+    { key: "oracle", label: "Private workers", href: "/admin/oracle" },
+    { key: "resources", label: "Search", href: "/admin/resources" },
+    { key: "credits", label: "Credits", href: "/admin/credits" },
+    { key: "codex", label: "Codex", href: "/admin/codex" },
+    { key: "tools", label: "Tools", href: "/admin/tools" },
+  ] },
+  { label: "Insights", items: [{ key: "activity", label: "Activity", href: "/admin" }, { key: "analytics", label: "Analytics", href: "" }] },
+  { label: "Settings", items: [{ key: "clients", label: "Clients", href: "/admin/models" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
 ];
 
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {
   const b = esc(base);
-  const link = (item: NavItem) =>
-    `<a class="nav-link" href="${b}${esc(item.href)}"${active === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`;
-  const nav = groups.map((g) => `<div class="nav-group" role="group" aria-label="${esc(g.label)}"><span class="nav-label">${esc(g.label)}</span>${g.items.map(link).join("")}</div>`).join("");
-  return `<header class="topbar"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><div class="logo">${ROTOXY_MARK_SVG}</div><div><strong>ROTOXY</strong><div class="eyebrow">Token2OAuth gateway</div></div></a><nav class="groups" aria-label="Admin">${nav}</nav><div class="topbar-end"><a class="btn secondary" href="${b}/">Gateway</a><form class="inline" method="post" action="${b}/admin/logout"><button class="secondary">Sign out</button></form></div></header>`;
+  const current = groups.flatMap((group) => group.items).find((item) => item.key === active)?.label ?? active;
+  const link = (item: NavItem) => item.href
+    ? `<a class="nav-link" href="${b}${esc(item.href)}"${active === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`
+    : `<span class="nav-link nav-unavailable" aria-disabled="true" title="${item.key === "jobs" ? "No standalone jobs page is mounted yet" : "Analytics is available as an authenticated JSON endpoint"}">${esc(item.label)}<small>${item.key === "jobs" ? "Unavailable" : "API only"}</small></span>`;
+  const nav = groups.map((g) => `<section class="nav-group" aria-labelledby="nav-${esc(g.label.toLowerCase())}"><h2 class="nav-label" id="nav-${esc(g.label.toLowerCase())}">${esc(g.label)}</h2>${g.items.map(link).join("")}</section>`).join("");
+  const actions = `<div class="rx-sidebar-end"><a class="btn secondary" href="${b}/">Gateway</a><form class="inline" method="post" action="${b}/admin/logout"><button class="secondary">Sign out</button></form></div>`;
+  return `<a class="rx-skip-link" href="#rx-main-content">Skip to content</a><aside class="rx-sidebar" aria-label="ROTOXY workspace navigation"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><span class="logo">${ROTOXY_MARK_SVG}</span><span><strong>ROTOXY</strong><span class="eyebrow">Token2OAuth gateway</span></span></a><div class="rx-workspace-id"><span class="eyebrow">Workspace</span><strong>Gateway workspace</strong></div><details class="rx-nav-details"><summary class="rx-mobile-menu">Menu <span aria-hidden="true">⌄</span></summary><div class="rx-nav-content"><nav class="rx-nav-groups" aria-label="Workspace navigation">${nav}</nav>${actions}</div></details></aside><header class="rx-page-context"><div><span class="eyebrow">Current page</span><strong class="rx-current-page">${esc(current)}</strong></div></header>`;
 }
 
 /** Inject the session CSRF token into every POST form of an admin page. */
 export function withCsrf(html: string, csrf: string): string {
   return html.replace(/(<form\b[^>]*\bmethod="post"[^>]*>)/gi, `$1<input type="hidden" name="_csrf" value="${esc(csrf)}">`);
 }
-

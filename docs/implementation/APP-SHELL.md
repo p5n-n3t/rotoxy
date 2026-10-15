@@ -1,13 +1,7 @@
 # ROTOXY app-shell checkpoint
 
-Built on `origin/main` at `15767e1c31410bc9125f543c53d372fe8e865efb` on isolated branch `codex/rotoxy-app-shell-20261015`. The new `src/ui-shared.ts` exports a server-rendered shell wrapper, compact persistent rail, existing ROTOXY mark, workspace/current-page labels, grouped navigation, active-route semantics, keyboard-operable native mobile drawer, skip link, dark palette, and reduced-motion/focus styling. Route entries are limited to confirmed HTML pages; Jobs and Analytics are inert because only jobs-through-project and analytics JSON surfaces exist. Clients reuses the actual Models & APIs page where client tokens live.
+The responsive workspace shell is integrated in the real shared renderer: `src/html.ts` renders the four navigation groups and `src/ui.ts` supplies the page-shell layout styles. Existing callers retain the `adminNav(base, active)` API, route paths, CSRF form injection, handlers, authentication, and state behavior. The shell uses the existing ROTOXY mark, a fixed desktop navigation rail, a keyboard-operable mobile disclosure, workspace/current-page context, skip link, reduced-motion/focus styling, and wrapping labels.
 
-The route audit and two ASCII layout alternatives are in `docs/design/app-shell-20261015.md`; the fixed rail was selected to keep group context without consuming a second horizontal nav row.
+Navigation targets were checked against mounted HTML routes. Jobs has no standalone HTML route and Analytics is an authenticated JSON endpoint, so both are visibly unavailable rather than linked to invented pages. Activity uses the existing overview route; Clients shares the existing Models page. Existing account, credit, Codex, tools, model, private-worker, search, security, and diagnostics destinations remain reachable.
 
-`test/app-shell.test.mjs` checks the route allowlist, current-page accessibility, responsive drawer, reduced motion, logo, and safe label/base handling. Tests construct no `StateStore`; existing API, auth, and state code is untouched.
-
-## Integration seam
-
-`src/html.ts` remains outside this assignment's owned-file list, so existing routes still call the prior `adminNav` helper. To activate the shell, the root owner should import `renderAppShell` into the shared admin page renderer, remove the prior navigation header from each page body, and wrap each existing server-rendered page body with its established base, route key, page label, and workspace label. Keep `withCsrf`, page authentication, CSP/security headers, form handlers, and persisted StateStore semantics unchanged. No route or endpoint was added here.
-
-Validation: `npm run build`, `node --test test/app-shell.test.mjs`, and `git diff --check`.
+The earlier disconnected `src/ui-shared.ts` draft was removed. The focused shell test now exercises the integrated renderer and page CSS. Root should run the full repository suite and review responsive rendering before integration; this finalization did not run the full suite or a browser capture.
