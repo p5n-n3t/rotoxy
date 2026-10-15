@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmod, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
@@ -173,6 +173,7 @@ export class CodexProfiles {
   private readonly profileRoot: string;
   private readonly registryPath: string;
   private readonly ownershipPath: string;
+  private readonly registryLockPath: string;
   private readonly now: () => number;
   private readonly rpcTimeoutMs: number;
   private readonly maxInFlight: number;
@@ -193,6 +194,8 @@ export class CodexProfiles {
     this.profileRoot = join(this.configDir, "codex-profiles");
     this.registryPath = join(this.configDir, CODEX_PROFILE_REGISTRY);
     this.ownershipPath = join(this.configDir, "codex-thread-owners.json");
+    // Coordinate profile edits with StateStore and other gateway processes.
+    this.registryLockPath = join(this.configDir, "state.lock");
     this.now = options.now ?? Date.now;
     this.rpcTimeoutMs = Math.min(30_000, Math.max(1_000, options.rpcTimeoutMs ?? CODEX_RPC_TIMEOUT_MS));
     this.maxInFlight = Math.min(CODEX_MAX_IN_FLIGHT, Math.max(1, options.maxInFlight ?? CODEX_MAX_IN_FLIGHT));
@@ -252,18 +255,87 @@ export class CodexProfiles {
 
   private saveOwnership(): Promise<void> { return this.persist(this.ownershipPath, () => JSON.stringify({ version: 1, owners: Object.fromEntries(this.threadOwners) })); }
 
-  async listProfiles(): Promise<CodexProfile[]> { await this.ready(); return this.registry!.profiles.map((p) => ({ ...p })); }
+  private async withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      let handle;
+      try {
+        handle = await open(this.registryLockPath, "wx", 0o600);
+        try { return await fn(); }
+        finally { await handle.close(); await unlink(this.registryLockPath).catch(() => undefined); }
+      } catch (error: any) {
+        if (handle) await handle.close().catch(() => undefined);
+        if (error?.code !== "EEXIST") throw error;
+        try {
+          const info = await stat(this.registryLockPath);
+          if (Date.now() - info.mtimeMs > 30_000) { await unlink(this.registryLockPath).catch(() => undefined); continue; }
+        } catch { /* lock disappeared between calls */ }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 25 + Math.min(250, attempt * 5)));
+      }
+    }
+    throw new Error("timed out waiting for Codex profile registry lock");
+  }
+
+  private async reloadRegistryForWrite(): Promise<void> {
+    let parsed: unknown;
+    try { parsed = JSON.parse(await readFile(this.registryPath, "utf8")); }
+    catch (error: any) { if (error?.code !== "ENOENT") throw new Error("Codex profile registry is invalid"); }
+    const raw = record(parsed);
+    if (raw === undefined && parsed !== undefined || raw && (raw.version !== 1 || !Array.isArray(raw.profiles))) throw new Error("Codex profile registry is invalid");
+    const profiles: CodexProfile[] = [];
+    for (const value of raw?.profiles as unknown[] || []) {
+      const item = record(value);
+      if (!item || typeof item.id !== "string" || !PROFILE_ID.test(item.id) || typeof item.label !== "string" ||
+          item.label.length > 80 || typeof item.createdAt !== "number" || typeof item.updatedAt !== "number") {
+        throw new Error("Codex profile registry is invalid");
+      }
+      profiles.push({ id: item.id, label: item.label, profileDir: join(this.profileRoot, item.id), createdAt: item.createdAt, updatedAt: item.updatedAt });
+    }
+    if (profiles.length > CODEX_MAX_PROFILES) throw new Error("Codex profile registry is invalid");
+    this.registry = { version: 1, profiles };
+  }
+
+  private async mutateProfiles<T>(fn: (profiles: CodexProfile[]) => T | Promise<T>): Promise<T> {
+    await this.ready();
+    return this.withRegistryLock(async () => {
+      await this.reloadRegistryForWrite();
+      const result = await fn(this.registry!.profiles);
+      await this.save();
+      return result;
+    });
+  }
+
+  async listProfiles(): Promise<CodexProfile[]> {
+    await this.ready();
+    return this.withRegistryLock(async () => { await this.reloadRegistryForWrite(); return this.registry!.profiles.map((p) => ({ ...p })); });
+  }
   async listSnapshots(): Promise<CodexProfileSnapshot[]> { await this.ready(); return [...this.snapshots.values()].map((s) => structuredClone(s)); }
 
   async registerProfile(label: string): Promise<CodexProfile> {
-    await this.ready();
-    if (this.registry!.profiles.length >= CODEX_MAX_PROFILES) throw new Error("Codex profile limit reached");
     const clean = label.trim(); if (!clean || clean.length > 80 || /[\u0000-\u001f\u007f]/.test(clean)) throw new Error("profile label must be 1–80 printable characters");
-    const now = this.now(), id = randomUUID(), profileDir = join(this.profileRoot, id);
-    await mkdir(profileDir, { recursive: true, mode: 0o700 }); await chmod(profileDir, 0o700);
-    const profile = { id, label: clean, profileDir, createdAt: now, updatedAt: now };
-    this.registry!.profiles.push(profile); await this.save(); return { ...profile };
+    return this.mutateProfiles(async (profiles) => {
+      if (profiles.length >= CODEX_MAX_PROFILES) throw new Error("Codex profile limit reached");
+      const now = this.now(), id = randomUUID(), profileDir = join(this.profileRoot, id);
+      await mkdir(profileDir, { recursive: true, mode: 0o700 }); await chmod(profileDir, 0o700);
+      const profile = { id, label: clean, profileDir, createdAt: now, updatedAt: now };
+      profiles.push(profile); return { ...profile };
+    });
   }
+
+  async updateProfile(profileId: string, update: { label?: string }): Promise<CodexProfile> {
+    if (!PROFILE_ID.test(profileId) || !update || typeof update !== "object" || Array.isArray(update) ||
+        Object.keys(update).length !== 1 || !Object.hasOwn(update, "label")) throw new TypeError("Codex profile update is invalid");
+    const label = typeof update.label === "string" ? update.label.trim() : "";
+    if (!label || label.length > 80 || /[\u0000-\u001f\u007f]/.test(label)) throw new TypeError("profile label must be 1–80 printable characters");
+    return this.mutateProfiles((profiles) => {
+      const profile = profiles.find((item) => item.id === profileId);
+      if (!profile) throw new Error("Codex profile not found");
+      if (profiles.some((item) => item.id !== profileId && item.label.toLocaleLowerCase() === label.toLocaleLowerCase())) throw new Error("Codex profile label already exists");
+      profile.label = label; profile.updatedAt = this.now();
+      return { ...profile };
+    });
+  }
+
+  async renameProfile(profileId: string, label: string): Promise<CodexProfile> { return this.updateProfile(profileId, { label }); }
 
   private profile(id: string): CodexProfile {
     const profile = this.registry?.profiles.find((entry) => entry.id === id);
@@ -349,7 +421,12 @@ export class CodexProfiles {
     const reportedMode = accountInfo.type ?? accountInfo.authMode;
     const authMode = reportedMode === "chatgpt" ? "chatgpt" : reportedMode == null ? undefined : "other";
     const snapshot: CodexProfileSnapshot = { profileId, capturedAt: this.now(), ...(authMode ? { authMode } : {}), ...(safeString(accountInfo.planType, 40) ? { planType: accountInfo.planType as string } : {}), models, rateWindows: windows };
-    this.snapshots.set(profileId, snapshot); const profile = this.profile(profileId); profile.updatedAt = snapshot.capturedAt; await this.save();
+    this.snapshots.set(profileId, snapshot);
+    await this.mutateProfiles((profiles) => {
+      const profile = profiles.find((item) => item.id === profileId);
+      if (!profile) throw new Error("Codex profile not found");
+      profile.updatedAt = snapshot.capturedAt;
+    });
     return structuredClone(snapshot);
   }
 

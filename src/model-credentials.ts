@@ -7,6 +7,7 @@ import type { StateStore } from "./store.js";
 
 export type ModelScope = "model:read" | "model:invoke";
 export interface ModelCredentialView { id: string; label: string; enabled: boolean; createdAt: number; cooldownUntil?: number }
+export interface ModelCredentialUpdate { label?: string; enabled?: boolean }
 interface ModelAccount extends ModelCredentialView { secret: EncryptedSecret }
 interface ModelToken { id: string; hash: string; scopes: ModelScope[]; createdAt: number; expiresAt: number }
 interface ModelDocument { version: 1; accounts: ModelAccount[]; tokens: ModelToken[] }
@@ -92,6 +93,32 @@ export class ModelCredentialStore {
       if (!account) throw new Error("model credential not found");
       account.enabled = enabled;
     });
+  }
+
+  /** Update only public metadata; API key rotation stays on rotateCredential. */
+  async updateCredential(id: string, update: ModelCredentialUpdate): Promise<ModelCredentialView> {
+    if (!validId(id) || !update || typeof update !== "object" || Array.isArray(update) ||
+        !Object.keys(update).length || Object.keys(update).some((key) => key !== "label" && key !== "enabled") ||
+        Object.hasOwn(update, "label") && (typeof update.label !== "string" || !labelRe.test(update.label.trim())) ||
+        Object.hasOwn(update, "enabled") && typeof update.enabled !== "boolean") {
+      throw new TypeError("model credential update is invalid");
+    }
+    const label = Object.hasOwn(update, "label") ? update.label!.trim() : undefined;
+    return this.mutate((doc) => {
+      const account = doc.accounts.find((entry) => entry.id === id);
+      if (!account) throw new Error("model credential not found");
+      if (label && doc.accounts.some((entry) => entry.id !== id && entry.label.toLocaleLowerCase() === label.toLocaleLowerCase())) {
+        throw new Error("model credential label already exists");
+      }
+      if (label !== undefined) account.label = label;
+      if (update.enabled !== undefined) account.enabled = update.enabled;
+      const { secret: _secret, ...view } = account;
+      return { ...view };
+    });
+  }
+
+  async renameCredential(id: string, label: string): Promise<ModelCredentialView> {
+    return this.updateCredential(id, { label });
   }
 
   async setCooldown(id: string, cooldownUntil: number): Promise<void> {
