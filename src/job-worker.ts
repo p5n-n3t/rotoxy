@@ -1,4 +1,5 @@
 /** Durable Snooze operation consumer. Importing this module starts no timers or I/O. */
+import { normalizeSessionObservation } from "./worker-observation.js";
 
 export type OperationOutcome = "accepted" | "rejected" | "ambiguous";
 
@@ -132,11 +133,13 @@ function timestampSeconds(value: unknown): number | undefined {
   }
   return undefined;
 }
-function newestAssistant(transcript: unknown, dispatchAtSeconds: number): { text: string; at: number } | undefined {
+function newestAssistant(transcript: unknown, dispatchAtSeconds: number, instructionsHash?: string): { text: string; at: number } | undefined {
   let encoded: string;
   try { encoded = JSON.stringify(transcript) ?? ""; } catch { return undefined; }
   if (!encoded || encoded.length > MAX_TRANSCRIPT_CHARS) return undefined;
   const root = object(transcript);
+  // Token transcripts must link their newest user turn to this exact dispatch.
+  if (root?.shape === "items" && (!instructionsHash || root.lastUserTextSha256 !== instructionsHash)) return undefined;
   const messages = root?.messages;
   const latestIndex = root?.latestAssistantIndex;
   // The adapter projection's pointer identifies the newest assistant message in the source
@@ -276,15 +279,25 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           errorClass = checked.result.classification === "ambiguous" ? "status_ambiguous" : "status_unavailable";
           return await submit(op, checked.result.classification, {}, errorClass);
         }
-        const rawStatus = field(checked.status, "sessionStatus", "status", "state");
-        const status = typeof rawStatus === "string" ? rawStatus.slice(0, 80) : "unknown";
+        const observed = normalizeSessionObservation(checked.status);
+        const status = observed.needsInput
+          ? observed.question?.kind === "approval" ? "needs_approval" : "needs_instructions"
+          : observed.state;
+        // A transport can be idle after its agent relay dies. Never fetch a stale
+        // assistant transcript and accidentally turn that failure into completion.
+        if (status === "failed" || status === "timed_out" || status === "cancelled") {
+          result = { sessionId, status };
+          addSessionMetadata(result, checked.status);
+          return await submit(op, "accepted", result, observed.errorCode ?? "provider_terminal_state");
+        }
         let fresh: { text: string; at: number } | undefined;
-        if (status.toLowerCase() === "idle") {
+        if (status === "idle" && !observed.needsInput) {
           const dispatchAt = timestampSeconds(input.dispatchAt);
           if (dispatchAt === undefined) { errorClass = "invalid_dispatch_timestamp"; return await submit(op, "rejected", {}, errorClass); }
           const transcript = await adapter.sessionTranscript(sessionId);
           if (transcript.classification === "ambiguous") { errorClass = "transcript_ambiguous"; return await submit(op, "ambiguous", {}, errorClass); }
-          if (transcript.classification === "accepted") fresh = newestAssistant(transcript.value, dispatchAt);
+          if (transcript.classification === "accepted") fresh = newestAssistant(transcript.value, dispatchAt,
+            typeof input.instructionsHash === "string" && /^[0-9a-f]{64}$/.test(input.instructionsHash) ? input.instructionsHash : undefined);
         }
         // R21's registry accepts the session status (for example "idle") and
         // marks completion only from a fresh assistantText + numeric assistantAt.
@@ -310,7 +323,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           return await submit(op, outcome, {}, errorClass);
         }
         const confirmed = await checkSession(adapter, sessionId);
-        const finalState = field(confirmed.status, "status", "state");
+        const finalState = field(confirmed.status, "sessionStatus", "status", "state");
         if (confirmed.result.classification === "accepted" && typeof finalState === "string" && /^(stopped|cancelled|canceled)$/i.test(finalState)) {
           outcome = "accepted"; result = { sessionId, status: "cancelled" };
         } else { outcome = "ambiguous"; errorClass = "cancellation_unconfirmed"; }

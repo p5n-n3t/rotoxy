@@ -337,3 +337,59 @@ test("live gateway tool policy also fences internal job adapter mutations", asyn
   assert.equal((await adapter.cancelTurn(SESSION_ID)).classification, "accepted");
   assert.equal(calls, 3);
 });
+
+test("documented item transcript anchors last assistant snapshot to newest user turn", async () => {
+  const items = [
+    {seq: 40, turnId: 'old-turn', type: 'assistant_snapshot', time: '2026-10-15T10:00:00Z', payload: {content: 'stale'}},
+    {seq: 41, turnId: 'new-turn', type: 'user_message', time: '2026-10-15T10:01:00Z',
+      payload: {content: 'api_key=should-never-appear'}},
+    {seq: 42, turnId: 'new-turn', type: 'assistant_snapshot', time: '2026-10-15T10:02:00Z',
+      payload: {content: 'EXPECTED completed output'}},
+  ];
+  const adapter = new LightSprintJobsAdapter(store(), ACCOUNT_ID, {
+    clientFactory: clientFactory(async () => ok({items, prevCursor: 40, nextCursor: 42, hasMore: true})),
+  });
+  const result = (await adapter.sessionTranscript(SESSION_ID)).value;
+  assert.equal(result.shape, 'items');
+  assert.equal(result.latestAssistantComplete, true);
+  assert.equal(result.messages[result.latestAssistantIndex].content, 'EXPECTED completed output');
+  assert.equal(result.messages[0].turnId, 'new-turn');
+  assert.equal(result.hasMore, true);
+  assert.equal(result.truncated, true);
+  assert.equal(JSON.stringify(result).includes('should-never-appear'), false);
+});
+
+test("newer user turn or truncated turn cannot complete from older snapshot", async () => {
+  const cases = [
+    [
+      {seq: 10, turnId:'old', type:'user_message',time:'2026-10-15T10:00:00Z',payload:{content:'old'}},
+      {seq: 11, turnId:'old', type:'assistant_snapshot',time:'2026-10-15T10:00:10Z',payload:{content:'EXPECTED'}},
+      {seq: 12, turnId:'new', type:'user_message',time:'2026-10-15T10:02:00Z',payload:{content:'new'}},
+    ],
+    [
+      {seq: 10, turnId:'latest', type:'user_message',time:'2026-10-15T10:00:00Z',payload:{content:'new'}},
+      {seq: 11, turnId:'latest', type:'assistant_snapshot',time:'2026-10-15T10:00:10Z',payload:{content:'EXPECTED'}},
+      {seq: 12, turnId:'latest', type:'turn_truncated',time:'2026-10-15T10:00:11Z',payload:{reason:'truncated'}},
+    ],
+  ];
+  for (const items of cases) {
+    const adapter = new LightSprintJobsAdapter(store(), ACCOUNT_ID, {
+      clientFactory: clientFactory(async () => ok({items, hasMore: true, nextCursor:12, prevCursor:10})),
+    });
+    const result = (await adapter.sessionTranscript(SESSION_ID)).value;
+    assert.equal(result.latestAssistantComplete, false);
+    assert.equal(result.incomplete, true);
+    assert.equal(result.messages.length, 0);
+  }
+});
+
+test("token transcript without newest user turn remains incomplete until supported older pagination", async () => {
+  const adapter = new LightSprintJobsAdapter(store(), ACCOUNT_ID, {
+    clientFactory: clientFactory(async () => ok({items: [
+      {seq:50,turnId:'prior',type:'assistant_snapshot',time:'2026-10-15T10:00:00Z',payload:{content:'EXPECTED'}},
+    ],prevCursor:49,nextCursor:50,hasMore:true})),
+  });
+  const result = (await adapter.sessionTranscript(SESSION_ID)).value;
+  assert.equal(result.reason, 'missing_user_turn');
+  assert.equal(result.latestAssistantComplete, false);
+});

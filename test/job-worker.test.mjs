@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createJobWorker } from "../dist/job-worker.js";
 
 const ok = (accountId, value = {}) => ({ classification: "accepted", accountId, value });
@@ -347,5 +348,65 @@ test("existing sessions use the registered model and refuse changed or unapprove
     assert.equal(sends, accepted ? 1 : 0);
     assert.equal(resultBodies[0].outcome, accepted ? "accepted" : "rejected");
     if (accepted) assert.equal(resultBodies[0].result.reportedModel, "claude-opus-5-5");
+  }
+});
+
+test("idle status with ACP_RELAY_DIED is reported as failed without reading an old transcript", async () => {
+  const operation = pythonObservation("relay-dead", "account-a", Date.parse("2026-10-10T00:00:00Z") / 1000);
+  let transcripts = 0;
+  const { worker, resultBodies } = harness([operation], {
+    adapterFactory: (id) => adapter(id, {
+      sessionStatus: async () => ok(id, { status: {
+        sessionId: 'session-account-a', sessionStatus: 'idle', model: 'claude-opus-5-5',
+        errorCode: 'ACP_RELAY_DIED', errorMessage: 'password=do-not-leak',
+      } }),
+      sessionTranscript: async () => { transcripts++; return ok(id, { shape: 'messages',
+        latestAssistantIndex: 0, latestAssistantComplete: true,
+        messages: [{ role: 'assistant', content: 'stale success', timestamp: '2026-10-10T00:01:00Z', complete: true }],
+      }); },
+    }),
+  });
+  worker.start(); await until(() => resultBodies.length === 1); await worker.stop();
+  assert.equal(transcripts, 0);
+  assert.equal(resultBodies[0].outcome, 'accepted');
+  assert.equal(resultBodies[0].result.status, 'failed');
+  assert.equal(resultBodies[0].errorClass, 'ACP_RELAY_DIED');
+  assert.equal(JSON.stringify(resultBodies[0]).includes('do-not-leak'), false);
+  assert.equal('assistantText' in resultBodies[0].result, false);
+});
+
+test("native approval is a handoff and never makes an assistant transcript into a result", async () => {
+  const operation = pythonObservation("native-approval", "account-a", Date.parse("2026-10-10T00:00:00Z") / 1000);
+  let transcripts = 0;
+  const { worker, resultBodies } = harness([operation], {
+    adapterFactory: (id) => adapter(id, {
+      sessionStatus: async () => ok(id, { status: { sessionId: 'session-account-a',
+        sessionStatus: 'idle', parkedQuestion: { kind: 'approval', text: 'Approve?' } } }),
+      sessionTranscript: async () => { transcripts++; return ok(id); },
+    }),
+  });
+  worker.start(); await until(() => resultBodies.length === 1); await worker.stop();
+  assert.equal(transcripts, 0);
+  assert.equal(resultBodies[0].result.status, 'needs_approval');
+});
+
+test("typed transcript cannot complete without exact dispatched instruction hash", async () => {
+  const sentText = "EXPECTED make a concise result";
+  const rightHash = createHash('sha256').update(sentText).digest('hex');
+  const dispatchAt = Date.parse("2026-10-15T09:00:00Z") / 1000;
+  for (const hash of [rightHash, createHash('sha256').update('different').digest('hex')]) {
+    const observation = pythonObservation("typed-" + hash.slice(0,8), "account-a", dispatchAt);
+    observation.input.instructionsHash = rightHash;
+    const { worker, resultBodies } = harness([observation], {
+      adapterFactory: id => adapter(id, {
+        sessionTranscript: async () => ok(id, {
+          shape:'items', messages:[{role:'assistant',complete:true,content:'EXPECTED delivered',
+            timestamp:'2026-10-15T09:01:00Z'}],
+          latestAssistantIndex:0,latestAssistantComplete:true,lastUserTextSha256:hash,
+        }),
+      }),
+    });
+    worker.start(); await until(() => resultBodies.length === 1); await worker.stop();
+    assert.equal('assistantText' in resultBodies[0].result, hash === rightHash);
   }
 });

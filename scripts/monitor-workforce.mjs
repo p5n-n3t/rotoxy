@@ -6,7 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StateStore } from '../dist/store.js';
 import { serverMessages } from '../dist/jsonrpc-wire.js';
-import { normalizeParkedQuestion } from '../dist/worker-observation.js';
+import { normalizeSessionObservation } from '../dist/worker-observation.js';
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const configPath=process.argv[2];
@@ -61,13 +61,9 @@ async function observation(worker,state){
   const result=await rpc('tools/call',{name:'lightsprint_api',arguments:{method:'GET',path:'/api/agent-sessions/'+worker.sessionId+'/status'}});
   const raw=JSON.parse(result.content.find(c=>c.type==='text').text);const s=raw.status;
   if(!s||s.sessionId!==worker.sessionId||s.isOwner!==true)return{state:'unavailable'};
-  const allowed=['running','idle','failed','cancelled'];
-  const parked=s.parkedQuestion;
-  const needsInput=parked!==undefined&&parked!==null&&parked!==false&&parked!=='';
-  const question=needsInput?normalizeParkedQuestion(parked):undefined;
-  return{state:allowed.includes(s.sessionStatus)?s.sessionStatus:'unknown',...(safe(s.model)?{model:s.model}:{}),
-    ...(Number.isSafeInteger(s.promptCount)&&s.promptCount>=0?{promptCount:s.promptCount}:{}),needsInput,
-    ...(question?{question}:{})};
+  const observed=normalizeSessionObservation(s);
+  return{...observed,...(safe(s.model)?{model:s.model}:{}),
+    ...(Number.isSafeInteger(s.promptCount)&&s.promptCount>=0?{promptCount:s.promptCount}:{})};
 }
 async function check(){
   phase="configuration";const state=await store.load();let checked=0,errors=0;

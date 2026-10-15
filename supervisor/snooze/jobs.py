@@ -1042,9 +1042,17 @@ class JobRegistry:
 
     def _queue_observation(self, db, op, payload, now, delay):
         next_id = uuid.uuid4().hex
+        # Bind a later observed user turn to the exact text dispatched, without
+        # duplicating instructions or prompt bodies in observation receipts.
+        instruction_hash = payload.get("instructionsHash")
+        if instruction_hash is None and isinstance(payload.get("instructions"), str):
+            instruction_hash = hashlib.sha256(payload["instructions"].encode("utf-8")).hexdigest()
+        observation = {key: payload[key] for key in ("sessionId", "clientMessageId", "dispatchAt", "expectedMarker")}
+        if isinstance(instruction_hash, str) and re.fullmatch(r"[0-9a-f]{64}", instruction_hash):
+            observation["instructionsHash"] = instruction_hash
         db.execute("INSERT INTO operations(id,assignment,task_id,attempt_id,generation,account,kind,input,state,created_at,due_at) VALUES(?,?,?,?,?,?,'observe_session',?,'queued',?,?)",
                    (next_id, op["assignment"], op["task_id"], op["attempt_id"], op["generation"], op["account"],
-                    json.dumps({key: payload[key] for key in ("sessionId", "clientMessageId", "dispatchAt", "expectedMarker")}), now, now + delay))
+                    json.dumps(observation), now, now + delay))
         db.execute("UPDATE job_tasks SET poll_count=poll_count+1 WHERE assignment=? AND task_id=? AND generation=?",
                    (op["assignment"], op["task_id"], op["generation"]))
 
@@ -1052,6 +1060,12 @@ class JobRegistry:
         payload = json.loads(op["input"])
         status = result.get("status")
         if result.get("sessionId") != payload["sessionId"]:
+            return "blocked", False
+        # Terminal provider states are observed outcomes, not pending transcript reads.
+        # In particular, an idle transport with ACP_RELAY_DIED must never be repolled
+        # into a spurious completion or a new non-idempotent launch.
+        if status in {"failed", "interrupted", "timed_out", "cancelled",
+                      "needs_approval", "needs_instructions"}:
             return "blocked", False
         text = result.get("assistantText")
         assistant_at = result.get("assistantAt")
