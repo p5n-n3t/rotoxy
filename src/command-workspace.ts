@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -13,6 +12,7 @@ import { CredentialPool } from "./pool.js";
 import type { SupervisorBackend } from "./supervisor-api.js";
 import { normalizeSupervisorSnapshot } from "./supervisor-ui.js";
 import { loadOracleOpsSnapshot, ORACLE_OPS_HOSTS, ORACLE_OPS_MODELS, type OracleOpsLoaderOptions, type OracleOpsSnapshot } from "./oracle-ops.js";
+import { runtimeStatePath } from "./supervisor-runtime.js";
 import type { StateStore } from "./store.js";
 import { redact } from "./telemetry.js";
 import { page } from "./ui.js";
@@ -141,8 +141,8 @@ function createSnapshotReader(store: StateStore, backend?: SupervisorBackend, de
   const oracleLoader = dependencies.loadOracleSnapshot ?? loadOracleOpsSnapshot;
   const oraclePaths: OracleOpsLoaderOptions = {
     supervisorCwd: resolve(dirname(fileURLToPath(import.meta.url)), "../supervisor"),
-    configPath: join(homedir(), ".local/state/token2oauth/oracle-pool/config.json"),
-    dbPath: join(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3"),
+    configPath: runtimeStatePath("oracle-pool", "config.json"),
+    dbPath: runtimeStatePath("oracle-pool", "queue.sqlite3"),
   };
   return async (): Promise<WorkspaceSnapshot> => {
     const [state, modelViews, cloudViews, codex, oracleRaw] = await Promise.all([

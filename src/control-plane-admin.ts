@@ -1,6 +1,5 @@
 import { CodexProfiles, renderCodexProfilesPage } from "./codex-profiles.js";
 import express, { type Request, type Response, type NextFunction } from "express";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFile, lstat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -10,6 +9,7 @@ import { page } from "./ui.js";
 import type { StateStore } from "./store.js";
 import type { ModelCredentialStore, ModelScope } from "./model-credentials.js";
 import { loadOracleOpsSnapshot, renderOracleOpsPage } from "./oracle-ops.js";
+import { runtimeStatePath } from "./supervisor-runtime.js";
 import { CreditSnapshotStore, listCreditAccounts, summarizeCredits, type CreditAccount } from "./credit-snapshots.js";
 
 export function createControlPlaneAdminRouter(store: StateStore, sessions: AdminSessions, models: ModelCredentialStore, supervisorCwd: string, codex?: CodexProfiles, modelSnapshot?: () => { accounts: Array<{ accountId: string; requests: number; successes: number; failures: number; inflight: number }>; recent: Array<{ accountId: string; path: string; model?: string; durationMs: number; status: number }> }) {
@@ -122,7 +122,7 @@ export function createControlPlaneAdminRouter(store: StateStore, sessions: Admin
     const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
     const afterEvent = req.query.afterEvent === undefined ? 0 : Number(req.query.afterEvent);
     try {
-      const snapshot = await loadOracleOpsSnapshot({ supervisorCwd, configPath: join(homedir(), ".local/state/token2oauth/oracle-pool/config.json"), dbPath: join(homedir(), ".local/state/token2oauth/oracle-pool/queue.sqlite3") }, { offset, afterEvent });
+      const snapshot = await loadOracleOpsSnapshot({ supervisorCwd, configPath: runtimeStatePath("oracle-pool", "config.json"), dbPath: runtimeStatePath("oracle-pool", "queue.sqlite3") }, { offset, afterEvent });
       return res.type("html").send(page("Oracle workers", withCsrf(renderOracleOpsPage({ base: res.locals.base, snapshot }), res.locals.csrf || "")));
     } catch { return res.status(503).type("html").send(page("Oracle workers", `<main class="wrap">${adminNav(res.locals.base, "oracle")}<h1>Oracle workers</h1><p>Snapshot unavailable. No SSH or inference was triggered by this page.</p></main>`)); }
   });

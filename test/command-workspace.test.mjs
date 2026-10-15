@@ -71,8 +71,8 @@ test("workspace command centre is authenticated and renders bounded real resourc
   assert.equal(snapshot.codex.profiles[0].state, "unknown");
   assert.equal(Object.hasOwn(snapshot.codex.profiles[0], "profileDir"), false);
   assert.ok(oracleReads[0].supervisorCwd.endsWith("/supervisor"));
-  assert.match(oracleReads[0].configPath, /\.local\/state\/token2oauth\/oracle-pool\/config\.json$/);
-  assert.match(oracleReads[0].dbPath, /\.local\/state\/token2oauth\/oracle-pool\/queue\.sqlite3$/);
+  assert.match(oracleReads[0].configPath, /\.local\/state\/rotoxy\/oracle-pool\/config\.json$/);
+  assert.match(oracleReads[0].dbPath, /\.local\/state\/rotoxy\/oracle-pool\/queue\.sqlite3$/);
   assert.deepEqual(snapshot.projects, [{ id: "project-a", state: "running", workers: 1, jobs: 1, activeTasks: 2 }]);
   assert.equal(JSON.stringify(snapshot).includes("secret-value"), false);
   assert.equal(JSON.stringify(snapshot).includes("private prompt"), false);

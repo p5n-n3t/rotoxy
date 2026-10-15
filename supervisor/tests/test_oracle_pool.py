@@ -85,6 +85,24 @@ class OraclePoolTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(error["error"], "task_inference_not_cancellable")
 
+    def test_default_paths_prefer_existing_legacy_state_and_canonical_when_present(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            legacy = Path(home) / ".local/state/token2oauth/oracle-pool"
+            legacy.mkdir(parents=True)
+            (legacy / "queue.sqlite3").touch()
+            unrelated = Path(home) / ".local/state/rotoxy/supervision"
+            unrelated.mkdir(parents=True)
+            (unrelated / "inbox.sqlite").touch()
+            pool = OraclePool(transport=FakeTransport())
+            self.assertEqual(pool.db_path, legacy / "queue.sqlite3")
+            self.assertEqual(pool.config_path, legacy / "config.json")
+            canonical = Path(home) / ".local/state/rotoxy/oracle-pool"
+            OraclePool(canonical / "config.json", canonical / "queue.sqlite3", FakeTransport())
+            # A canonical state marker takes precedence; old files remain untouched.
+            fresh = OraclePool(transport=FakeTransport())
+            self.assertEqual(fresh.db_path, canonical / "queue.sqlite3")
+            self.assertTrue((legacy / "queue.sqlite3").exists())
+
     def test_default_private_state_and_fixed_ssh_policy(self):
         self.assertEqual(self.pool.config_path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.pool.db_path.stat().st_mode & 0o777, 0o600)

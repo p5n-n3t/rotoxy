@@ -202,7 +202,13 @@ class OraclePool:
 
     def __init__(self, config_path: str | Path | None = None, db_path: str | Path | None = None,
                  transport: Any | None = None):
-        base = Path.home() / ".local/state/token2oauth/oracle-pool"
+        home = Path.home()
+        canonical = home / ".local/state/rotoxy"
+        legacy = home / ".local/state/token2oauth"
+        known_state = ("config.json", "queue.sqlite3")
+        has_state = lambda root: any((root / "oracle-pool" / relative).exists() for relative in known_state)
+        state_root = canonical if has_state(canonical) or not has_state(legacy) else legacy
+        base = state_root / "oracle-pool"
         self.config_path = Path(config_path) if config_path else base / "config.json"
         self.db_path = Path(db_path) if db_path else base / "queue.sqlite3"
         self.base = self.config_path.parent if config_path else base

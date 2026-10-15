@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { runtimeStatePath } from "./supervisor-runtime.js";
 
 export const ORACLE_MODELS = ["qwen3.5:9b", "gpt-oss:20b", "tev1:0.8b"] as const;
 export const ORACLE_MAX_PROMPT_CHARS = 4000;
@@ -125,8 +125,6 @@ export interface OracleToolsOptions {
   maxStdoutBytes?: number;
 }
 
-const privatePoolDirectory = join(homedir(), ".local", "state", "token2oauth", "oracle-pool");
-
 function defaultCommandRunner(command: string, args: string[], request: OracleCommandRequest): Promise<OracleCommandResult> {
   return new Promise((resolvePromise, rejectPromise) => {
     if (command !== PYTHON) return rejectPromise(new OracleToolError("command_not_allowed"));
@@ -244,8 +242,8 @@ export class OracleTools {
 
   constructor(options: OracleToolsOptions = {}) {
     this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
-    this.configPath = options.configPath ?? join(privatePoolDirectory, "config.json");
-    this.dbPath = options.dbPath ?? join(privatePoolDirectory, "queue.sqlite3");
+    this.configPath = options.configPath ?? runtimeStatePath("oracle-pool", "config.json");
+    this.dbPath = options.dbPath ?? runtimeStatePath("oracle-pool", "queue.sqlite3");
     this.commandRunner = options.commandRunner ?? defaultCommandRunner;
     this.timeoutMs = options.timeoutMs ?? ORACLE_COMMAND_TIMEOUT_MS;
     this.maxStdoutBytes = options.maxStdoutBytes ?? ORACLE_MAX_STDOUT_BYTES;
