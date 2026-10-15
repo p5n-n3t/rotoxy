@@ -339,14 +339,15 @@ tailscale.command("status").action(async () => {
 });
 tailscale
   .command("expose")
-  .description("Deprecated compatibility alias for the legacy /token2oauth route")
+  .description("Deprecated compatibility alias for a previous gateway mount")
   .option("--mode <mode>", "funnel or serve (only used when no :443 listener exists yet)", "funnel")
-  .option("--path <path>", "legacy compatibility path (must be /token2oauth)", OWNED_PATH)
+  .option("--path <path>", "previously configured compatibility mount path")
   .option("--execute", "apply the plan; without it this is a dry run")
   .action(async (opts) => {
     if (!["funnel", "serve"].includes(opts.mode)) throw new Error("mode must be funnel or serve");
-    if ((normalizeBasePath(opts.path) || "/") !== OWNED_PATH) {
-      throw new Error(`Refusing to manage ${opts.path}: ROTOXY only manages its own ${OWNED_PATH} path.`);
+    const compatibilityPath = opts.path ?? OWNED_PATH;
+    if ((normalizeBasePath(compatibilityPath) || "/") !== OWNED_PATH) {
+      throw new Error(`Refusing to manage ${compatibilityPath}: ROTOXY only manages its own compatibility path.`);
     }
     await runLifecycle("up", { mode: opts.mode, execute: Boolean(opts.execute) });
   });
@@ -391,7 +392,7 @@ async function runLifecycle(
 
 const lifecycle = program
   .command("lifecycle")
-  .description("Legacy path lifecycle controls for /token2oauth; `rotoxy up` controls the canonical root Funnel");
+  .description("Compatibility mount lifecycle controls; `rotoxy up` manages the canonical root Funnel");
 lifecycle.command("status").option("--json").action(async (opts) => {
   const controller = new LifecycleController(createExecFileRunner());
   const status = await controller.status();
@@ -407,7 +408,7 @@ lifecycle.command("status").option("--json").action(async (opts) => {
 });
 lifecycle
   .command("up")
-  .description("Start the service and add the legacy /token2oauth route if missing (dry run unless --execute)")
+  .description("Start the service and add its compatibility mount if missing (dry run unless --execute)")
   .option("--mode <mode>", "funnel or serve, only when no :443 listener exists yet")
   .option("--execute", "apply the plan")
   .action(async (opts) => {
@@ -416,7 +417,7 @@ lifecycle
   });
 lifecycle
   .command("down")
-  .description("Remove only the legacy /token2oauth route and stop the service (dry run unless --execute)")
+  .description("Remove only the compatibility mount and stop the service (dry run unless --execute)")
   .option("--keep-service", "only remove the route")
   .option("--keep-route", "only stop the service")
   .option("--execute", "apply the plan")
@@ -576,13 +577,13 @@ clients.command("inspect")
 
 clients.command("configure <client>")
   .description("Preview or register ROTOXY as a user-level MCP server; dry-run unless --apply")
-  .requiredOption("--url <url>", "HTTP(S) ROTOXY MCP endpoint without embedded credentials/query")
+  .requiredOption("--url <url>", "HTTP(S) ROTOXY MCP endpoint (normally the gateway's root /mcp URL)")
   .option("--name <name>", "MCP server name", "rotoxy")
   .option("--apply", "invoke the official client CLI and make the configuration change")
   .action(async (client: LocalMcpClient, opts) => {
     const result = await configureClientConnection({ client, name: opts.name, url: opts.url, apply: Boolean(opts.apply) });
     console.log(`${result.applied ? "Applied" : "Plan"}: ${result.command} ${result.args.map((arg) => /^https?:\/\//i.test(arg) ? "<endpoint-url>" : JSON.stringify(arg)).join(" ")}`);
-    if (result.backupPath) console.log(`Redacted MCP-only snapshot: ${result.backupPath}`);
+    if (result.backupPath) console.log(`Private exact client-config backup: ${result.backupPath}`);
     console.log(result.message);
   });
 
@@ -596,12 +597,13 @@ clients.command("remove <client> <name>")
   });
 
 clients.command("restore <client> <backupPath>")
-  .description("Preview restoration from a private client-configuration backup; never applies a client change")
-  .action(async (client: LocalMcpClient, backupPath: string) => {
-    const result = await restoreClientConnection({ client, backupPath });
+  .description("Preview or restore an unchanged client config from a private exact backup; dry-run unless --apply")
+  .option("--apply", "restore the exact config only if its post-change fingerprint still matches")
+  .action(async (client: LocalMcpClient, backupPath: string, opts) => {
+    const result = await restoreClientConnection({ client, backupPath, apply: Boolean(opts.apply) });
     console.log(`Plan: ${result.command} ${result.args.map((arg) => JSON.stringify(arg)).join(" ")}`);
     console.log(`Private backup label: ${client} client configuration`);
-    console.log(`Removal backup path: ${result.backupPath}`);
+    console.log(`Backup path: ${result.backupPath}`);
     console.log(result.message);
   });
 

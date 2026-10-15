@@ -231,7 +231,7 @@ function optionsWithDefaults(options: ClientConnectionsOptions) {
   return {
     runner: options.runner ?? defaultRunner(),
     homeDir,
-    backupDir: options.backupDir ?? join(homeDir, ".token2oauth", "mcp-backups"),
+    backupDir: options.backupDir ?? join(homeDir, ".rotoxy", "mcp-backups"),
     now: options.now ?? Date.now,
   };
 }
@@ -317,7 +317,7 @@ async function changeClientConnection(client: LocalMcpClient, action: "add" | "r
   return {
     client, action, applied: true, version, ...command, backupPath: backup.path,
     message: action === "add"
-      ? `Server registration command completed. Finish any OAuth flow in ${definition.label}; registration does not prove authentication or successful tool execution.`
+      ? `Server registration command completed. Finish the OAuth handoff in ${definition.label}; ROTOXY does not copy client credentials. Registration alone does not prove authentication or successful tool execution.`
       : `Official CLI removal command completed for "${name}".`,
   };
 }
@@ -327,10 +327,11 @@ function pathInside(directory: string, candidate: string): boolean {
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
-async function readPrivateBackup(path: string, backupDir: string): Promise<ExactConfigBackup> {
-  await ensurePrivateBackupDir(backupDir);
+async function readPrivateBackup(path: string, backupDirs: string[]): Promise<ExactConfigBackup> {
   const absolutePath = resolve(path);
-  if (!pathInside(backupDir, absolutePath) || dirname(absolutePath) !== resolve(backupDir)) throw new Error("Restore accepts only a backup from the configured private client-backup directory.");
+  const backupDir = backupDirs.find((candidate) => pathInside(candidate, absolutePath) && dirname(absolutePath) === resolve(candidate));
+  if (!backupDir) throw new Error("Restore accepts only a backup from a configured private client-backup directory.");
+  await ensurePrivateBackupDir(backupDir);
   let handle;
   let parsed: Partial<ExactConfigBackup>;
   try {
@@ -362,7 +363,7 @@ async function restoreConfigFile(client: LocalMcpClient, homeDir: string, origin
   const parent = dirname(path);
   const parentInfo = await lstat(parent);
   if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory() || await realpath(parent) !== resolve(parent)) throw new Error("Client config parent directory must be a real, non-symlink directory for restore.");
-  const tempPath = `${path}.token2oauth-restore-${randomUUID()}`;
+  const tempPath = `${path}.rotoxy-restore-${randomUUID()}`;
   const bytes = Buffer.from(original.contentBase64, "base64");
   if (bytes.byteLength > MAX_CONFIG_BYTES || bytes.toString("base64") !== original.contentBase64) throw new Error("Restore config payload is invalid or exceeds the size limit.");
   const handle = await open(tempPath, "wx", 0o600);
@@ -377,7 +378,10 @@ export async function restoreClientConnection(input: { client: LocalMcpClient; b
   assertClient(input.client);
   const { homeDir, backupDir } = optionsWithDefaults(options);
   const backupPath = resolve(input.backupPath);
-  const backup = await readPrivateBackup(backupPath, backupDir);
+  const backupDirs = options.backupDir === undefined
+    ? [backupDir, join(homeDir, ".token2oauth", "mcp-backups")]
+    : [backupDir];
+  const backup = await readPrivateBackup(backupPath, backupDirs);
   if (backup.client !== input.client || backup.configPath !== CLIENTS[input.client].configPath(homeDir)) throw new Error("Restore backup belongs to a different client or home directory.");
   if (backup.restoredAt) throw new Error("This exact config backup has already been restored.");
   const current = stateFingerprint(await exactConfigState(input.client, homeDir));
@@ -396,7 +400,8 @@ export async function restoreClientConnection(input: { client: LocalMcpClient; b
 /** Honest product boundary: browser-only setup has no local official CLI command here. */
 export function manualClientSetupNotes(): Array<{ client: string; support: "manual" | "unsupported"; note: string }> {
   return [
-    { client: "ChatGPT Web", support: "manual", note: "Remote MCP setup is managed in ChatGPT Developer Mode by the user; this local CLI cannot configure the web account." },
+    { client: "ChatGPT Web", support: "manual", note: "Remote MCP setup is managed in ChatGPT Developer Mode by the user; this local CLI cannot configure the web account or access a consumer subscription API." },
     { client: "Claude Desktop", support: "unsupported", note: "This helper targets Claude Code CLI only; no Desktop config writer is provided." },
+    { client: "OpenCode", support: "unsupported", note: "No OpenCode config writer or compatibility check is provided; no automatic setup is claimed." },
   ];
 }
