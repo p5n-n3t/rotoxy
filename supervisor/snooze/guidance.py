@@ -56,6 +56,15 @@ def normalize_question(value):
     return result
 
 
+def normalized_error_code(value):
+    if value is None or value == '':
+        return None
+    if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', value):
+        return value
+    # Never persist raw provider error text: it can include private URLs or tokens.
+    return 'provider_execution_error'
+
+
 def identity(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', value):
         raise ValueError('invalid_identity')
@@ -83,8 +92,8 @@ class GuidanceInbox:
             ''')
             db.execute('BEGIN IMMEDIATE')
             for table, columns in {
-                'watched_workers': {'prompt_count': 'INTEGER', 'question_json': 'TEXT'},
-                'guidance_events': {'prompt_count': 'INTEGER', 'question_json': 'TEXT', 'account_id':'TEXT', 'session_id':'TEXT'},
+                'watched_workers': {'prompt_count': 'INTEGER', 'question_json': 'TEXT', 'error_code': 'TEXT'},
+                'guidance_events': {'prompt_count': 'INTEGER', 'question_json': 'TEXT', 'account_id':'TEXT', 'session_id':'TEXT', 'error_code':'TEXT'},
             }.items():
                 present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
                 for name, kind in columns.items():
@@ -104,17 +113,20 @@ class GuidanceInbox:
         if type(stall_seconds) is not int or not 30 <= stall_seconds <= 86400: raise ValueError('invalid_stall_interval')
         if not isinstance(observation, dict): raise ValueError('invalid_observation')
         raw = observation.get('state', 'unknown')
-        states = {'running', 'idle', 'failed', 'unavailable', 'unknown', 'completed', 'cancelled'}
+        states = {'running', 'idle', 'failed', 'unavailable', 'unknown', 'completed', 'cancelled', 'timed_out', 'ambiguous'}
         status = raw if raw in states else 'unknown'
-        if observation.get('needsInput') is True: status = 'needs_instructions'
+        error_code = normalized_error_code(observation.get('errorCode'))
+        question = normalize_question(observation.get('question'))
+        if error_code is not None: status = 'failed'
+        elif status not in {'failed', 'cancelled', 'timed_out', 'ambiguous'} and observation.get('needsInput') is True:
+            status = 'needs_approval' if question and question['kind'] == 'approval' else 'needs_instructions'
         elif status == 'completed' and observation.get('verifiedOutput') is not True: status = 'idle'
         model = observation.get('model')
         if model is not None: model = identity(model)
         count = observation.get('promptCount')
         if type(count) is not int or count < 0: count = None
-        question = normalize_question(observation.get('question'))
         question_json = json.dumps(question, ensure_ascii=False, sort_keys=True, separators=(',', ':')) if question else None
-        fingerprint = json.dumps([status, model, count, question_json], separators=(',', ':'))
+        fingerprint = json.dumps([status, model, count, question_json, error_code], separators=(',', ':'))
         db = self.connection()
         try:
             db.execute('BEGIN IMMEDIATE')
@@ -123,20 +135,20 @@ class GuidanceInbox:
                 raise ValueError('worker_ownership_conflict')
             progress = previous['progress_at'] if previous and previous['fingerprint'] == fingerprint else now
             if status == 'running' and now - progress >= stall_seconds: status = 'stalled'
-            db.execute('INSERT INTO watched_workers(id,status,fingerprint,progress_at,heartbeat_at,model,owner,job,prompt_count,question_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
+            db.execute('INSERT INTO watched_workers(id,status,fingerprint,progress_at,heartbeat_at,model,owner,job,prompt_count,question_json,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
                        'status=excluded.status,fingerprint=excluded.fingerprint,progress_at=excluded.progress_at,'
-                       'heartbeat_at=excluded.heartbeat_at,model=excluded.model,prompt_count=excluded.prompt_count,question_json=excluded.question_json',
-                       (worker, status, fingerprint, progress, now, model, owner, job, count, question_json))
+                       'heartbeat_at=excluded.heartbeat_at,model=excluded.model,prompt_count=excluded.prompt_count,question_json=excluded.question_json,error_code=excluded.error_code',
+                       (worker, status, fingerprint, progress, now, model, owner, job, count, question_json, error_code))
             event = None
-            if not previous or previous['status'] != status or previous['model'] != model or previous['question_json'] != question_json:
+            if not previous or previous['status'] != status or previous['model'] != model or previous['question_json'] != question_json or previous['error_code'] != error_code:
                 kind = 'idle_needs_review' if status == 'idle' else status
-                guidance = 'queued' if status in {'failed', 'stalled', 'needs_instructions'} else 'inbox_only'
+                guidance = 'queued' if status in {'failed', 'stalled', 'needs_instructions', 'timed_out', 'ambiguous'} else 'inbox_only'
                 binding = db.execute('SELECT account_id,session_id FROM monitor_registrations WHERE id=? AND project=? AND owner=?', (worker,job,owner)).fetchone()
-                event = db.execute('INSERT INTO guidance_events(worker,kind,model,at,owner,job,guidance_state,prompt_count,question_json,account_id,session_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                                   (worker, kind, model, now, owner, job, guidance, count, question_json, binding['account_id'] if binding else None, binding['session_id'] if binding else None)).lastrowid
+                event = db.execute('INSERT INTO guidance_events(worker,kind,model,at,owner,job,guidance_state,prompt_count,question_json,account_id,session_id,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                                   (worker, kind, model, now, owner, job, guidance, count, question_json, binding['account_id'] if binding else None, binding['session_id'] if binding else None, error_code)).lastrowid
             db.commit()
             return {'eventId': event, 'state': status, 'model': model, 'promptCount': count,
-                    'question': question, 'heartbeatAt': now}
+                    'question': question, 'errorCode': error_code, 'heartbeatAt': now}
         except BaseException:
             db.rollback()
             raise
@@ -198,7 +210,7 @@ class GuidanceInbox:
         try:
             rows = db.execute(
                 'SELECT r.id,r.account_id,r.session_id,r.model AS registered_model,w.status,w.model AS reported_model,'
-                'w.heartbeat_at,w.progress_at,w.prompt_count,w.question_json FROM monitor_registrations r LEFT JOIN watched_workers w '
+                'w.heartbeat_at,w.progress_at,w.prompt_count,w.question_json,w.error_code FROM monitor_registrations r LEFT JOIN watched_workers w '
                 'ON w.id=r.id AND w.owner=r.owner AND w.job=r.project '
                 f'WHERE r.project=? AND r.owner IN ({placeholders}) ORDER BY r.id',
                 (project, *safe_owners),
@@ -208,7 +220,8 @@ class GuidanceInbox:
                      'modelSource':'observed' if row['reported_model'] else 'registered',
                      'state':row['status'] or 'unobserved','heartbeatAt':row['heartbeat_at'],
                      'lastProgressAt':row['progress_at'],'promptCount':row['prompt_count'],
-                     'question':json.loads(row['question_json']) if row['question_json'] else None} for row in rows]
+                     'question':json.loads(row['question_json']) if row['question_json'] else None,
+                     'errorCode':row['error_code']} for row in rows]
         finally:
             db.close()
 
@@ -226,6 +239,7 @@ class GuidanceInbox:
                 item['question'] = json.loads(encoded) if encoded else None
                 item['accountId'] = item.pop('account_id', None)
                 item['sessionId'] = item.pop('session_id', None)
+                item['errorCode'] = item.pop('error_code', None)
                 output.append(item)
             return output
         finally: db.close()
@@ -280,11 +294,54 @@ class GuidanceInbox:
         finally: db.close()
 
 
+    def compact_summary(self, *, project, owners, after=0, limit=20):
+        """Private bounded projection. No transcripts, prompts, credentials, or guessed capacity."""
+        project = identity(project)
+        if not isinstance(owners, list) or not 1 <= len(owners) <= 50:
+            raise ValueError('invalid_owners')
+        owners = list(dict.fromkeys(identity(owner) for owner in owners))
+        if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError('invalid_page')
+        roster = self.project_workers(project=project, owners=owners)[:100]
+        events = []
+        for owner in owners:
+            events.extend(self.inbox(after=after, owner=owner, job=project, limit=limit + 1 if limit < 100 else limit))
+        events.sort(key=lambda row: row['id'])
+        page = events[:limit]
+        terminal = {'failed', 'cancelled', 'timed_out', 'ambiguous', 'completed'}
+        needs_action = {'failed', 'stalled', 'timed_out', 'ambiguous', 'needs_instructions', 'needs_approval', 'idle'}
+        summarized = []
+        with closing(self.connection()) as db:
+            for worker in roster:
+                latest = db.execute(
+                    'SELECT id,kind,at,ack_at FROM guidance_events WHERE worker=? AND job=? AND owner IN (' +
+                    ','.join('?' for _ in owners) + ') ORDER BY id DESC LIMIT 1',
+                    (worker['id'], project, *owners)).fetchone()
+                state = worker['state']
+                summarized.append({
+                    'id': worker['id'], 'accountId': worker['accountId'], 'sessionId': worker['sessionId'],
+                    'reportedModel': worker['model'] if worker['modelSource'] == 'observed' else None,
+                    'registeredModel': worker['model'] if worker['modelSource'] == 'registered' else None,
+                    'state': state, 'terminal': state in terminal, 'needsAction': state in needs_action,
+                    'actionOwner': 'operator' if state in needs_action else None,
+                    'errorCode': worker['errorCode'], 'heartbeatAt': worker['heartbeatAt'],
+                    'lastTransition': ({'eventId': latest['id'], 'kind': latest['kind'], 'at': latest['at'],
+                                        'ackAt': latest['ack_at']} if latest else None),
+                    'approvalKind': (worker['question'] or {}).get('kind'),
+                    'artifactRefs': [], 'usage': {'known': False}, 'capacity': {'known': False},
+                })
+        return {'project': project, 'workers': summarized,
+                'events': [{'id': row['id'], 'worker': row['worker'], 'kind': row['kind'],
+                            'at': row['at'], 'errorCode': row['errorCode'],
+                            'ackAt': row['ack_at']} for row in page],
+                'cursor': page[-1]['id'] if page else after, 'hasMore': len(events) > limit,
+                'truncatedWorkers': len(self.project_workers(project=project, owners=owners)) > 100}
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', type=Path, required=True)
-    parser.add_argument('command', choices=['observe','inbox','guide','ack','ack-project','register','sync-project','registrations','project-snapshot'])
+    parser.add_argument('command', choices=['observe','inbox','guide','ack','ack-project','register','sync-project','registrations','project-snapshot','compact-summary'])
     parser.add_argument('--pool-config', type=Path)
     parser.add_argument('--pool-db', type=Path)
     parser.add_argument('--project')
@@ -318,6 +375,14 @@ def main():
         result=inbox.sync_project(item['project'],item['workers'])
     elif args.command == 'registrations':
         result={'workers':inbox.registrations()}
+    elif args.command == 'compact-summary':
+        if not args.project: raise ValueError('invalid_project')
+        import sys
+        raw = sys.stdin.buffer.read(16385)
+        if len(raw) > 16384: raise ValueError('input_too_large')
+        payload = json.loads(raw or b'{}')
+        result = inbox.compact_summary(project=args.project, owners=payload.get('owners'),
+                                       after=args.after, limit=args.limit)
     elif args.command == 'project-snapshot':
         if not args.project or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}',args.project): raise ValueError('invalid_project')
         if not 0 <= args.after <= 2**63-1 or not 1 <= args.limit <= 20: raise ValueError('invalid_page')
@@ -336,6 +401,7 @@ def main():
             item['promptCount'] = item.pop('prompt_count')
             item['question'] = row.get('question')
             item['accountId'], item['sessionId'] = row.get('accountId'), row.get('sessionId')
+            item['errorCode'] = row.get('errorCode')
             task=None; result_text=None
             if row['guidance_job']:
                 try:

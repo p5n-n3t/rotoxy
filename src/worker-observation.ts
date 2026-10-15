@@ -41,3 +41,41 @@ export function normalizeParkedQuestion(value: unknown): ParkedQuestion | undefi
   const result: ParkedQuestion = { ...(id ? { id } : {}), text, ...(choices ? { choices } : {}), source: "provider", kind };
   return Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_QUESTION_BYTES ? result : undefined;
 }
+
+/** Provider execution errors outrank an idle transport state. No raw error bodies leave this boundary. */
+export function normalizeExecutionError(status: unknown): string | undefined {
+  if (typeof status !== "object" || status === null || Array.isArray(status)) return undefined;
+  const row = status as Record<string, unknown>;
+  const code = row.errorCode;
+  if (typeof code === "string" && code.trim()) {
+    return /^[A-Za-z0-9_.-]{1,80}$/.test(code) ? code : "provider_execution_error";
+  }
+  // Error messages can contain secrets; only project their existence, not their contents.
+  if (typeof row.errorMessage === "string" && row.errorMessage.trim()) return "provider_execution_error";
+  return undefined;
+}
+
+export type SessionObservation = {
+  state: "running" | "idle" | "failed" | "cancelled" | "timed_out" | "unknown";
+  errorCode?: string;
+  needsInput: boolean;
+  question?: ParkedQuestion;
+};
+
+/** A status read is evidence of observation only, never evidence of successful work. */
+export function normalizeSessionObservation(status: unknown): SessionObservation {
+  const row = typeof status === "object" && status !== null && !Array.isArray(status)
+    ? status as Record<string, unknown> : {};
+  const reported = row.sessionStatus;
+  const errorCode = normalizeExecutionError(row);
+  const raw = typeof reported === "string" ? reported.toLowerCase() : "";
+  const state: SessionObservation["state"] = errorCode || ["failed", "interrupted", "error"].includes(raw) ? "failed"
+    : ["cancelled", "canceled", "stopped"].includes(raw) ? "cancelled"
+    : ["timeout", "timed_out", "timedout"].includes(raw) ? "timed_out"
+    : raw === "running" ? "running" : raw === "idle" ? "idle" : "unknown";
+  const parked = row.parkedQuestion;
+  const needsInput = state !== "failed" && state !== "cancelled" && state !== "timed_out" &&
+    parked !== undefined && parked !== null && parked !== false && parked !== "";
+  const question = needsInput ? normalizeParkedQuestion(parked) : undefined;
+  return { state, ...(errorCode ? { errorCode } : {}), needsInput, ...(question ? { question } : {}) };
+}

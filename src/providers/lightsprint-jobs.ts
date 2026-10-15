@@ -346,9 +346,65 @@ function projectMessage(source: unknown): { message: Record<string, unknown>; co
   return { message, contentComplete: complete, toolPayloadOmitted };
 }
 
+/** Documented token transcript shape: newest page, ascending seq, typed items.
+ * Never include user prompts, tool inputs or outputs in our completion projection.
+ * A snapshot is only a candidate result when it is the last event of the newest
+ * user turn on the page. Older-page pagination needs explicit policy approval. */
+function projectTokenTranscript(value: Record<string, unknown>): unknown {
+  const items = value.items;
+  if (!Array.isArray(items)) return undefined;
+  const bounded = items.slice(-MAX_RECENT_TRANSCRIPT_MESSAGES);
+  const valid = bounded.every((x) => {
+    const item = record(x);
+    return item && Number.isSafeInteger(item.seq) && Number(item.seq) >= 0 &&
+      typeof item.turnId === "string" && ID_RE.test(item.turnId) &&
+      typeof item.type === "string" && typeof item.time === "string";
+  });
+  const more = value.hasMore === true || items.length > bounded.length;
+  const cursor = (key: "nextCursor" | "prevCursor") => {
+    const n = value[key];
+    return Number.isSafeInteger(n) && Number(n) >= 0 ? n as number : null;
+  };
+  const base = {
+    shape: "items", sourceItemCount: items.length, truncated: more,
+    hasMore: value.hasMore === true, nextCursor: cursor("nextCursor"), prevCursor: cursor("prevCursor"),
+  };
+  if (!valid) return { ...base, messages: [], incomplete: true, latestAssistantIndex: null,
+    latestAssistantComplete: false, reason: "invalid_items" };
+  // The current page must contain the most recent user turn for exact turn
+  // association; a snapshot from an earlier turn cannot finish a newer job.
+  const lastUserIndex = bounded.findLastIndex(x => record(x)?.type === "user_message");
+  if (lastUserIndex < 0) return { ...base, messages: [], incomplete: true,
+    latestAssistantIndex: null, latestAssistantComplete: false, reason: "missing_user_turn" };
+  const user = record(bounded[lastUserIndex])!;
+  const turn = user.turnId;
+  const userContent = record(user.payload)?.content;
+  const lastUserTextSha256 = typeof userContent === "string"
+    ? createHash("sha256").update(userContent).digest("hex") : null;
+  const later = bounded.slice(lastUserIndex + 1).map(record);
+  const lastItem = later.at(-1);
+  const candidate = lastItem && lastItem.turnId === turn && lastItem.type === "assistant_snapshot" ? lastItem : undefined;
+  if (!candidate) return { ...base, messages: [], incomplete: true,
+    latestAssistantIndex: null, latestAssistantComplete: false, reason: "no_terminal_snapshot" };
+  const payload = record(candidate.payload);
+  const projected = projectMessage({ role: "assistant", content: payload?.content,
+    timestamp: candidate.time });
+  if (!projected.contentComplete) return { ...base, messages: [], incomplete: true,
+    latestAssistantIndex: null, latestAssistantComplete: false, reason: "incomplete_snapshot" };
+  const result = { ...base, messages: [{ ...projected.message, turnId: turn, seq: candidate.seq }],
+    incomplete: false, latestAssistantIndex: 0, latestAssistantComplete: true,
+    lastUserTextSha256 };
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > MAX_TRANSCRIPT_PROJECTION_BYTES) {
+    return { ...base, messages: [], incomplete: true, latestAssistantIndex: null,
+      latestAssistantComplete: false, reason: "projection_limit_exceeded" };
+  }
+  return result;
+}
+
 /** Recent-message view with a stable latest-assistant pointer; never serializes the source transcript wholesale. */
 function boundedTranscript(value: unknown): unknown {
   const transcript = record(value);
+  if (transcript && Array.isArray(transcript.items)) return projectTokenTranscript(transcript);
   const messages = transcript?.messages;
   if (!Array.isArray(messages)) {
     return {
@@ -356,7 +412,7 @@ function boundedTranscript(value: unknown): unknown {
       truncated: true,
       incomplete: true,
       latestAssistantComplete: false,
-      preview: boundedPreview(value),
+      preview: "[unsupported transcript shape; contents withheld]",
     };
   }
 

@@ -2,6 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 import sqlite3
+import json
+import os
+import subprocess
+import sys
 from snooze.guidance import GuidanceInbox
 
 
@@ -97,7 +101,7 @@ class GuidanceTests(unittest.TestCase):
         first=self.inbox.observe('worker-a',{'state':'idle','needsInput':True,'promptCount':3,
             'question':{'text':'Please choose; api_key=never-store','choices':['Continue','Stop'],'kind':'approval'}},
             owner='client-a',job='job-a',now=10)
-        self.assertEqual(first['state'],'needs_instructions')
+        self.assertEqual(first['state'],'needs_approval')
         self.assertEqual(first['question']['text'],'Please choose; [redacted]')
         unchanged=self.inbox.observe('worker-a',{'state':'idle','needsInput':True,'promptCount':3,
             'question':{'text':'Please choose; api_key=never-store','choices':['Continue','Stop'],'kind':'approval'}},
@@ -143,5 +147,60 @@ class GuidanceTests(unittest.TestCase):
         self.assertTrue({'prompt_count','question_json'} <= worker_cols)
         self.assertTrue({'prompt_count','question_json'} <= event_cols)
 
+
+    def test_provider_error_overrides_idle_and_survives_restart_without_duplicate(self):
+        self.inbox.register(worker='worker-a',project='job-a',owner='client-a',
+                            account='acct-a',session='session-a',model='gpt-6-luna')
+        first = self.inbox.observe('worker-a', {'state':'idle','errorCode':'ACP_RELAY_DIED',
+            'model':'claude-opus-5-5','promptCount':2},owner='client-a',job='job-a',now=10)
+        self.assertEqual(first['state'], 'failed')
+        reopened = GuidanceInbox(self.path)
+        unchanged = reopened.observe('worker-a', {'state':'idle','errorCode':'ACP_RELAY_DIED',
+            'model':'claude-opus-5-5','promptCount':2},owner='client-a',job='job-a',now=20)
+        self.assertIsNone(unchanged['eventId'])
+        snapshot = reopened.compact_summary(project='job-a',owners=['client-a'])
+        self.assertEqual(snapshot['workers'][0]['errorCode'],'ACP_RELAY_DIED')
+        self.assertTrue(snapshot['workers'][0]['needsAction'])
+        self.assertEqual(snapshot['workers'][0]['accountId'],'acct-a')
+        self.assertIsNone(snapshot['workers'][0]['registeredModel'])
+        self.assertEqual(snapshot['workers'][0]['reportedModel'],'claude-opus-5-5')
+        self.assertEqual(len(snapshot['events']),1)
+        self.assertEqual(snapshot['events'][0]['errorCode'],'ACP_RELAY_DIED')
+        self.assertNotIn('prompt', str(snapshot).lower())
+        reopened.acknowledge(snapshot['events'][0]['id'],owner='client-a',job='job-a')
+        self.assertIsNotNone(reopened.compact_summary(project='job-a',owners=['client-a'])['events'][0]['ackAt'])
+
+    def test_native_approval_handoff_not_automatically_guided(self):
+        event = self.observe('idle', now=1, needsInput=True,
+                             question={'kind':'approval','text':'Allow a sensitive action?'})
+        self.assertEqual(event['state'],'needs_approval')
+        self.assertEqual(self.inbox.inbox()[0]['guidance_state'],'inbox_only')
+        self.assertEqual(self.inbox.dispatch_guidance(Pool(),now=2),0)
+
+    def test_error_code_only_stores_safe_class_and_summary_bounds(self):
+        self.observe('idle',now=1,errorCode='api_key=private-value')
+        self.assertEqual(self.inbox.inbox()[0]['errorCode'],'provider_execution_error')
+        self.assertEqual(self.inbox.compact_summary(project='job-a',owners=['client-a'])['events'][0]['errorCode'],'provider_execution_error')
+
+
+
+    def test_separate_monitor_cli_processes_recover_durable_events(self):
+        env = {**os.environ, 'HOME':self.temp.name,
+               'TOKEN2OAUTH_CONFIG_DIR':str(Path(self.temp.name)/'config')}
+        def invoke(command, payload, *args):
+            outcome = subprocess.run([sys.executable, '-m', 'snooze.guidance',
+                '--db', str(self.path), command, *args], input=json.dumps(payload),
+                text=True, capture_output=True, env=env, timeout=10)
+            self.assertEqual(outcome.returncode, 0, outcome.stderr)
+            return json.loads(outcome.stdout)
+        first = invoke('observe', {'worker':'worker-restart', 'owner':'client-a', 'job':'job-a',
+            'observation':{'state':'idle','errorCode':'ACP_RELAY_DIED'}})
+        self.assertEqual(first['state'], 'failed')
+        later = invoke('compact-summary', {'owners':['client-a']}, '--project','job-a')
+        self.assertEqual(len(later['events']), 1)
+        self.assertEqual(later['events'][0]['errorCode'], 'ACP_RELAY_DIED')
+        duplicate = invoke('observe', {'worker':'worker-restart', 'owner':'client-a', 'job':'job-a',
+            'observation':{'state':'idle','errorCode':'ACP_RELAY_DIED'}})
+        self.assertIsNone(duplicate['eventId'])
 
 if __name__=='__main__':unittest.main()
