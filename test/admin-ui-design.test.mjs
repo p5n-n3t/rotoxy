@@ -30,7 +30,7 @@ test("legacy T2 text badge is replaced by the authored SVG mark, including share
 test("theme wrapper keeps CSRF injection on every POST form and escapes the title", () => {
   const body = `${adminNav("", "pool")}<form method="post" action="/admin/accounts"><input name="label"></form><form method="get" action="/x"></form>`;
   const html = withCsrf(page("<Pool>", body), "tok-123");
-  assert.equal((html.match(/name="_csrf" value="tok-123"/g) || []).length, 2); // logout + accounts
+  assert.equal((html.match(/name="_csrf" value="tok-123"/g) || []).length, (html.match(/<form[^>]+method="post"/g) || []).length); // every desktop/mobile action
   assert.match(html, /<title>&lt;Pool&gt; · ROTOXY<\/title>/);
 });
 

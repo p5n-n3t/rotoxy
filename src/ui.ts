@@ -116,7 +116,8 @@ details.settings>summary .tiny{font-weight:400;margin-left:8px}
 .empty{padding:14px 16px;background:var(--sunk);color:var(--muted);border-radius:4px;font-size:14px}
 @media(max-width:520px){.ledger{grid-template-columns:repeat(2,minmax(0,1fr))}.ledger div,.ledger div+div{padding:12px 10px 12px 0;border-left:0;border-bottom:1px solid var(--rule)}.ledger dd{font-size:23px}.reqs li{grid-template-columns:64px minmax(0,1fr)}.reqs .lat{grid-column:2}}
 .wrap:has(>.rx-sidebar){width:auto;max-width:none;margin:0 0 0 252px;padding:0 clamp(22px,3vw,44px) 72px}
-@media(min-width:721px){.rx-nav-details::details-content{content-visibility:visible;display:contents}}
+@media(min-width:721px){.rx-nav-details{display:none}.rx-desktop-nav{display:flex;flex:1;min-height:0;flex-direction:column}}
+@media(max-width:720px){.rx-desktop-nav{display:none}}
 .rx-sidebar{position:fixed;inset:0 auto 0 0;z-index:20;width:252px;display:flex;flex-direction:column;gap:18px;padding:20px 14px 14px;background:#173a37;color:#edf4ef;overflow-y:auto}
 .rx-sidebar .brand{color:#edf4ef;text-decoration:none;gap:10px;padding:0 8px}.rx-sidebar .brand strong{display:block;font:700 15px/1.2 var(--mono);letter-spacing:.12em}.rx-sidebar .brand .eyebrow{display:block;margin-top:3px;color:#bfcec8;font-size:11px}.rx-sidebar .logo{color:#edf4ef;width:32px;height:32px}.rx-sidebar .logo svg{width:32px;height:32px}
 .rx-workspace-id{display:grid;gap:4px;margin:0 8px;padding:12px 10px;border-top:1px solid #ffffff2b;border-bottom:1px solid #ffffff2b}.rx-workspace-id .eyebrow{color:#bfcec8}.rx-workspace-id strong{font-size:13px;overflow-wrap:anywhere}

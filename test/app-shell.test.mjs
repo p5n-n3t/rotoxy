@@ -10,7 +10,7 @@ test("shared renderer exposes the four audited workspace groups and current rout
   assert.deepEqual(NAV_GROUPS.map((group) => group.label), ["Command", "Resources", "Insights", "Settings"]);
   for (const label of ["Overview", "Jobs", "Supervisor", "Workspace accounts", "Models", "Private workers", "Search", "Activity", "Analytics", "Clients", "Auth", "Diagnostics"]) assert.ok(html.includes(label));
   for (const path of ["/token2oauth/admin", "/token2oauth/admin/supervisor", "/token2oauth/admin#accounts", "/token2oauth/admin/models", "/token2oauth/admin/oracle", "/token2oauth/admin/resources", "/token2oauth/admin/security", "/token2oauth/admin/diagnostics"]) assert.ok(html.includes(`href="${path}"`), path);
-  assert.equal((html.match(/aria-current="page"/g) || []).length, 1);
+  assert.equal((html.match(/aria-current="page"/g) || []).length, 2);
   assert.match(html, /aria-current="page">Supervisor/);
   assert.match(html, /No standalone jobs page is mounted yet/);
   assert.match(html, /authenticated JSON endpoint/);

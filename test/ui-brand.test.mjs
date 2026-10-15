@@ -18,7 +18,7 @@ test("grouped navigation keeps every legacy admin URL and marks the active page"
   for (const path of ["/admin", "/admin/supervisor", "/admin/tools", "/admin/diagnostics", "/admin/security", "/admin/logout"]) {
     assert.ok(html.includes(`https://gw.example/token2oauth${path}"`), path);
   }
-  assert.equal((html.match(/aria-current="page"/g) || []).length, 1);
+  assert.equal((html.match(/aria-current="page"/g) || []).length, 2);
   assert.match(html, /aria-current="page">Supervisor</);
   assert.match(html, /class="nav-group" aria-labelledby="nav-resources"/);
 });

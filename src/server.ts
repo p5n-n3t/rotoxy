@@ -1,3 +1,5 @@
+import { createCommandWorkspaceRouter } from "./command-workspace.js";
+import { createUnifiedModelApi } from "./unified-model-api.js";
 import { createCloudflareRouter } from "./cloudflare-admin.js";
 import { OracleTools } from "./oracle-tools.js";
 import express from "express";
@@ -54,8 +56,11 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
 
   const router = express.Router();
   router.use(oauth.router);
+  const cloudflare = createCloudflareRouter(store, sessions, modelGateway.credentials);
+  router.use(createUnifiedModelApi(store, { cloudflareAdapter: cloudflare.adapter }).router);
   router.use(modelGateway.router);
-  router.use(createCloudflareRouter(store, sessions, modelGateway.credentials).router);
+  router.use(cloudflare.router);
+  router.use(createCommandWorkspaceRouter(store, sessions, options.supervisorBackend));
   router.use(createControlPlaneAdminRouter(store, sessions, modelGateway.credentials, fileURLToPath(new URL("../supervisor/", import.meta.url)), codexProfiles, modelGateway.snapshot));
   router.use(createResourceConnectionsRouter(store, sessions));
   router.use(createAnalyticsApiRouter(store, sessions, telemetry));

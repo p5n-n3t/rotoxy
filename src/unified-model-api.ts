@@ -139,7 +139,7 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
           if (catalogController.signal.aborted) break;
         }
       } finally { clearTimeout(catalogTimer); }
-      if (ollamaAccounts.length > 0 && successfulCatalogs === 0) return error(res, 503, "ollama_catalog_unavailable");
+      if (ollamaAccounts.length > 0 && successfulCatalogs === 0 && cloudflareModels.length === 0) return error(res, 503, "ollama_catalog_unavailable");
       const names = [...new Set([...cloudflareModels, ...ollamaModels])].slice(0, MAX_CATALOG_MODELS * 2);
       return res.json({ object: "list", data: names.map(id => ({ id, object: "model", owned_by: id.startsWith("cloudflare/") ? "cloudflare" : "ollama" })) });
     } catch { return error(res, 503, "model_catalog_unavailable"); }
@@ -172,6 +172,7 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
           res.setHeader("WWW-Authenticate", 'Bearer scope="model:invoke"');
           return error(res, 401, "unauthorized");
         }
+        if (Object.keys(body).some(key => !["model", "messages", "max_tokens", "temperature", "stream"].includes(key))) return error(res, 400, "unsupported_parameter");
         if (body.stream === true) return error(res, 400, "streaming_not_supported");
         const model = body.model.slice("cloudflare/".length);
         const messages = validMessages(body.messages);
