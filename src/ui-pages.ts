@@ -5,6 +5,8 @@
  */
 
 import { adminNav, esc } from "./html.js";
+import { JOB_TOOLS, requiredJobScope } from "./job-submit.js";
+import { ORACLE_TOOL_DEFINITIONS, oracleToolRequiredScope } from "./oracle-tools.js";
 import type { ToolCatalogEntry } from "./capabilities.js";
 import type { DoctorReport, FindingSeverity } from "./doctor.js";
 import type { AggregateStats, GatewayEvent, GatewaySummary, ProviderUsageRecord } from "./telemetry.js";
@@ -39,6 +41,13 @@ export interface ToolsPageInput {
 }
 
 export function renderToolsPage({ base, state, catalog, notice }: ToolsPageInput): string {
+  const gatewayTools = [
+    ...JOB_TOOLS.map(name => ({ name, scope: requiredJobScope(name), service: "Distributed jobs" })),
+    ...ORACLE_TOOL_DEFINITIONS.map(tool => ({ name: tool.name, scope: oracleToolRequiredScope(tool.name), service: "Private workers" })),
+    { name: "web_search", scope: "web:search", service: "Search providers" },
+    { name: "web_extract", scope: "web:extract", service: "Search providers" },
+  ];
+  const gatewayRows = gatewayTools.map(tool => `<tr><td><code>${esc(tool.name)}</code></td><td>${esc(tool.service)}</td><td><code>${esc(tool.scope)}</code></td></tr>`).join("");
   const policy = state.config.toolPolicy;
   const denied = new Set(policy?.denyTools || []);
   const allow = policy?.allowTools ? new Set(policy.allowTools) : undefined;
@@ -50,7 +59,7 @@ export function renderToolsPage({ base, state, catalog, notice }: ToolsPageInput
     const status = !caps
       ? '<span class="muted">Not inventoried yet</span>'
       : caps.ok
-        ? `<span class="pill"><span class="dot"></span>${caps.tools.length} tools</span>`
+        ? `<span class="pill"><span class="dot"></span>${caps.tools.length} upstream tools</span>`
         : `<span class="pill"><span class="dot bad"></span>Failed</span> <span class="tiny muted">${esc(caps.error || "unknown error")}</span>`;
     const server = caps?.serverName ? `${esc(caps.serverName)}${caps.serverVersion ? " " + esc(caps.serverVersion) : ""}` : "—";
     return `<tr><td><strong>${esc(account.label)}</strong><div class="tiny muted mono">${esc(account.id)}</div></td><td>${status}</td><td>${server}</td><td class="tiny">${esc(when(caps?.capturedAt))}</td><td class="mono tiny">${esc(caps?.surfaceHash?.slice(0, 12) || "—")}</td><td><form class="inline" method="post" action="${esc(base)}/admin/tools/refresh"><input type="hidden" name="accountId" value="${esc(account.id)}"><button class="secondary" type="submit"${account.enabled ? "" : " disabled"}>Refresh</button></form></td></tr>`;
@@ -77,7 +86,8 @@ export function renderToolsPage({ base, state, catalog, notice }: ToolsPageInput
     : "";
 
   return `<main class="wrap">${adminNav(base, "tools")}${flash(notice)}<section class="grid">
-<div class="card full"><div class="eyebrow">Inventory</div><h2>Tools exposed by each upstream account</h2><p class="muted tiny">Refreshing sends <code>initialize</code> and paginated <code>tools/list</code> with one account's credential, stores tool names, descriptions and schema hashes (never tokens), then closes the upstream session.${surfaces.size > 1 ? " <strong>Accounts currently expose different tool surfaces.</strong>" : ""}</p>
+<div class="card full"><h1>Tools</h1><p>The client receives upstream tools plus ROTOXY tools permitted by its OAuth scopes and configured services. A single LightSprint API tool can expose many endpoint operations; it is not the total gateway tool count.</p><h2>ROTOXY tool definitions · ${gatewayTools.length}</h2><p class="muted tiny">These are built-in definitions, not a claim that every tool is enabled for every client. The authenticated client's tools/list response is authoritative. Jobs and private workers require their services; search requires provider configuration.</p><div class="table-scroll"><table><thead><tr><th>Tool</th><th>Service</th><th>Required scope</th></tr></thead><tbody>${gatewayRows}</tbody></table></div></div>
+<div class="card full"><div class="eyebrow">Upstream inventory</div><h2>Tools exposed by each upstream account</h2><p class="muted tiny">Refreshing sends <code>initialize</code> and paginated <code>tools/list</code> with one account's credential, stores tool names, descriptions and schema hashes (never tokens), then closes the upstream session.${surfaces.size > 1 ? " <strong>Accounts currently expose different tool surfaces.</strong>" : ""}</p>
 <div class="actions" style="margin:12px 0"><form class="inline" method="post" action="${esc(base)}/admin/tools/refresh"><button type="submit"${enabledAccounts.length ? "" : " disabled"}>Refresh all enabled accounts</button></form></div>
 ${state.accounts.length ? `<div style="overflow:auto"><table><thead><tr><th>Account</th><th>Inventory</th><th>Server</th><th>Captured</th><th>Surface</th><th></th></tr></thead><tbody>${inventoryRows}</tbody></table></div>` : '<p class="muted">Add an upstream credential first.</p>'}</div>
 <div class="card full"><div class="eyebrow">Policy</div><h2>Enabled tools</h2><p class="muted tiny">Unchecked tools are removed from <code>tools/list</code> and every <code>tools/call</code> for them is rejected by the gateway before it reaches the upstream. This is enforced server-side for all MCP clients. <em>Replay-safe</em> marks tools you know are read-only, so a timeout or 5xx on one account may be retried on another; all other tool calls are never replayed after an ambiguous failure.</p>${endpointNote}
