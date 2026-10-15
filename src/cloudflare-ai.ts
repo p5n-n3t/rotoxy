@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { decryptSecret, encryptSecret, ensureMasterKey, randomToken } from "./crypto.js";
 import type { EncryptedSecret } from "./types.js";
 import type { StateStore } from "./store.js";
-import { boundedAccountCapacity, ResourceRoutingRulesStore } from "./resource-routing.js";
+import { boundedAccountCapacity, ResourceRoutingRulesStore, routingRuleAllowsModel } from "./resource-routing.js";
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/;
 const LABEL = /^[^\u0000-\u001f\u007f]{1,80}$/;
@@ -202,9 +202,10 @@ export class CloudflareAIAdapter {
     const [all, rules] = await Promise.all([this.credentials.listCredentials(), this.credentials.routingRules.read()]);
     const ruleFor = (id: string) => rules.resources[id];
     const eligible = all.filter((account) => account.enabled && ruleFor(account.id)?.enabled !== false && (account.cooldownUntil === undefined || account.cooldownUntil <= this.now()) &&
-      (model === undefined || account.allowedModels.includes(model)) && (this.inflight.get(account.id) ?? 0) < boundedAccountCapacity(ruleFor(account.id)?.capacity, this.maxInflight));
+      (model === undefined || account.allowedModels.includes(model) && routingRuleAllowsModel(ruleFor(account.id), model)) &&
+      (this.inflight.get(account.id) ?? 0) < boundedAccountCapacity(ruleFor(account.id)?.capacity, this.maxInflight));
     if (!eligible.length) {
-      if (model && all.some((account) => account.enabled && account.allowedModels.includes(model))) throw new CloudflareAIError("no_eligible_account");
+      if (model && all.some((account) => account.enabled && account.allowedModels.includes(model) && routingRuleAllowsModel(ruleFor(account.id), model))) throw new CloudflareAIError("no_eligible_account");
       throw new CloudflareAIError(model ? "model_not_allowed" : "no_eligible_account");
     }
     const weighted = eligible.some((account) => (ruleFor(account.id)?.weight ?? 1) !== 1);
@@ -234,7 +235,7 @@ export class CloudflareAIAdapter {
       const latestRule = latestRules.resources[selected.id];
       if (!credential || !credential.view.enabled || (credential.view.cooldownUntil !== undefined && credential.view.cooldownUntil > this.now()) ||
           latestRule?.enabled === false || (this.inflight.get(selected.id) ?? 0) > boundedAccountCapacity(latestRule?.capacity, this.maxInflight) ||
-          (model !== undefined && !credential.view.allowedModels.includes(model))) throw new CloudflareAIError("no_eligible_account");
+          (model !== undefined && (!credential.view.allowedModels.includes(model) || !routingRuleAllowsModel(latestRule, model)))) throw new CloudflareAIError("no_eligible_account");
       this.dispatched.set(selected.id, (this.dispatched.get(selected.id) ?? 0) + 1);
       return { ...credential, release };
     } catch (error) { release(); throw error; }

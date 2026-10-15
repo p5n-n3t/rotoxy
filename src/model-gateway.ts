@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { StateStore } from "./store.js";
 import { ModelCredentialStore, type ModelScope } from "./model-credentials.js";
-import { boundedAccountCapacity, ResourceRoutingRulesStore } from "./resource-routing.js";
+import { boundedAccountCapacity, ResourceRoutingRulesStore, routingRuleAllowsModel } from "./resource-routing.js";
 
 const OLLAMA_ORIGIN = "https://ollama.com";
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
@@ -96,8 +96,17 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
       return sendError(res, 401, "A valid scoped model gateway token is required");
     }
 
+    let requestedModel: string | undefined;
+    if (target.scope === "model:invoke" && Buffer.isBuffer(req.body)) {
+      try {
+        const value = JSON.parse(req.body.toString("utf8")).model;
+        if (typeof value === "string" && value.length <= 200 && !/[\r\n\0]/.test(value)) requestedModel = value;
+      } catch { /* Preserve existing body handling; configured model policies fail closed below. */ }
+    }
     const [listed, rules] = await Promise.all([credentials.listCredentials(), routingRules.read()]);
-    const available = listed.filter((account) => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now() &&
+    const available = listed.filter((account) => account.enabled && rules.resources[account.id]?.enabled !== false &&
+      (target.scope !== "model:invoke" || rules.resources[account.id]?.allowedModels === undefined || requestedModel !== undefined && routingRuleAllowsModel(rules.resources[account.id], requestedModel)) &&
+      (account.cooldownUntil ?? 0) <= now() &&
       (inflight.get(account.id) ?? 0) < boundedAccountCapacity(rules.resources[account.id]?.capacity, maxInflight));
     if (!available.length) return sendError(res, 503, "No Ollama Cloud credential is currently available");
     const offset = roundRobin++ % available.length;
@@ -116,7 +125,9 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
       // concurrent arrivals cannot exceed this local software cap.
       const latestRules = await routingRules.read();
       const latestRule = latestRules.resources[candidate.id];
-      if (!account || !account.view.enabled || latestRule?.enabled === false || (account.view.cooldownUntil ?? 0) > now() ||
+      if (!account || !account.view.enabled || latestRule?.enabled === false ||
+          (target.scope === "model:invoke" && latestRule?.allowedModels !== undefined && (requestedModel === undefined || !routingRuleAllowsModel(latestRule, requestedModel))) ||
+          (account.view.cooldownUntil ?? 0) > now() ||
           (inflight.get(candidate.id) ?? 0) >= boundedAccountCapacity(latestRule?.capacity, maxInflight)) continue;
       accountView = account.view;
       apiKey = account.apiKey;
@@ -127,8 +138,7 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
     if (!accountView || !apiKey) return sendError(res, 503, "No Ollama Cloud credential is currently available");
 
     const startedAt = now();
-    let model: string | undefined;
-    if (Buffer.isBuffer(req.body)) { try { const v = JSON.parse(req.body.toString()).model; if (typeof v === "string" && v.length <= 160 && !/[\r\n\0]/.test(v)) model = v; } catch {} }
+    const model = requestedModel && requestedModel.length <= 160 ? requestedModel : undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onClose = () => { if (!res.writableEnded) controller.abort(); };

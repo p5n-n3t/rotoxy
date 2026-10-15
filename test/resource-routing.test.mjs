@@ -28,6 +28,9 @@ test("routing rules validate strictly, persist under StateStore's lock, and neve
   assert.throws(() => validateResourceRoutingRules({ version: 1, unknownCapacity: 1, surprise: true }), /unsupported field/);
   assert.throws(() => validateResourceRoutingRules({ version: 1, providerCaps: { untrusted: 4 } }), /unknown provider family/);
   assert.throws(() => validateResourceRoutingRules({ version: 1, resources: { acct: { weight: 0 } } }), /weight is invalid/);
+  assert.throws(() => validateResourceRoutingRules({ version: 1, resources: { acct: { weight: 1, extra: true } } }), /unsupported field/);
+  assert.throws(() => validateResourceRoutingRules({ version: 1, resources: { acct: { allowedModels: ["*"] } } }), /wildcards are not supported/);
+  assert.deepEqual(validateResourceRoutingRules({ version: 1, resources: { acct: { allowedModels: [] } } }).resources.acct.allowedModels, [], "an explicit empty list is retained as deny-all policy");
 
   const lock = await open(state.lockPath, "wx", 0o600);
   let finished = false;
@@ -89,4 +92,17 @@ test("weighted fair planning fills idle slots with unique, non-running work and 
   assert.equal(unknownCapacity.assignments.length, 1, "unknown account and provider capacity default conservatively to one");
   assert.ok(unknownCapacity.explanation.some((line) => line.includes("conservative unknown capacity 1")));
   assert.ok(unknownCapacity.explanation.some((line) => line.includes("provider cap is unknown")));
+});
+
+test("inference planning intersects exact allowedModels while absent model rules remain unrestricted", async () => {
+  const { planResourceRouting, validateResourceRoutingRules } = await import("../dist/resource-routing.js");
+  const resource = { id: "ollama-a", providerFamily: "inference", enabled: true, auth: "valid", health: "healthy", models: ["gpt-oss:20b"] };
+  const task = { id: "invoke-1", model: "gpt-oss:20b" };
+  const deny = planResourceRouting({ resources: [resource], task, rules: validateResourceRoutingRules({ version: 1, resources: { "ollama-a": { allowedModels: [] } } }) });
+  assert.equal(deny.assignments.length, 0);
+  assert.ok(deny.rejected[0].reasons.includes("model_not_allowed_by_rule"));
+  const allow = planResourceRouting({ resources: [resource], task, rules: validateResourceRoutingRules({ version: 1, resources: { "ollama-a": { allowedModels: ["gpt-oss:20b"] } } }) });
+  assert.equal(allow.assignments[0].resourceId, "ollama-a");
+  const legacy = planResourceRouting({ resources: [resource], task });
+  assert.equal(legacy.assignments[0].resourceId, "ollama-a");
 });

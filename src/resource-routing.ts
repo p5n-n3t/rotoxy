@@ -5,11 +5,12 @@ import type { StateStore } from "./store.js";
 
 export const RESOURCE_FAMILIES = ["workspace", "inference", "private", "search"] as const;
 export type ResourceFamily = typeof RESOURCE_FAMILIES[number];
+export type ResourceAccountRoutingRule = { enabled: boolean; weight: number; capacity?: number; allowedModels?: string[] };
 export type ResourceRoutingRules = {
   version: 1;
   unknownCapacity: number;
   providerCaps: Partial<Record<ResourceFamily, number>>;
-  resources: Record<string, { enabled: boolean; weight: number; capacity?: number }>;
+  resources: Record<string, ResourceAccountRoutingRule>;
 };
 export type ResourceCandidate = {
   id: string;
@@ -43,6 +44,7 @@ export type ResourceRoutingPlan = {
 
 const FILE = "resource-routing-rules.json";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const MODEL_ID = /^@?[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/;
 const DEFAULT_RULES: ResourceRoutingRules = { version: 1, unknownCapacity: 1, providerCaps: {}, resources: {} };
 function obj(value: unknown): Record<string, unknown> | undefined { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
 function closed(value: Record<string, unknown>, allowed: string[], label: string): void {
@@ -51,6 +53,15 @@ function closed(value: Record<string, unknown>, allowed: string[], label: string
 function integer(value: unknown, min: number, max: number, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) throw new TypeError(`${label} is invalid`);
   return value as number;
+}
+function validateAllowedModels(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length > 200 || value.some((model) => typeof model !== "string" || model.length > 200 || !MODEL_ID.test(model))) {
+    throw new TypeError(`${label} must contain exact model IDs (wildcards are not supported)`);
+  }
+  return [...new Set(value as string[])];
+}
+export function routingRuleAllowsModel(rule: ResourceAccountRoutingRule | undefined, model: string): boolean {
+  return rule?.allowedModels === undefined || rule.allowedModels.includes(model);
 }
 
 export function validateResourceRoutingRules(value: unknown): ResourceRoutingRules {
@@ -73,11 +84,16 @@ export function validateResourceRoutingRules(value: unknown): ResourceRoutingRul
     if (!ID.test(id)) throw new TypeError("resource rule ID is invalid");
     const item = obj(raw);
     if (!item) throw new TypeError(`resource rule ${id} must be an object`);
-    closed(item, ["enabled", "weight", "capacity"], `resource rule ${id}`);
+    closed(item, ["enabled", "weight", "capacity", "allowedModels"], `resource rule ${id}`);
     if (item.enabled !== undefined && typeof item.enabled !== "boolean") throw new TypeError(`resource rule ${id}.enabled is invalid`);
     const weight = item.weight === undefined ? 1 : item.weight;
     if (typeof weight !== "number" || !Number.isFinite(weight) || weight < 0.01 || weight > 100) throw new TypeError(`resource rule ${id}.weight is invalid`);
-    resources[id] = { enabled: item.enabled ?? true, weight, ...(item.capacity === undefined ? {} : { capacity: integer(item.capacity, 1, 1000, `resource rule ${id}.capacity`) }) };
+    resources[id] = {
+      enabled: item.enabled ?? true,
+      weight,
+      ...(item.capacity === undefined ? {} : { capacity: integer(item.capacity, 1, 1000, `resource rule ${id}.capacity`) }),
+      ...(item.allowedModels === undefined ? {} : { allowedModels: validateAllowedModels(item.allowedModels, `resource rule ${id}.allowedModels`) }),
+    };
   }
   return { version: 1, unknownCapacity, providerCaps, resources };
 }
@@ -147,6 +163,8 @@ export function planResourceRouting(input: {
     if (resource.quota?.state === "available" && (!Number.isFinite(resource.quota.expiresAt) || resource.quota.expiresAt! <= now)) quota = "unknown";
     if (quota === "depleted") reasons.push("quota_depleted");
     if (task.model && !resource.models?.includes(task.model)) reasons.push(resource.models ? "model_unsupported" : "model_unknown");
+    if (resource.providerFamily === "inference" && rules.resources[resource.id]?.allowedModels !== undefined &&
+        (task.model === undefined || !rules.resources[resource.id]!.allowedModels!.includes(task.model))) reasons.push("model_not_allowed_by_rule");
     for (const capability of task.requiredCapabilities ?? []) if (!resource.capabilities?.includes(capability)) reasons.push("capability_missing");
     if (task.contextTokens !== undefined && (!Number.isSafeInteger(task.contextTokens) || task.contextTokens < 0)) throw new TypeError("contextTokens is invalid");
     if (task.contextTokens && (!Number.isSafeInteger(resource.maxContextTokens) || resource.maxContextTokens! < task.contextTokens)) reasons.push(resource.maxContextTokens === undefined ? "context_unknown" : "context_too_small");

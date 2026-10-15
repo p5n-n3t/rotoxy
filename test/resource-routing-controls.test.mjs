@@ -33,15 +33,16 @@ test("routing editor enforces admin CSRF and rules alter real Cloudflare/Ollama 
   const csrf = sessions.csrfToken(session);
   assert.equal((await fetch(base + "/admin/routing", { redirect: "manual" })).status, 302, "page requires an admin session");
   const page = await fetch(base + "/admin/routing", { headers: { cookie } });
-  assert.equal(page.status, 200); assert.match(await page.text(), /planner metadata only/);
+  assert.equal(page.status, 200); const pageHtml = await page.text(); assert.match(pageHtml, /planner metadata only/); assert.match(pageHtml, /exact model IDs/);
   const submit = (rules, token = csrf) => fetch(base + "/admin/routing", { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ _csrf: token ?? "", rules }) });
   assert.equal((await submit("{}", "")).status, 403, "POST requires synchronizer CSRF");
   assert.equal((await submit("{bad json")).status, 400, "invalid documents do not persist");
 
   const cloudCredentials = new CloudflareCredentialStore(store);
   const model = "@cf/meta/llama-3.1-8b-instruct";
+  const otherCfModel = "@cf/meta/llama-3.1-8b-instruct-fast";
   const cfA = await cloudCredentials.addCredential({ label: "CF account A", accountId: "a".repeat(32), token: "synthetic-cf-key-aaaa", allowedModels: [model] });
-  const cfB = await cloudCredentials.addCredential({ label: "CF account B", accountId: "b".repeat(32), token: "synthetic-cf-key-bbbb", allowedModels: [model] });
+  const cfB = await cloudCredentials.addCredential({ label: "CF account B", accountId: "b".repeat(32), token: "synthetic-cf-key-bbbb", allowedModels: [model, otherCfModel] });
   const cfCalls = [];
   let holdCf = false, releaseCf;
   const cfAdapter = new CloudflareAIAdapter(cloudCredentials, { maxInflightPerAccount: 1, fetch: async (_url, init) => {
@@ -60,21 +61,29 @@ test("routing editor enforces admin CSRF and rules alter real Cloudflare/Ollama 
   const modelA = await gateway.credentials.addCredential("Ollama A", "synthetic-ollama-key-aaaa");
   const modelB = await gateway.credentials.addCredential("Ollama B", "synthetic-ollama-key-bbbb");
   const readToken = await gateway.credentials.issueToken({ scopes: ["model:read"], expiresInSeconds: 3600 });
+  const invokeToken = await gateway.credentials.issueToken({ scopes: ["model:invoke"], expiresInSeconds: 3600 });
   app.use(gateway.router);
   const ollamaCalls = [];
   let holdOllama = false, releaseOllama;
   const getModels = () => fetch(base + "/v1/models", { headers: { authorization: `Bearer ${readToken.token}` } });
+  const invokeModel = (requestedModel) => fetch(base + "/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${invokeToken.token}`, "content-type": "application/json" }, body: JSON.stringify({ model: requestedModel, messages: [{ role: "user", content: "synthetic" }] }) });
   assert.equal((await getModels()).status, 200); assert.equal((await getModels()).status, 200);
   assert.deepEqual(ollamaCalls.slice(0, 2), ["Bearer synthetic-ollama-key-aaaa", "Bearer synthetic-ollama-key-bbbb"], "Ollama no-rule behavior remains round robin");
+  assert.equal((await invokeModel("gpt-oss:20b")).status, 200, "absent allowedModels preserves current inference behavior");
 
   const rules = { version: 1, unknownCapacity: 1, providerCaps: { inference: 9 }, resources: {
-    [cfA.id]: { enabled: false, weight: 1 }, [cfB.id]: { enabled: true, weight: 3, capacity: 99 },
-    [modelA.id]: { enabled: false, weight: 1 }, [modelB.id]: { enabled: true, weight: 3, capacity: 99 },
+    [cfA.id]: { enabled: true, weight: 1, allowedModels: [otherCfModel] }, [cfB.id]: { enabled: true, weight: 3, capacity: 99, allowedModels: [model] },
+    [modelA.id]: { enabled: true, weight: 1, allowedModels: [] }, [modelB.id]: { enabled: true, weight: 3, capacity: 99, allowedModels: ["gpt-oss:20b"] },
   } };
   const saved = await submit(JSON.stringify(rules));
   assert.equal(saved.status, 303);
+  const wildcardRules = { version: 1, resources: { [cfA.id]: { allowedModels: ["*"] } } };
+  assert.equal((await submit(JSON.stringify(wildcardRules))).status, 400, "wildcard model policy is rejected");
   await cfAdapter.run({ model, input: { prompt: "after" } });
-  assert.equal(cfCalls[2], "Bearer synthetic-cf-key-bbbb", "Cloudflare honors disabled account rule");
+  assert.equal(cfCalls.at(-1), "Bearer synthetic-cf-key-bbbb", "Cloudflare honors exact account model rule");
+  const beforeDeniedCf = cfCalls.length;
+  await assert.rejects(cfAdapter.run({ model: otherCfModel, input: { prompt: "policy deny" } }), (error) => error.code === "model_not_allowed");
+  assert.equal(cfCalls.length, beforeDeniedCf, "routing rules intersect, and cannot broaden, the credential allowlist");
   holdCf = true;
   const heldCf = cfAdapter.run({ model, input: { prompt: "held" } });
   for (let i = 0; i < 100 && !releaseCf; i++) await new Promise((resolve) => setTimeout(resolve, 2));
@@ -82,13 +91,18 @@ test("routing editor enforces admin CSRF and rules alter real Cloudflare/Ollama 
   await assert.rejects(cfAdapter.run({ model, input: { prompt: "over cap" } }), (error) => error.code === "no_eligible_account");
   releaseCf(); holdCf = false; await heldCf;
 
-  assert.equal((await getModels()).status, 200);
-  assert.equal(ollamaCalls[2], "Bearer synthetic-ollama-key-bbbb", "Ollama honors disabled account rule");
+  assert.equal((await getModels()).status, 200, "model catalog requests remain available despite inference model filters");
+  const allowedOllama = await invokeModel("gpt-oss:20b");
+  assert.equal(allowedOllama.status, 200);
+  assert.equal(ollamaCalls.at(-1), "Bearer synthetic-ollama-key-bbbb", "Ollama skips account with explicit empty model list");
+  const beforeDeniedOllama = ollamaCalls.length;
+  assert.equal((await invokeModel("gpt-oss:20b-extra")).status, 503, "Ollama model match is exact");
+  assert.equal(ollamaCalls.length, beforeDeniedOllama, "Ollama model mismatch is rejected before provider I/O");
   holdOllama = true;
-  const heldOllama = getModels();
+  const heldOllama = invokeModel("gpt-oss:20b");
   for (let i = 0; i < 100 && !releaseOllama; i++) await new Promise((resolve) => setTimeout(resolve, 2));
   assert.ok(releaseOllama, "Ollama request reached fake provider");
-  const overCap = await getModels();
+  const overCap = await invokeModel("gpt-oss:20b");
   assert.equal(overCap.status, 503, "configured capacity 99 cannot raise the adapter hard cap of one");
   releaseOllama(); holdOllama = false; assert.equal((await heldOllama).status, 200);
 
@@ -97,6 +111,7 @@ test("routing editor enforces admin CSRF and rules alter real Cloudflare/Ollama 
     [modelA.id]: { enabled: true, weight: 3 }, [modelB.id]: { enabled: true, weight: 1 },
   } };
   assert.equal((await submit(JSON.stringify(weightedRules))).status, 303);
+  assert.equal((await invokeModel("gpt-oss:unlisted")).status, 200, "omitting allowedModels on a rule preserves provider behavior");
   const cfStart = cfCalls.length, ollamaStart = ollamaCalls.length;
   for (let i = 0; i < 40; i++) { await cfAdapter.run({ model, input: { prompt: "weighted" } }); await getModels(); }
   const countA = (list, start, key) => list.slice(start).filter((value) => value === key).length;
