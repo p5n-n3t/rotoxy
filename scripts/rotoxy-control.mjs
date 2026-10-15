@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { realpathSync, statSync } from "node:fs";
-import { execFile } from 'node:child_process';
+import { realpathSync, statSync, existsSync } from "node:fs";
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { open, mkdir, stat, unlink, utimes } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -8,8 +8,8 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const APP_UNITS = Object.freeze([
-  'token2oauth.service', 'token2oauth-oracle-pool.service',
-  'token2oauth-worker-monitor.service',
+  'rotoxy-gateway.service', 'rotoxy-oracle-pool.service',
+  'rotoxy-worker-monitor.service',
 ]);
 export const FUNNEL_UNIT = 'rotoxy-funnel.service';
 export const TARGET_UNIT = 'rotoxy.target';
@@ -224,12 +224,29 @@ export class RotoxyController {
   installPlan(home = homedir()) {
     const dir = `${home}/.config/systemd/user`;
     const lib = `${home}/.local/lib/rotoxy-control.mjs`;
-    return { mode: 'manual; no unit is enabled at boot', files: ['rotoxy.target', FUNNEL_UNIT],
-      installCommands: [`install -Dm644 packaging/rotoxy.target ${dir}/rotoxy.target`, `install -Dm644 packaging/${FUNNEL_UNIT} ${dir}/${FUNNEL_UNIT}`, `install -Dm755 scripts/rotoxy-control.mjs ${lib}`, 'systemctl --user daemon-reload'],
+    return { mode: 'manual; no unit is enabled at boot', files: ['rotoxy.target', ...APP_UNITS, FUNNEL_UNIT],
+      installCommands: [`install -Dm644 packaging/rotoxy.target ${dir}/rotoxy.target`, ...APP_UNITS.map(unit => `install -Dm644 packaging/${unit} ${dir}/${unit}`), `install -Dm644 packaging/${FUNNEL_UNIT} ${dir}/${FUNNEL_UNIT}`, `install -Dm755 scripts/rotoxy-control.mjs ${lib}`, 'systemctl --user daemon-reload'],
       wrapperBackup: `if [ -e ${home}/.local/bin/rotoxy ] || [ -L ${home}/.local/bin/rotoxy ]; then cp -a ${home}/.local/bin/rotoxy ${home}/.local/bin/rotoxy.pre-rotoxy-control; fi`,
       wrapperSymlink: `ln -sfn ${lib} ${home}/.local/bin/rotoxy`,
       migrationGate: 'Inspect tailscale serve status --json and tailscale funnel status. Remove only reviewed owned mappings; provide explicit operator migration authorization. The controller never executes a global reset/off.' };
   }
+}
+
+export function forwardCli(argv, options = {}) {
+  let prefix = options.prefix || process.env.ROTOXY_PREFIX || process.env.TOKEN2OAUTH_PREFIX;
+  if (!prefix) {
+    const installedLink = resolve(homedir(), '.local/bin/rotoxy-cli');
+    if (existsSync(installedLink)) {
+      const target = realpathSync(installedLink);
+      if (target.endsWith('/dist/cli.js')) prefix = resolve(target, '../../');
+    }
+  }
+  prefix ||= `${homedir()}/.local/share/rotoxy`;
+  prefix = resolve(prefix);
+  const cli = resolve(prefix, 'dist/cli.js');
+  if (!existsSync(cli)) throw new Error(`ROTOXY CLI is not installed at ${cli}`);
+  const runner = options.runner || ((file, args) => execFileSync(file, args, { stdio: 'inherit', env: options.env || process.env }));
+  return runner(process.execPath, [cli, ...argv]);
 }
 
 export function parseArgs(argv) {
@@ -246,7 +263,9 @@ export function parseArgs(argv) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
-    const { action, migrationPlan } = parseArgs(process.argv.slice(2));
+    const argv = process.argv.slice(2);
+    if (!['up', 'down', 'status', 'install-plan'].includes(argv[0])) { forwardCli(argv); process.exit(0); }
+    const { action, migrationPlan } = parseArgs(argv);
     const controller = new RotoxyController();
     let result;
     if (action === 'up') {

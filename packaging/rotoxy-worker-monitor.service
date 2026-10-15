@@ -1,0 +1,13 @@
+[Unit]
+Description=ROTOXY private worker monitor
+After=network-online.target rotoxy-gateway.service
+PartOf=rotoxy.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/rotoxy
+ExecStart=/usr/bin/node %h/.local/share/rotoxy/scripts/monitor-workforce.mjs %h/.config/rotoxy/worker-monitor.json
+Restart=on-failure
+RestartSec=3
+
+# Requires an operator-provisioned private config. Deliberately no [Install].

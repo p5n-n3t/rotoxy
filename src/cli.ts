@@ -22,7 +22,7 @@ const execFileAsync = promisify(execFile);
 const program = new Command();
 
 program
-  .name("token2oauth")
+  .name("rotoxy")
   .description("OAuth 2.1 facade + smart bearer-token pool for remote MCP servers")
   .version("0.2.0");
 
@@ -69,7 +69,7 @@ program
   .description("Initialize encrypted state and gateway settings")
   .option("--admin-password <password>", "set an initial admin password")
   .option("--public-base-url <url>", "public gateway base URL, including any path prefix")
-  .option("--base-path <path>", "path prefix, e.g. /token2oauth")
+  .option("--base-path <path>", "path prefix, e.g. /team-gateway")
   .option("--upstream-url <url>", "upstream MCP endpoint")
   .action(async (opts) => {
     const s = store();
@@ -79,7 +79,7 @@ program
       basePath: opts.basePath,
       upstreamUrl: opts.upstreamUrl,
     });
-    console.log(result.created ? "Initialized Token2OAuth." : "Token2OAuth is already initialized.");
+    console.log(result.created ? "Initialized ROTOXY." : "ROTOXY is already initialized.");
     console.log("State: " + s.statePath);
     if (result.adminPassword) {
       console.log("\nAdmin password: " + result.adminPassword);
@@ -89,9 +89,9 @@ program
 
 program
   .command("serve")
-  .description("Run the Token2OAuth gateway")
-  .option("-p, --port <port>", "listen port", (v) => Number(v), Number(process.env.TOKEN2OAUTH_PORT || 2030))
-  .option("--host <host>", "listen host", process.env.TOKEN2OAUTH_HOST || "127.0.0.1")
+  .description("Run the ROTOXY gateway")
+  .option("-p, --port <port>", "listen port", (v) => Number(v), Number(process.env.ROTOXY_PORT || process.env.TOKEN2OAUTH_PORT || 2030))
+  .option("--host <host>", "listen host", process.env.ROTOXY_HOST || process.env.TOKEN2OAUTH_HOST || "127.0.0.1")
   .option("--public-base-url <url>", "override saved public base URL")
   .option("--base-path <path>", "override saved path prefix")
   .option("--upstream-url <url>", "override saved upstream MCP endpoint")
@@ -339,14 +339,14 @@ tailscale.command("status").action(async () => {
 });
 tailscale
   .command("expose")
-  .description("Deprecated alias of `lifecycle up`: add only the /token2oauth route, never touching other routes")
+  .description("Deprecated compatibility alias for the legacy /token2oauth route")
   .option("--mode <mode>", "funnel or serve (only used when no :443 listener exists yet)", "funnel")
-  .option("--path <path>", "public path (must be /token2oauth)", OWNED_PATH)
+  .option("--path <path>", "legacy compatibility path (must be /token2oauth)", OWNED_PATH)
   .option("--execute", "apply the plan; without it this is a dry run")
   .action(async (opts) => {
     if (!["funnel", "serve"].includes(opts.mode)) throw new Error("mode must be funnel or serve");
     if ((normalizeBasePath(opts.path) || "/") !== OWNED_PATH) {
-      throw new Error(`Refusing to manage ${opts.path}: Token2OAuth only manages its own ${OWNED_PATH} path.`);
+      throw new Error(`Refusing to manage ${opts.path}: ROTOXY only manages its own ${OWNED_PATH} path.`);
     }
     await runLifecycle("up", { mode: opts.mode, execute: Boolean(opts.execute) });
   });
@@ -391,7 +391,7 @@ async function runLifecycle(
 
 const lifecycle = program
   .command("lifecycle")
-  .description("Start/stop Token2OAuth and its own /token2oauth Tailscale route; never touches other routes");
+  .description("Legacy path lifecycle controls for /token2oauth; `rotoxy up` controls the canonical root Funnel");
 lifecycle.command("status").option("--json").action(async (opts) => {
   const controller = new LifecycleController(createExecFileRunner());
   const status = await controller.status();
@@ -407,7 +407,7 @@ lifecycle.command("status").option("--json").action(async (opts) => {
 });
 lifecycle
   .command("up")
-  .description("Start the service and add the /token2oauth route if missing (dry run unless --execute)")
+  .description("Start the service and add the legacy /token2oauth route if missing (dry run unless --execute)")
   .option("--mode <mode>", "funnel or serve, only when no :443 listener exists yet")
   .option("--execute", "apply the plan")
   .action(async (opts) => {
@@ -416,7 +416,7 @@ lifecycle
   });
 lifecycle
   .command("down")
-  .description("Remove only the /token2oauth route and stop the service (dry run unless --execute)")
+  .description("Remove only the legacy /token2oauth route and stop the service (dry run unless --execute)")
   .option("--keep-service", "only remove the route")
   .option("--keep-route", "only stop the service")
   .option("--execute", "apply the plan")
@@ -451,7 +451,7 @@ tools.command("list").option("--json").action(async (opts) => {
   }));
   if (opts.json) console.log(JSON.stringify(rows, null, 2));
   else if (rows.length) console.table(rows);
-  else console.log("No inventory yet. Run: token2oauth tools refresh");
+  else console.log("No inventory yet. Run: rotoxy tools refresh");
 });
 function updatePolicy(s: StateStore, mutate: (policy: ToolPolicy) => void) {
   return s.update((state) => {
@@ -516,7 +516,7 @@ program
     if (opts.json) {
       console.log(JSON.stringify({ report, repairs }, null, 2));
     } else {
-      console.log("Token2OAuth doctor: " + report.status);
+      console.log("ROTOXY doctor: " + report.status);
       for (const check of report.stageChecks) {
         const mark = check.status === "passed" ? "✓" : check.status === "failed" ? "✗" : "?";
         console.log("  " + mark + " " + check.stage.padEnd(12) + check.summary);
@@ -532,7 +532,7 @@ program
         console.log("repair preview: " + plan.summary + (plan.applicable ? "" : " (not applicable)"));
         for (const pre of plan.preconditions) console.log("    " + (pre.satisfied ? "✓ " : "✗ ") + pre.name + ": " + pre.reason);
         if (plan.preview) console.log("    before " + JSON.stringify(plan.preview.before) + "\n    after  " + JSON.stringify(plan.preview.after));
-        if (plan.applicable && plan.action === "add-funnel-path-mount") console.log("    apply with: token2oauth lifecycle up  (dry run first, then --execute)");
+        if (plan.applicable && plan.action === "add-funnel-path-mount") console.log("    apply with: rotoxy lifecycle up  (dry run first, then --execute)");
       }
       if (report.stageChecks.some((c) => c.status === "unverified")) {
         console.log("");
@@ -575,9 +575,9 @@ clients.command("inspect")
   });
 
 clients.command("configure <client>")
-  .description("Preview or register Token2OAuth as a user-level MCP server; dry-run unless --apply")
-  .requiredOption("--url <url>", "HTTP(S) Token2OAuth MCP endpoint without embedded credentials/query")
-  .option("--name <name>", "MCP server name", "token2oauth")
+  .description("Preview or register ROTOXY as a user-level MCP server; dry-run unless --apply")
+  .requiredOption("--url <url>", "HTTP(S) ROTOXY MCP endpoint without embedded credentials/query")
+  .option("--name <name>", "MCP server name", "rotoxy")
   .option("--apply", "invoke the official client CLI and make the configuration change")
   .action(async (client: LocalMcpClient, opts) => {
     const result = await configureClientConnection({ client, name: opts.name, url: opts.url, apply: Boolean(opts.apply) });
@@ -606,6 +606,6 @@ clients.command("restore <client> <backupPath>")
   });
 
 program.parseAsync(process.argv).catch((error) => {
-  console.error("token2oauth:", error?.message || error);
+  console.error("rotoxy:", error?.message || error);
   process.exitCode = 1;
 });

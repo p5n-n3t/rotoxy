@@ -1,4 +1,5 @@
 import { open, readFile, rename, stat, unlink, writeFile, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -19,21 +20,28 @@ import type {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function configDir(): string {
-  const raw =
-    process.env.TOKEN2OAUTH_CONFIG_DIR || join(homedir(), ".config", "token2oauth");
+  const home = homedir();
+  const explicit = process.env.ROTOXY_CONFIG_DIR || process.env.TOKEN2OAUTH_CONFIG_DIR;
+  if (explicit) return resolve(explicit.replace(/^~(?=\/|$)/, home));
+  const canonical = join(home, ".config", "rotoxy");
+  const legacy = join(home, ".config", "token2oauth");
+  // Until the root-owned data migration runs, keep opening an existing legacy
+  // store rather than silently initializing an empty canonical store.
+  const raw = !existsSync(join(canonical, "state.json")) && existsSync(join(legacy, "state.json"))
+    ? legacy : canonical;
   return resolve(raw.replace(/^~(?=\/|$)/, homedir()));
 }
 
 export function defaultConfig(): GatewayConfig {
-  const basePath = normalizeBasePath(process.env.TOKEN2OAUTH_BASE_PATH || "/token2oauth");
+  const basePath = normalizeBasePath(process.env.ROTOXY_BASE_PATH ?? process.env.TOKEN2OAUTH_BASE_PATH ?? "");
   const publicBaseUrl =
-    process.env.TOKEN2OAUTH_PUBLIC_BASE_URL || "http://127.0.0.1:2030" + basePath;
+    process.env.ROTOXY_PUBLIC_BASE_URL || process.env.TOKEN2OAUTH_PUBLIC_BASE_URL || "http://127.0.0.1:2030" + basePath;
   return {
-    upstreamUrl: process.env.TOKEN2OAUTH_UPSTREAM_URL || "",
+    upstreamUrl: process.env.ROTOXY_UPSTREAM_URL || process.env.TOKEN2OAUTH_UPSTREAM_URL || "",
     upstreamAuthHeader: "authorization",
     upstreamAuthScheme: "Bearer",
     strategy:
-      (process.env.TOKEN2OAUTH_POOL_STRATEGY as PoolStrategy) || "adaptive-sticky",
+      ((process.env.ROTOXY_POOL_STRATEGY || process.env.TOKEN2OAUTH_POOL_STRATEGY) as PoolStrategy) || "adaptive-sticky",
     basePath,
     publicBaseUrl: publicBaseUrl.replace(/\/$/, ""),
     requestTimeoutMs: 120_000,
@@ -94,7 +102,7 @@ async function withLock<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
       await sleep(25 + Math.min(250, attempt * 5));
     }
   }
-  throw new Error("timed out waiting for Token2OAuth state lock");
+  throw new Error("timed out waiting for ROTOXY state lock");
 }
 
 export class StateStore {

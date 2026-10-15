@@ -1,0 +1,15 @@
+[Unit]
+Description=ROTOXY local gateway
+After=network-online.target
+Wants=network-online.target
+PartOf=rotoxy.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node %h/.local/share/rotoxy/dist/cli.js serve --host 127.0.0.1 --port 2030
+WorkingDirectory=%h/.local/share/rotoxy
+Restart=on-failure
+RestartSec=3
+Environment=NODE_ENV=production
+
+# Deliberately no [Install]: operator starts this service explicitly.

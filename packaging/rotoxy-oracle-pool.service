@@ -1,0 +1,14 @@
+[Unit]
+Description=ROTOXY private Oracle task pool
+After=network-online.target rotoxy-gateway.service
+PartOf=rotoxy.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/rotoxy
+ExecStart=/usr/bin/python3 -m snooze.oracle_pool --config %h/.config/rotoxy/oracle-pool/config.json --db %h/.local/state/rotoxy/oracle-pool/queue.sqlite3 serve
+Environment=PYTHONPATH=%h/.local/share/rotoxy/supervisor
+Restart=on-failure
+RestartSec=3
+
+# Deliberately no [Install]: operator starts this service explicitly.
