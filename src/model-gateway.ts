@@ -3,6 +3,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { StateStore } from "./store.js";
 import { ModelCredentialStore, type ModelScope } from "./model-credentials.js";
+import { boundedAccountCapacity, ResourceRoutingRulesStore } from "./resource-routing.js";
 
 const OLLAMA_ORIGIN = "https://ollama.com";
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
@@ -65,6 +66,7 @@ async function readBounded(response: globalThis.Response): Promise<Buffer> {
 /** Native bounded Ollama Cloud OpenAI-compatible proxy; no external process or user-supplied URL. */
 export function createModelGateway(store: StateStore, options: ModelGatewayOptions = {}) {
   const credentials = new ModelCredentialStore(store);
+  const routingRules = new ResourceRoutingRulesStore(store);
   const router = express.Router();
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const now = options.now ?? Date.now;
@@ -75,6 +77,7 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
     throw new RangeError("model gateway limits are invalid");
   }
   const inflight = new Map<string, number>();
+  const dispatched = new Map<string, number>();
   let roundRobin = 0;
   const recent: ModelRequestEvent[] = [];
   const totals = new Map<string, { requests: number; successes: number; failures: number }>();
@@ -93,20 +96,32 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
       return sendError(res, 401, "A valid scoped model gateway token is required");
     }
 
-    const available = (await credentials.listCredentials()).filter((account) => account.enabled && (account.cooldownUntil ?? 0) <= now() && (inflight.get(account.id) ?? 0) < maxInflight);
+    const [listed, rules] = await Promise.all([credentials.listCredentials(), routingRules.read()]);
+    const available = listed.filter((account) => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now() &&
+      (inflight.get(account.id) ?? 0) < boundedAccountCapacity(rules.resources[account.id]?.capacity, maxInflight));
     if (!available.length) return sendError(res, 503, "No Ollama Cloud credential is currently available");
     const offset = roundRobin++ % available.length;
+    const rotated = [...available.slice(offset), ...available.slice(0, offset)];
+    const weighted = rotated.some((account) => (rules.resources[account.id]?.weight ?? 1) !== 1);
+    const ordered = weighted ? [...rotated].sort((a, b) => {
+      const score = (account: typeof a) => (dispatched.get(account.id) ?? 0) / (rules.resources[account.id]?.weight ?? 1);
+      return score(a) - score(b);
+    }) : rotated;
     let accountView: (typeof available)[number] | undefined;
     let apiKey: string | undefined;
     for (let index = 0; index < available.length; index++) {
-      const candidate = available[(offset + index) % available.length];
+      const candidate = ordered[index];
       const account = await credentials.credentialForRequest(candidate.id);
       // Recheck after the asynchronous decrypt; reserve synchronously so
       // concurrent arrivals cannot exceed this local software cap.
-      if (!account || !account.view.enabled || (account.view.cooldownUntil ?? 0) > now() || (inflight.get(candidate.id) ?? 0) >= maxInflight) continue;
+      const latestRules = await routingRules.read();
+      const latestRule = latestRules.resources[candidate.id];
+      if (!account || !account.view.enabled || latestRule?.enabled === false || (account.view.cooldownUntil ?? 0) > now() ||
+          (inflight.get(candidate.id) ?? 0) >= boundedAccountCapacity(latestRule?.capacity, maxInflight)) continue;
       accountView = account.view;
       apiKey = account.apiKey;
       inflight.set(candidate.id, (inflight.get(candidate.id) ?? 0) + 1);
+      dispatched.set(candidate.id, (dispatched.get(candidate.id) ?? 0) + 1);
       break;
     }
     if (!accountView || !apiKey) return sendError(res, 503, "No Ollama Cloud credential is currently available");

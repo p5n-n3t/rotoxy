@@ -104,6 +104,13 @@ export class ResourceRoutingRulesStore {
   }
 }
 
+/** An account rule can reduce an adapter limit, but can never raise it. */
+export function boundedAccountCapacity(configured: number | undefined, hardLimit: number): number {
+  if (!Number.isSafeInteger(hardLimit) || hardLimit < 1) throw new TypeError("hard account capacity is invalid");
+  if (configured !== undefined && (!Number.isSafeInteger(configured) || configured < 1)) throw new TypeError("configured account capacity is invalid");
+  return Math.min(configured ?? hardLimit, hardLimit);
+}
+
 export function planResourceRouting(input: {
   resources: ResourceCandidate[];
   task: RoutingTask;
@@ -144,7 +151,7 @@ export function planResourceRouting(input: {
     if (task.contextTokens !== undefined && (!Number.isSafeInteger(task.contextTokens) || task.contextTokens < 0)) throw new TypeError("contextTokens is invalid");
     if (task.contextTokens && (!Number.isSafeInteger(resource.maxContextTokens) || resource.maxContextTokens! < task.contextTokens)) reasons.push(resource.maxContextTokens === undefined ? "context_unknown" : "context_too_small");
     const accountRule = rules.resources[resource.id];
-    const capacity = accountRule?.capacity ?? resource.capacity ?? rules.unknownCapacity;
+    const capacity = Math.min(accountRule?.capacity ?? resource.capacity ?? rules.unknownCapacity, resource.capacity ?? accountRule?.capacity ?? rules.unknownCapacity);
     const weight = accountRule?.weight ?? 1;
     return { resource, evaluation: { resourceId: resource.id, eligible: reasons.length === 0, reasons, quota, capacity, weight } satisfies ResourceEvaluation };
   });
