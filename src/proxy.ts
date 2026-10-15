@@ -197,7 +197,7 @@ export class McpProxy {
         await this.serveLocalJobDiscovery(req, res, rpc, localJobTools, record)) return;
     if (!state.config.upstreamUrl) {
       record({ status: 503, attempts: 0, errorClass: "upstream-not-configured" });
-      return res.status(503).json({ error: "upstream_not_configured", message: "Set the upstream MCP URL in the Token2OAuth admin page or CLI." });
+      return res.status(503).json({ error: "upstream_not_configured", message: "Set the upstream MCP URL in the ROTOXY admin page or CLI." });
     }
 
     // ---- Tool policy: enforced here, server-side, before any upstream I/O.
@@ -242,12 +242,12 @@ export class McpProxy {
           // Never forward a partially gated body. A batch is rejected as a
           // whole: forwarding part of it would split the response stream
           // between the gateway and the upstream.
-          const reason = String(gate.rejections[0]?.error?.message || "Blocked by Token2OAuth tool policy");
+          const reason = String(gate.rejections[0]?.error?.message || "Blocked by ROTOXY tool policy");
           const responses = rpc.batch
             ? rpc.messages
                 .filter((m) => m.id !== undefined && typeof m.method === "string")
                 .map((m) => gate.rejections.find((r) => r.id === m.id) ||
-                  rpcError(m.id, POLICY_ERROR_CODE, "Batch rejected because it contains a tool call blocked by Token2OAuth tool policy"))
+                  rpcError(m.id, POLICY_ERROR_CODE, "Batch rejected because it contains a tool call blocked by ROTOXY tool policy"))
             : gate.rejections;
           if (!responses.length) {
             // Only id-less (notification-style) tool calls: nothing to answer.
@@ -538,13 +538,13 @@ export class McpProxy {
         const result = message.result as Record<string, unknown>;
         const tools = Array.isArray(result.tools) ? result.tools : [];
         const existingNames = new Set(tools.flatMap((tool) => tool && typeof tool === "object" && typeof (tool as any).name === "string" ? [(tool as any).name] : []));
-        if (localTools.some((tool) => existingNames.has(tool.name))) return rpcError(message.id, -32603, "The upstream MCP server uses a reserved Token2OAuth local tool name.");
+        if (localTools.some((tool) => existingNames.has(tool.name))) return rpcError(message.id, -32603, "The upstream MCP server uses a reserved ROTOXY local tool name.");
         return { ...message, result: { ...result, tools: [...tools, ...localTools] } };
       };
       return Array.isArray(filtered) ? filtered.map(augment) : augment(filtered);
     });
     if (rewritten === undefined) {
-      res.status(502).json(rpcError(rpc.messages[0]?.id, -32603, "Token2OAuth could not safely apply the tools/list update."));
+      res.status(502).json(rpcError(rpc.messages[0]?.id, -32603, "ROTOXY could not safely apply the tools/list update."));
       return;
     }
     copyResponseHeaders(upstream.headers, res);
@@ -582,7 +582,7 @@ export class McpProxy {
       res.status(200).json({ jsonrpc: "2.0", id: message.id, result: {
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "Token2OAuth", version: "0.2.0" },
+        serverInfo: { name: "ROTOXY", version: "0.2.0" },
       } });
       return true;
     }

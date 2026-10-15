@@ -42,7 +42,7 @@ function e(v: unknown): string {
 }
 
 const css = String.raw`
-:root{color-scheme:light dark;--paper:#f5f3ee;--surface:#fffdf9;--sunk:#ece8df;--ink:#16191d;--muted:#565c64;--line:#d6d0c4;--rule:#e6e1d6;--signal:#0f7b6c;--signal-soft:#dff1ec;--amber:#9a540f;--amber-soft:#fbecd8;--red:#a33a2f;--red-soft:#f8e3df;--focus:#c26a12;--mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;font:15px/1.55 ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif}
+:root{color-scheme:light dark;--paper:#f3f5f7;--surface:#ffffff;--sunk:#e9eef1;--ink:#16191d;--muted:#565c64;--line:#d7dfe4;--rule:#e5eaee;--signal:#0f7b6c;--signal-soft:#dff1ec;--amber:#9a540f;--amber-soft:#fbecd8;--red:#a33a2f;--red-soft:#f8e3df;--focus:#c26a12;--mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;font:15px/1.55 ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif}
 @media(prefers-color-scheme:dark){:root{--paper:#0d0f12;--surface:#14171b;--sunk:#0a0c0e;--ink:#e9e6df;--muted:#a3a7ad;--line:#2c3138;--rule:#1f242a;--signal:#4fd1b8;--signal-soft:#123a33;--amber:#f0b25c;--amber-soft:#3a2a12;--red:#f08a7c;--red-soft:#3d1b17;--focus:#f0b25c}}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);min-height:100vh}
 a{color:var(--signal);text-underline-offset:3px}
@@ -65,7 +65,7 @@ h1,h2,h3{letter-spacing:-.02em;font-weight:640}
 .pill{display:inline-flex;gap:6px;align-items:center;padding:1px 8px;border:1px solid var(--line);border-radius:3px;font:600 12px/1.7 var(--mono);background:var(--surface);color:var(--ink)}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--signal)}.dot.warn{background:var(--amber)}.dot.bad{background:var(--red)}
 code,.mono{font-family:var(--mono);font-size:.92em}
-.copy{padding:11px 12px;border:1px solid var(--line);border-left:3px solid var(--signal);background:var(--surface);border-radius:4px;overflow-wrap:anywhere;font-size:13px;color:var(--ink)}
+.copy{padding:11px 12px;border:1px solid var(--line);border-left:1px solid var(--line);background:var(--surface);border-radius:4px;overflow-wrap:anywhere;font-size:13px;color:var(--ink)}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:10px 10px 10px 0;border-bottom:1px solid var(--rule);font-size:13.5px;vertical-align:top}
 th{color:var(--muted);font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.07em}tr:last-child td{border:0}
@@ -84,7 +84,7 @@ button:hover,.btn:hover{background:var(--signal);border-color:var(--signal)}
 button:disabled{opacity:.5;cursor:not-allowed}
 .danger{background:var(--red-soft)!important;border-color:var(--red)!important;color:var(--red)!important}
 .actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.flash{padding:11px 14px;border-left:3px solid var(--signal);background:var(--signal-soft);color:var(--ink);margin:0 0 18px}
+.flash{padding:11px 14px;border-left:1px solid var(--line);background:var(--signal-soft);color:var(--ink);margin:0 0 18px}
 label.toggle{display:inline-flex;gap:8px;align-items:center;margin:4px 12px 4px 0;color:var(--ink)}label.toggle input{width:auto;min-height:0}
 .findings,.events{list-style:none;padding:0;margin:0}.findings li,.events li{padding:10px 0 10px 12px;border-bottom:1px solid var(--rule);border-left:2px solid var(--line)}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--sunk);border-radius:4px;padding:10px;max-height:320px;overflow:auto;font:12.5px/1.5 var(--mono)}
@@ -130,6 +130,9 @@ details.settings>summary .tiny{font-weight:400;margin-left:8px}
 button,.btn{white-space:nowrap}
 @media(max-width:720px){.wrap:has(>.rx-sidebar){margin:0;padding:0 16px 48px}.rx-sidebar{position:sticky;inset:auto;top:0;width:auto;margin:0 -16px;padding:9px 16px;min-height:62px;display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:12px;overflow:visible}.rx-sidebar .brand{padding:0;flex:1;min-width:0}.rx-sidebar .brand>span:last-child{min-width:0}.rx-workspace-id{display:none}.rx-nav-details{position:static;display:block;flex:0 0 auto}.rx-nav-details>summary{display:flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:7px 12px;border:1px solid #ffffff62;border-radius:4px;color:#edf4ef;font-weight:620}.rx-nav-content{display:none;position:absolute;top:100%;left:0;right:0;max-height:calc(100dvh - 62px);overflow:auto;padding:14px 16px 16px;background:#173a37;box-shadow:0 12px 22px #101b1980}.rx-nav-details[open]>.rx-nav-content{display:flex}.rx-nav-groups{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 12px;overflow:visible}.rx-page-context{position:static;min-height:58px;margin-bottom:12px}.rx-current-page{font-size:15px}.rx-sidebar-end{grid-template-columns:1fr 1fr;margin-top:16px;padding-top:10px}.rx-sidebar-end .btn,.rx-sidebar-end button{min-height:40px}}
 @media(max-width:390px){.rx-nav-groups{grid-template-columns:1fr}.rx-nav-content{max-height:calc(100dvh - 62px)}.rx-sidebar .brand .eyebrow{font-size:11px}.rx-sidebar-end{grid-template-columns:1fr}}
+.rx-sidebar{gap:12px;padding:18px 14px 12px;background:#142c30}.rx-workspace-id{padding:8px 10px;margin-block:0}.rx-nav-groups{overflow:visible;gap:12px}.nav-group-toggle{display:flex;align-items:center;justify-content:space-between;min-height:38px;padding:8px 10px;border-radius:6px;color:#d4e7e7;font-size:13px;font-weight:650;cursor:pointer;list-style:none;background:#ffffff08}.nav-group-toggle::-webkit-details-marker{display:none}.nav-group-toggle:hover{background:#ffffff13}.nav-group-items{display:grid;gap:2px;padding:5px 0 0 9px}.nav-disclosure[open]>.nav-group-toggle span{transform:rotate(180deg)}.nav-link{min-height:36px;font-size:13.5px;border-radius:6px}.nav-label{font-family:inherit;font-size:11px;letter-spacing:.04em}.rx-sidebar-end{grid-template-columns:1fr 1fr;padding-top:10px}.rx-sidebar-end button,.rx-sidebar-end .btn{font-size:12px}.rx-page-context{min-height:64px;margin-bottom:16px}.rx-current-page{font-size:18px}.rx-sidebar .brand strong{font-family:inherit;font-size:18px;letter-spacing:.04em}.rx-sidebar .brand .eyebrow{letter-spacing:0;text-transform:none;font-family:inherit}
+@media(min-width:721px) and (max-height:800px){.rx-workspace-id{display:none}}
+@media(min-width:721px){.rx-nav-details{display:none!important}.rx-desktop-nav{display:flex;min-height:auto;flex:1}.rx-sidebar{overflow-y:auto}.rx-sidebar-end{margin-top:18px}}@media(max-width:720px){.rx-sidebar{padding:9px 16px;background:#142c30}.rx-nav-content{background:#142c30}.rx-sidebar-end{grid-template-columns:1fr 1fr}.nav-link,.nav-group-toggle{min-height:42px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 `;
 
@@ -221,7 +224,7 @@ export class AdminUi {
     const snapshot = this.pool.snapshot(state);
     const ready = snapshot.filter((a) => ["healthy", "ready", "unknown"].includes(String(a.state)) && a.enabled).length;
     res.type("html").send(page("Gateway", `<main class="wrap">
-<div class="nav"><div class="brand"><div class="logo">T2</div><div><strong>Token2OAuth</strong><div class="eyebrow">Bearer → OAuth 2.1</div></div></div><a class="btn secondary" href="${e(base)}/admin">Admin console</a></div>
+<div class="nav"><div class="brand"><div class="logo">T2</div><div><strong>ROTOXY</strong><div class="eyebrow">Bearer → OAuth 2.1</div></div></div><a class="btn secondary" href="${e(base)}/admin">Admin console</a></div>
 <section class="hero"><div class="eyebrow">MCP credential gateway</div><h1>One OAuth connection.<br><span class="gradient">Many upstream tokens.</span></h1><p class="lead">A self-hosted OAuth facade for bearer-token MCP servers, with encrypted credentials, sticky sessions, adaptive pooling, quota-aware cooldowns and optional Tailscale Funnel exposure.</p></section>
 <section class="grid">
 <div class="card"><div class="eyebrow">Gateway</div><div class="metric"><span class="dot"></span> Online</div><p class="muted tiny">OAuth metadata and MCP proxy are available.</p></div>
@@ -229,7 +232,7 @@ export class AdminUi {
 <div class="card"><div class="eyebrow">Strategy</div><div class="metric" style="font-size:21px">${e(state.config.strategy)}</div><p class="muted tiny">session-aware selection policy</p></div>
 <div class="card wide"><div class="eyebrow">ChatGPT / MCP URL</div><h3>Protected MCP endpoint</h3><div class="copy">${e(base)}/mcp</div></div>
 <div class="card"><div class="eyebrow">Discovery</div><h3>OAuth 2.1</h3><p class="muted tiny">Authorization code + PKCE S256, DCR, refresh rotation, resource-bound access tokens.</p></div>
-</section><div class="footer">Token2OAuth · secrets stay encrypted on this host</div></main>`));
+</section><div class="footer">ROTOXY · secrets stay encrypted on this host</div></main>`));
   };
 
   private health = async (_req: Request, res: Response) => {
@@ -247,7 +250,7 @@ export class AdminUi {
 
   private loginGet = async (req: Request, res: Response) => {
     const base = await this.base();
-    res.type("html").send(page("Admin login", `<main class="login"><section class="card"><div class="brand"><div class="logo">T2</div><div><strong>Token2OAuth</strong><div class="eyebrow">Admin console</div></div></div>
+    res.type("html").send(page("Admin login", `<main class="login"><section class="card"><div class="brand"><div class="logo">T2</div><div><strong>ROTOXY</strong><div class="eyebrow">Admin console</div></div></div>
 <h2>Unlock your gateway</h2><p class="muted">Manage upstream MCP endpoints, encrypted bearer credentials, routing and pool health.</p>
 <form method="post" action="${e(base)}/admin/login"><input type="hidden" name="next" value="${e(String(req.query.next || base + "/admin"))}"><label>Admin password</label><input type="password" name="password" required autofocus autocomplete="current-password"><button type="submit">Sign in →</button></form></section></main>`));
   };
@@ -309,7 +312,7 @@ export class AdminUi {
 
     this.sendAdmin(res, "Admin", `<main class="wrap">${adminNav(base, "pool")}
 ${message}${renderOverview({ base, strategy: state.config.strategy, upstreamUrl: state.config.upstreamUrl, maxFailoverAttempts: state.config.maxFailoverAttempts, accounts, summary: this.deps.telemetry?.summary(), recent: this.deps.telemetry?.recent({ limit: 40 }) })}<section class="grid">
-<div class="card full"><div class="eyebrow">Connection</div><h2>One MCP endpoint for every compatible client</h2><div class="copy">${e(base)}/mcp</div><p class="muted tiny">Add this single URL to ChatGPT, Claude, Codex or any MCP client that supports OAuth. Token2OAuth handles sign-in and pooling; you do not create one connection per upstream account.</p></div>
+<div class="card full"><div class="eyebrow">Connection</div><h2>One MCP endpoint for every compatible client</h2><div class="copy">${e(base)}/mcp</div><p class="muted tiny">Add this single URL to ChatGPT, Claude, Codex or any MCP client that supports OAuth. ROTOXY handles sign-in and pooling; you do not create one connection per upstream account.</p></div>
 <div class="card full" id="accounts"><div class="eyebrow">Credential pool</div><h2>Upstream accounts</h2><p class="muted tiny">New tokens are <code>unknown</code> until used. Test credentials sends one authenticated MCP <code>initialize</code> request to each selected account; it does not create a ChatGPT OAuth connection or reveal a token.</p>${rows ? `<div class="actions" style="margin:12px 0"><form class="inline" method="post" action="${e(base)}/admin/accounts/probe-all"><button type="submit">Test all enabled credentials</button></form></div><div style="overflow:auto"><table><thead><tr><th>Account</th><th>State</th><th>Success</th><th>Last HTTP</th><th>Probe</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">No bearer credentials have been added yet.</p>'}</div>
 </section>
 <details class="settings" id="settings"><summary>Routing &amp; upstream settings <span class="tiny muted">${e(state.config.strategy)} · ${e(state.config.upstreamUrl || "no upstream set")}</span></summary><section class="grid">

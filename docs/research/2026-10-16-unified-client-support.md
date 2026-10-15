@@ -15,7 +15,7 @@
 
 ## Product integration guidance
 
-The current product wiring described for this assignment is `/root/mcp` on Cloudflare-buffered SSE and `/root/v1` on Ollama. Keep these as separate surfaces: MCP OAuth is tool-server authentication, while model APIs use provider-specific request protocols and credentials.
+The canonical `/mcp` endpoint is the remote HTTP MCP OAuth gateway. The separate `/v1` inference API serves a merged catalog and OpenAI chat completions for Ollama and Cloudflare; Cloudflare SSE is buffered completion compatibility, not the MCP transport. Keep these as separate surfaces: MCP OAuth is tool-server authentication, while model APIs use provider-specific request protocols and credentials.
 
 1. For a Claude Code global connection, expose a remote HTTP MCP endpoint with an OAuth flow and publish the user-scope `claude mcp add --transport http --scope user ...` command. Current SSE behavior alone does not prove OAuth interoperability; Claude Code's current docs prefer HTTP and deprecate SSE.
 2. Warp and OpenCode custom endpoints need OpenAI Chat Completions behavior and a model ID the client can select. Preserve an explicit model list (or document manual model IDs); don't infer support merely from an `/v1` prefix or an Ollama route.

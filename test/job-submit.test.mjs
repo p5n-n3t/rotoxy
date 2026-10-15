@@ -137,7 +137,7 @@ test("job tools are scope-filtered and intercepted before upstream while ordinar
     const initResult = (await initialized.json()).result;
     assert.equal(initResult.protocolVersion, "2025-03-26");
     assert.deepEqual(initResult.capabilities, { tools: { listChanged: false } });
-    assert.deepEqual(initResult.serverInfo, { name: "Token2OAuth", version: "0.2.0" });
+    assert.deepEqual(initResult.serverInfo, { name: "ROTOXY", version: "0.2.0" });
     const initializedNotice = await mcp(base, readOnly, { jsonrpc: "2.0", method: "notifications/initialized" });
     assert.equal(initializedNotice.status, 204);
 

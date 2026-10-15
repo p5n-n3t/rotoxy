@@ -196,8 +196,13 @@ export class OpenAICompatibleInferenceAdapter {
   async complete(request: InferenceRequest): Promise<unknown> {
     if (!request || !isProvider(request.provider) || typeof request.model !== "string" || !MODEL.test(request.model) ||
         !request.body || typeof request.body !== "object" || Array.isArray(request.body) || !Array.isArray(request.body.messages) || request.body.stream === true) throw new InferenceProviderError("invalid_request");
+    const body: Record<string, unknown> = { ...request.body, model: request.model };
+    const limitKeys = ["max_tokens", "max_completion_tokens"].filter(key => body[key] !== undefined);
+    if (limitKeys.length > 1 || limitKeys.some(key => !Number.isSafeInteger(body[key]) || Number(body[key]) < 1)) throw new InferenceProviderError("invalid_request");
+    const limitKey = limitKeys[0] ?? (request.provider === "openai" ? "max_completion_tokens" : "max_tokens");
+    body[limitKey] = Math.min(Number(body[limitKey] ?? 4096), 8192);
     let encoded: string;
-    try { encoded = JSON.stringify({ ...request.body, model: request.model }); }
+    try { encoded = JSON.stringify(body); }
     catch { throw new InferenceProviderError("invalid_request"); }
     if (Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES) throw new InferenceProviderError("invalid_request");
 

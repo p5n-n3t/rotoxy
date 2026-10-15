@@ -113,7 +113,7 @@ async function collect(state: PersistedState, account: UpstreamAccount, token: s
       params: {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "Token2OAuth tool inventory", version: "0.2.0" },
+        clientInfo: { name: "ROTOXY tool inventory", version: "0.2.0" },
       },
     }, undefined);
     if (init.status < 200 || init.status >= 300 || !init.message?.result) {

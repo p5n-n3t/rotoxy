@@ -141,7 +141,7 @@ export class OAuthService {
       authorization_servers: [issuer],
       scopes_supported: [...SUPPORTED_SCOPES],
       bearer_methods_supported: ["header"],
-      resource_name: "Token2OAuth MCP Gateway",
+      resource_name: "ROTOXY MCP Gateway",
     });
   };
 
@@ -176,7 +176,7 @@ export class OAuthService {
         res,
         400,
         "invalid_client_metadata",
-        "Token2OAuth currently registers public PKCE clients using token_endpoint_auth_method=none.",
+        "ROTOXY currently registers public PKCE clients using token_endpoint_auth_method=none.",
       );
     }
 
@@ -233,8 +233,8 @@ export class OAuthService {
       const hidden = ["client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state", "resource", "scope"]
         .map((name) => '<input type="hidden" name="' + name + '" value="' + esc((req.query as any)[name] || "") + '">')
         .join("");
-      res.type("html").send(page("Authorize", `<main class="login"><section class="card"><div class="brand"><div class="logo">T2</div><strong>Token2OAuth</strong></div><div class="eyebrow">Authorization request</div><h1>Authorize gateway access</h1>
-<p class="muted"><strong>${esc(validated.client.clientName || "MCP client")}</strong> is requesting access to the Token2OAuth MCP gateway. Upstream bearer credentials stay on this host and are never returned to the client.</p>
+      res.type("html").send(page("Authorize", `<main class="login"><section class="card"><div class="brand"><div class="logo">T2</div><strong>ROTOXY</strong></div><div class="eyebrow">Authorization request</div><h1>Authorize gateway access</h1>
+<p class="muted"><strong>${esc(validated.client.clientName || "MCP client")}</strong> is requesting access to the ROTOXY MCP gateway. Upstream bearer credentials stay on this host and are never returned to the client.</p>
 <div class="pill">scope · ${esc(validated.scope)}</div>
 <form method="post" action="./authorize">${hidden}
 ${loggedIn ? '<input type="hidden" name="session_authorized" value="1"><input type="hidden" name="_csrf" value="' + esc(csrf) + '">' : '<label>Gateway admin password</label><input type="password" name="admin_password" autocomplete="current-password" required>'}

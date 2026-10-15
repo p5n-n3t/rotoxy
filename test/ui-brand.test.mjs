@@ -20,7 +20,7 @@ test("grouped navigation keeps every legacy admin URL and marks the active page"
   }
   assert.equal((html.match(/aria-current="page"/g) || []).length, 2);
   assert.match(html, /aria-current="page">Supervisor</);
-  assert.match(html, /class="nav-group" aria-labelledby="nav-resources"/);
+  assert.match(html, /nav-disclosure/);
 });
 
 test("ROTOXY brand renders with application subtitle and authored mark", () => {

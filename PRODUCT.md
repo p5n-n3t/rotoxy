@@ -24,7 +24,7 @@ Existing gateway OAuth, credential pooling, account affinity, and tool policies 
 
 ## Brand Commitments
 
-The user requests a substantive high-end redesign, its own logo, cohesive theme, and collateral, with LightSprint Claude Opus 5.5 as design lead. Token2OAuth compatibility must remain. Final product name and visual direction are open. The present dashboard is an anti-reference for visual richness, not a model to imitate.
+The user requests a substantive high-end redesign, its own logo, cohesive theme, and collateral, with LightSprint Claude Opus 5.5 as design lead. ROTOXY compatibility must remain. Canonical product name and repository are ROTOXY and p5n-n3t/rotoxy. The present dashboard is an anti-reference for visual richness, not a model to imitate.
 
 ## Evidence on Hand
 

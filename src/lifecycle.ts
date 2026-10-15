@@ -1,4 +1,4 @@
-// Lifecycle planning and control for the Token2OAuth user service and its
+// Lifecycle planning and control for the ROTOXY user service and its
 // owned Tailscale Serve/Funnel path on a shared HTTPS listener.
 //
 // Everything here is injectable: planners are pure functions over an observed
@@ -677,7 +677,7 @@ export function validateStep(step: PlanStep, routes: RouteExpectations): void {
     allowed.add(["tailscale", sub, "--bg", `--https=${routes.httpsPort}`, `--set-path=${routes.ownedPath}`, routes.ownedTarget].join("\u0000"));
     allowed.add(["tailscale", sub, `--https=${routes.httpsPort}`, `--set-path=${routes.ownedPath}`, "off"].join("\u0000"));
   }
-  // The owned path is pinned to Token2OAuth's own prefix: even a tampered plan
+  // The owned path is pinned to ROTOXY's own prefix: even a tampered plan
   // object cannot aim a Serve/Funnel write at "/" or another service's mount.
   if (
     !allowed.has(argv) ||

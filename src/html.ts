@@ -23,28 +23,33 @@ export interface NavGroup { label: string; items: readonly NavItem[] }
  * rendered as unavailable text; never send an operator to a fabricated page.
  */
 export const NAV_GROUPS: readonly NavGroup[] = [
-  { label: "Command", items: [{ key: "workspace", label: "Workspace", href: "/admin/workspace" }, { key: "pool", label: "Overview", href: "/admin" }, { key: "jobs", label: "Jobs", href: "" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
+  { label: "Command", items: [{ key: "workspace", label: "Workspace", href: "/admin/workspace" }, { key: "pool", label: "Overview", href: "/admin" }, { key: "jobs", label: "Jobs", href: "/admin/jobs" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
   { label: "Resources", items: [
     { key: "accounts", label: "Workspace accounts", href: "/admin#accounts" },
-    { key: "models", label: "Models", href: "/admin/models" },
-    { key: "cloudflare", label: "Cloudflare AI", href: "/admin/cloudflare" },
+    { key: "models", label: "Models & APIs", href: "/admin/models" },
     { key: "oracle", label: "Private workers", href: "/admin/oracle" },
     { key: "resources", label: "Search", href: "/admin/resources" },
-    { key: "credits", label: "Credits", href: "/admin/credits" },
-    { key: "codex", label: "Codex", href: "/admin/codex" },
-    { key: "tools", label: "Tools", href: "/admin/tools" },
+    { key: "credits", label: "Usage & credits", href: "/admin/credits" },
   ] },
   { label: "Insights", items: [{ key: "activity", label: "Activity", href: "/admin" }, { key: "analytics", label: "Analytics", href: "" }] },
-  { label: "Settings", items: [{ key: "clients", label: "Clients", href: "/admin/models" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "routing", label: "Routing", href: "/admin/routing" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
+  { label: "Settings", items: [{ key: "clients", label: "Clients", href: "/admin/models" }, { key: "tools", label: "Tools", href: "/admin/tools" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "routing", label: "Routing", href: "/admin/routing" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
 ];
 
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {
   const b = esc(base);
-  const current = groups.flatMap((group) => group.items).find((item) => item.key === active)?.label ?? active;
+  const navActive = ["cloudflare", "inference", "codex"].includes(active) ? "models" : active;
+  const labels: Record<string, string> = { cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "Codex profiles" };
+  const current = labels[active] ?? groups.flatMap((group) => group.items).find((item) => item.key === navActive)?.label ?? active;
   const link = (item: NavItem) => item.href
-    ? `<a class="nav-link" href="${b}${esc(item.href)}"${active === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`
+    ? `<a class="nav-link" href="${b}${esc(item.href)}"${navActive === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`
     : `<span class="nav-link nav-unavailable" aria-disabled="true" title="${item.key === "jobs" ? "No standalone jobs page is mounted yet" : "Analytics is available as an authenticated JSON endpoint"}">${esc(item.label)}<small>${item.key === "jobs" ? "Unavailable" : "API only"}</small></span>`;
-  const nav = groups.map((g) => `<section class="nav-group" aria-labelledby="nav-${esc(g.label.toLowerCase())}"><h2 class="nav-label" id="nav-${esc(g.label.toLowerCase())}">${esc(g.label)}</h2>${g.items.map(link).join("")}</section>`).join("");
+  const nav = groups.map((g) => {
+    const items = g.items.filter(item => item.href);
+    const links = items.map(link).join("");
+    const selected = items.some(item => item.key === navActive);
+    if (g.label === "Resources" || g.label === "Settings") return `<details class="nav-group nav-disclosure"${selected ? " open" : ""}><summary class="nav-group-toggle">${esc(g.label)}<span aria-hidden="true">⌄</span></summary><div class="nav-group-items">${links}</div></details>`;
+    return `<section class="nav-group" aria-labelledby="nav-${esc(g.label.toLowerCase())}"><h2 class="nav-label" id="nav-${esc(g.label.toLowerCase())}">${esc(g.label)}</h2>${links}</section>`;
+  }).join("");
   const actions = `<div class="rx-sidebar-end"><a class="btn secondary" href="${b}/">Gateway</a><form class="inline" method="post" action="${b}/admin/logout"><button class="secondary">Sign out</button></form></div>`;
   return `<a class="rx-skip-link" href="#rx-main-content">Skip to content</a><aside class="rx-sidebar" aria-label="ROTOXY workspace navigation"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><span class="logo">${ROTOXY_MARK_SVG}</span><span><strong>ROTOXY</strong><span class="eyebrow">AI workforce control</span></span></a><div class="rx-workspace-id"><span class="eyebrow">Workspace</span><strong>Gateway workspace</strong></div><div class="rx-desktop-nav"><nav class="rx-nav-groups" aria-label="Workspace navigation">${nav.replaceAll('id="nav-', 'id="desktop-nav-').replaceAll('aria-labelledby="nav-', 'aria-labelledby="desktop-nav-')}</nav>${actions}</div><details class="rx-nav-details"><summary class="rx-mobile-menu">Menu <span aria-hidden="true">⌄</span></summary><div class="rx-nav-content"><nav class="rx-nav-groups" aria-label="Workspace navigation">${nav}</nav>${actions}</div></details></aside><header class="rx-page-context"><div><span class="eyebrow">Current page</span><strong class="rx-current-page">${esc(current)}</strong></div></header>`;
 }

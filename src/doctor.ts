@@ -420,7 +420,7 @@ export function diagnoseDoctorSnapshot(snapshot: DoctorSnapshot): DoctorReport {
     findings.push(finding(
       "process.unavailable",
       "critical",
-      "Local Token2OAuth process or listener is unavailable",
+      "Local ROTOXY process or listener is unavailable",
       "process",
       "The supplied process snapshot reports a stopped process, closed listener, or failed local health response.",
       "inspect-local-process",

@@ -1,3 +1,4 @@
+import { InferenceProviderStore, OpenAICompatibleInferenceAdapter, InferenceProviderError } from "./inference-providers.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
@@ -14,7 +15,7 @@ const MAX_CATALOG_ACCOUNTS = 100;
 const MAX_CATALOG_MODELS = 1000;
 const CATALOG_CACHE_MS = 60_000;
 
-interface CatalogBody { object: "list"; data: Array<{ id: string; object: "model"; owned_by: "cloudflare" | "ollama" }> }
+interface CatalogBody { object: "list"; data: Array<{ id: string; object: "model"; owned_by: "cloudflare" | "ollama" | "openai" | "openrouter" }> }
 interface CatalogVersion { digest: string; cloudflareModels: string[]; ollamaConfigured: boolean; ollamaAccounts: ModelCredentialView[] }
 interface CatalogResult { body: CatalogBody; ollamaSource: "live" | "unavailable" | "not-configured" | "not-eligible" }
 
@@ -135,6 +136,8 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
   const modelCredentials = new ModelCredentialStore(store);
   const cloudflareCredentials = new CloudflareCredentialStore(store);
   const routingRules = new ResourceRoutingRulesStore(store);
+  const externalStore = new InferenceProviderStore(store);
+  const externalAdapter = new OpenAICompatibleInferenceAdapter(externalStore);
   const cloudflare = options.cloudflareAdapter ?? new CloudflareAIAdapter(cloudflareCredentials);
   const ollamaFetch = options.ollamaFetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 15_000;
@@ -144,22 +147,24 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
   const catalogFlights = new Map<string, Promise<CatalogResult>>();
 
   const getCatalogVersion = async (): Promise<CatalogVersion> => {
-    const [modelAccounts, cloudflareAccounts, modelFileVersion, cloudflareFileVersion, rules, rulesFileVersion] = await Promise.all([
+    const [modelAccounts, cloudflareAccounts, modelFileVersion, cloudflareFileVersion, rules, rulesFileVersion, externalAccounts, externalFileVersion] = await Promise.all([
       modelCredentials.listCredentials(), cloudflareCredentials.listCredentials(),
       fileVersion(join(store.dir, "model-credentials.json")), fileVersion(join(store.dir, "cloudflare-ai-credentials.json")),
       routingRules.read(), fileVersion(routingRules.path),
+      externalStore.listAccounts(), fileVersion(join(store.dir, "inference-providers.json")),
     ]);
     // Use public account metadata and file inode/timestamps only. Never read or hash credential contents.
     const metadata = {
       modelAccounts: modelAccounts.map(({ id, enabled, createdAt, cooldownUntil }) => ({ id, enabled, createdAt, cooldownUntil })).sort((a, b) => a.id.localeCompare(b.id)),
       cloudflareAccounts: cloudflareAccounts.map(({ id, enabled, createdAt, cooldownUntil, allowedModels }) => ({ id, enabled, createdAt, cooldownUntil, allowedModels: [...allowedModels].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
-      files: [modelFileVersion, cloudflareFileVersion, rulesFileVersion],
+      files: [modelFileVersion, cloudflareFileVersion, rulesFileVersion, externalFileVersion],
+      externalAccounts,
       routing: rules.resources,
     };
     const digest = createHash("sha256").update(JSON.stringify(metadata)).digest("hex");
     return {
       digest,
-      cloudflareModels: cloudflareAccounts.filter(account => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now()).flatMap(account => account.allowedModels.map(model => `cloudflare/${model}`)),
+      cloudflareModels: [...cloudflareAccounts.filter(account => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now()).flatMap(account => account.allowedModels.filter(model => rules.resources[account.id]?.allowedModels === undefined || rules.resources[account.id].allowedModels!.includes(model)).map(model => `cloudflare/${model}`)), ...externalAccounts.filter(account => account.enabled && (account.cooldownUntil ?? 0) <= now()).flatMap(account => account.allowedModels.map(model => `${account.provider}/${model}`))],
       ollamaConfigured: modelAccounts.length > 0,
       ollamaAccounts: modelAccounts.filter(account => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now()),
     };
@@ -197,7 +202,7 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
     if (version.ollamaAccounts.length > 0 && successfulCatalogs === 0 && version.cloudflareModels.length === 0) throw new Error("ollama_catalog_unavailable");
     const names = [...new Set([...version.cloudflareModels, ...ollamaModels])].slice(0, MAX_CATALOG_MODELS * 2);
     return {
-      body: { object: "list", data: names.map(id => ({ id, object: "model", owned_by: id.startsWith("cloudflare/") ? "cloudflare" : "ollama" })) },
+      body: { object: "list", data: names.map(id => ({ id, object: "model", owned_by: id.startsWith("cloudflare/") ? "cloudflare" : id.startsWith("openai/") ? "openai" : id.startsWith("openrouter/") ? "openrouter" : "ollama" })) },
       ollamaSource: version.ollamaAccounts.length === 0 ? version.ollamaConfigured ? "not-eligible" : "not-configured" : successfulCatalogs ? "live" : "unavailable",
     };
   };
@@ -271,6 +276,16 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
           body = parsed as Record<string, unknown>;
         } catch { return error(res, 400, "invalid_request"); }
         if (typeof body.model !== "string" || !body.model || body.model.length > 240) return error(res, 400, "invalid_model");
+        const externalProvider = body.model.startsWith("openai/") ? "openai" : body.model.startsWith("openrouter/") ? "openrouter" : undefined;
+        if (externalProvider) {
+          if (body.stream === true) return error(res, 400, "streaming_not_supported");
+          const model = body.model.slice(externalProvider.length + 1);
+          try { return res.json(await externalAdapter.complete({ provider: externalProvider, model, body })); }
+          catch (caught) {
+            const code = caught instanceof InferenceProviderError ? caught.code : "provider_failure";
+            return error(res, code === "invalid_request" ? 400 : code === "model_not_allowed" ? 403 : 503, code);
+          }
+        }
         if (body.model.startsWith("ollama/")) {
           const model = body.model.slice("ollama/".length);
           if (!model || /[\r\n\0]/.test(model)) return error(res, 400, "invalid_model");
