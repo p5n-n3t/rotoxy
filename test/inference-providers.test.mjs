@@ -80,3 +80,25 @@ test("adapter bounds requests and responses, blocks redirects, and never retries
   await assert.rejects(adapter.complete({ provider: "openrouter", model: "anthropic/claude-3.7-sonnet", body: { messages: [{ role: "user", content: "x".repeat(1024 * 1024) }] } }), error => error.code === "invalid_request");
   assert.equal(calls, 3, "oversized input is rejected before a provider request");
 });
+
+test("adapter applies provider-specific default and clamped output caps and rejects duplicate cap fields before fetch", async t => {
+  const { accounts } = await fixture(t);
+  await accounts.addAccount({ provider: "openai", label: "OpenAI", token: "synthetic-openai-token", allowedModels: ["gpt-4.1-mini"] });
+  await accounts.addAccount({ provider: "openrouter", label: "OpenRouter", token: "synthetic-openrouter-token", allowedModels: ["anthropic/claude-3.7-sonnet"] });
+  const calls = [];
+  const adapter = new OpenAICompatibleInferenceAdapter(accounts, { fetch: async (_url, init) => {
+    calls.push(JSON.parse(init.body));
+    return Response.json({ id: "chatcmpl-synthetic", choices: [] });
+  } });
+  const messages = [{ role: "user", content: "synthetic request" }];
+  await adapter.complete({ provider: "openai", model: "gpt-4.1-mini", body: { messages } });
+  await adapter.complete({ provider: "openai", model: "gpt-4.1-mini", body: { messages, max_completion_tokens: 9000 } });
+  await adapter.complete({ provider: "openrouter", model: "anthropic/claude-3.7-sonnet", body: { messages } });
+  await adapter.complete({ provider: "openrouter", model: "anthropic/claude-3.7-sonnet", body: { messages, max_tokens: 9000 } });
+  assert.deepEqual(calls.map(body => [body.max_tokens, body.max_completion_tokens]), [
+    [undefined, 4096], [undefined, 8192], [4096, undefined], [8192, undefined],
+  ]);
+  await assert.rejects(adapter.complete({ provider: "openai", model: "gpt-4.1-mini", body: { messages, max_tokens: 100, max_completion_tokens: 100 } }),
+    error => error instanceof InferenceProviderError && error.code === "invalid_request");
+  assert.equal(calls.length, 4, "invalid duplicate cap parameters must not call the provider");
+});

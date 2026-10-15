@@ -16,7 +16,12 @@ const MAX_CATALOG_MODELS = 1000;
 const CATALOG_CACHE_MS = 60_000;
 
 interface CatalogBody { object: "list"; data: Array<{ id: string; object: "model"; owned_by: "cloudflare" | "ollama" | "openai" | "openrouter" }> }
-interface CatalogVersion { digest: string; cloudflareModels: string[]; ollamaConfigured: boolean; ollamaAccounts: ModelCredentialView[] }
+interface CatalogVersion {
+  digest: string;
+  cloudflareModels: string[];
+  ollamaConfigured: boolean;
+  ollamaAccounts: Array<ModelCredentialView & { allowedModels?: string[] }>;
+}
 interface CatalogResult { body: CatalogBody; ollamaSource: "live" | "unavailable" | "not-configured" | "not-eligible" }
 
 export interface UnifiedModelApiOptions {
@@ -166,7 +171,14 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
       digest,
       cloudflareModels: [...cloudflareAccounts.filter(account => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now()).flatMap(account => account.allowedModels.filter(model => rules.resources[account.id]?.allowedModels === undefined || rules.resources[account.id].allowedModels!.includes(model)).map(model => `cloudflare/${model}`)), ...externalAccounts.filter(account => account.enabled && (account.cooldownUntil ?? 0) <= now()).flatMap(account => account.allowedModels.map(model => `${account.provider}/${model}`))],
       ollamaConfigured: modelAccounts.length > 0,
-      ollamaAccounts: modelAccounts.filter(account => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now()),
+      ollamaAccounts: modelAccounts
+        .filter(account => account.enabled && rules.resources[account.id]?.enabled !== false && (account.cooldownUntil ?? 0) <= now())
+        .map(account => ({
+          ...account,
+          ...(rules.resources[account.id]?.allowedModels === undefined
+            ? {}
+            : { allowedModels: [...rules.resources[account.id]!.allowedModels!] }),
+        })),
     };
   };
 
@@ -192,6 +204,7 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
           for (const entry of payload.data.slice(0, MAX_CATALOG_MODELS)) {
             const id = entry && typeof entry === "object" ? (entry as Record<string, unknown>).id : undefined;
             if (typeof id !== "string" || !id.length || id.length > 200 || /[\r\n\0]/.test(id)) continue;
+            if (account.allowedModels !== undefined && !account.allowedModels.includes(id)) continue;
             ollamaModels.add(`ollama/${id}`);
             ollamaModels.add(id);
           }
