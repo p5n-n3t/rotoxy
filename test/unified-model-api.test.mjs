@@ -7,6 +7,8 @@ import { join } from "node:path";
 import express from "express";
 import { StateStore } from "../dist/store.js";
 import { CloudflareAIError } from "../dist/cloudflare-ai.js";
+import { InferenceProviderStore } from "../dist/inference-providers.js";
+import { ResourceRoutingRulesStore } from "../dist/resource-routing.js";
 import { createUnifiedModelApi } from "../dist/unified-model-api.js";
 
 async function fixture(t, options = {}) {
@@ -110,6 +112,53 @@ test("Ollama catalog failure preserves the enabled Cloudflare catalog", async t 
   assert.deepEqual(catalog.data.map(model => model.id), ["cloudflare/@cf/meta/llama-3.1-8b-instruct"]);
   assert.match(response.headers.get("x-model-catalog-provenance"), /ollama-unavailable/);
   assert.doesNotMatch(JSON.stringify(catalog), /synthetic private provider body/);
+});
+
+test("Ollama catalog applies each account's exact routing allowlist; absent allows provider catalog and empty denies it", async t => {
+  const { store, api, base } = await fixture(t, { ollamaFetch: async (_url, init) => {
+    const model = init.headers.authorization.endsWith("account-a-token") ? "qwen3:8b" : "raw/legacy-model";
+    return Response.json({ object: "list", data: [{ id: model }, { id: "not-an-exact-match" }] });
+  } });
+  const accountA = await api.modelCredentials.addCredential("account A", "synthetic-account-a-token");
+  const accountB = await api.modelCredentials.addCredential("account B", "synthetic-account-b-token");
+  const rules = new ResourceRoutingRulesStore(store);
+  await rules.replace({ version: 1, resources: {
+    [accountA.id]: { allowedModels: ["qwen3:8b"], enabled: true, weight: 1 },
+    [accountB.id]: { allowedModels: [], enabled: true, weight: 1 },
+  } });
+  const read = await api.modelCredentials.issueToken({ scopes: ["model:read"], expiresInSeconds: 3600 });
+  const request = () => fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${read.token}` } });
+  const filtered = await request();
+  assert.equal(filtered.status, 200);
+  assert.deepEqual((await filtered.json()).data.map(item => item.id), ["ollama/qwen3:8b", "qwen3:8b"]);
+
+  await rules.replace({ version: 1, resources: { [accountA.id]: { enabled: true, weight: 1 } } });
+  const unfiltered = await request();
+  assert.equal(unfiltered.status, 200);
+  assert.deepEqual((await unfiltered.json()).data.map(item => item.id), [
+    "ollama/qwen3:8b", "qwen3:8b", "ollama/not-an-exact-match", "not-an-exact-match",
+    "ollama/raw/legacy-model", "raw/legacy-model",
+  ]);
+  assert.equal(unfiltered.headers.get("x-model-catalog-provenance").split(";").at(-1).trim(), "cache-miss", "routing edits invalidate the catalog cache");
+});
+
+test("OpenAI and OpenRouter configured allowlist edits invalidate the merged catalog cache", async t => {
+  const { store, api, base } = await fixture(t);
+  const providers = new InferenceProviderStore(store);
+  const openai = await providers.addAccount({ provider: "openai", label: "OpenAI", token: "synthetic-openai-token", allowedModels: ["gpt-4.1-mini"] });
+  const openrouter = await providers.addAccount({ provider: "openrouter", label: "OpenRouter", token: "synthetic-openrouter-token", allowedModels: ["anthropic/claude-3.7-sonnet"] });
+  const read = await api.modelCredentials.issueToken({ scopes: ["model:read"], expiresInSeconds: 3600 });
+  const request = () => fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${read.token}` } });
+  const first = await request();
+  assert.deepEqual((await first.json()).data.map(item => item.id), ["openai/gpt-4.1-mini", "openrouter/anthropic/claude-3.7-sonnet"]);
+  assert.match(first.headers.get("x-model-catalog-provenance"), /cache-miss/);
+  const cached = await request();
+  assert.match(cached.headers.get("x-model-catalog-provenance"), /cache-hit/);
+  await providers.updateAccount(openai.id, { allowedModels: ["gpt-4.1"] });
+  await providers.updateAccount(openrouter.id, { allowedModels: [] });
+  const refreshed = await request();
+  assert.deepEqual((await refreshed.json()).data.map(item => item.id), ["openai/gpt-4.1"]);
+  assert.match(refreshed.headers.get("x-model-catalog-provenance"), /cache-miss/);
 });
 
 test("Cloudflare chat maps a bounded nonstream response, enforces scopes and rejects oversized output without replay", async t => {
