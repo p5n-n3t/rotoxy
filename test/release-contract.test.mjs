@@ -26,7 +26,7 @@ test("published tarball includes install, runtime, and rollback guidance", async
   const files = new Set(metadata.files.map((file) => file.path));
   for (const required of [
     "install.sh", "install-rotoxy.sh", "scripts/rotoxy-control.mjs", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service", "uninstall.sh", "supervisor/install.sh",
-    "docs/deployment/unified-supervisor.md", "docs/RELEASE-VERIFICATION.md",
+    "docs/deployment/unified-supervisor.md", "docs/RELEASE-VERIFICATION.md", "dist/worker-observation.js",
     "supervisor/snooze/static/index.html",
   ]) assert.ok(files.has(required), `release tarball omits ${required}`);
   assert.ok(![...files].some((path) => /(^|\/)frontend\//.test(path)), "frontend development sources must stay out of the public package");

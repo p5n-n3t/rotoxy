@@ -15,6 +15,58 @@ const SECRET_PATTERNS = [
   /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
 ];
 
+export const OBSERVATION_FAILURE_CODES = [
+  "http_status", "transport_error", "timeout", "malformed_protocol",
+  "account_missing", "account_unavailable", "session_missing", "session_mismatch",
+  "owner_mismatch", "observation_error",
+] as const;
+export type ObservationFailureCode = typeof OBSERVATION_FAILURE_CODES[number];
+export type ObservationFailureDiagnostic = {
+  accountId: string;
+  sessionId: string;
+  code: ObservationFailureCode;
+  httpStatus?: number;
+};
+
+/** Safe typed failure: messages and upstream bodies are deliberately discarded. */
+export class WorkerObservationFailure extends Error {
+  readonly code: ObservationFailureCode;
+  readonly httpStatus?: number;
+
+  constructor(code: ObservationFailureCode, httpStatus?: number) {
+    super(code);
+    this.name = "WorkerObservationFailure";
+    this.code = OBSERVATION_FAILURE_CODES.includes(code) ? code : "observation_error";
+    if (Number.isInteger(httpStatus) && Number(httpStatus) >= 100 && Number(httpStatus) <= 599) this.httpStatus = Number(httpStatus);
+  }
+}
+
+export function classifyObservationFailure(error: unknown): Pick<ObservationFailureDiagnostic, "code" | "httpStatus"> {
+  if (!(error instanceof WorkerObservationFailure)) return { code: "observation_error" };
+  return { code: error.code, ...(error.httpStatus ? { httpStatus: error.httpStatus } : {}) };
+}
+
+/** Deduplicate by account/session and cap each cycle's emitted diagnostic list. */
+export function boundObservationDiagnostics(
+  diagnostics: readonly ObservationFailureDiagnostic[], limit = 20,
+): { items: ObservationFailureDiagnostic[]; omitted: number } {
+  const cap = Number.isInteger(limit) ? Math.max(0, Math.min(limit, 50)) : 20;
+  const seen = new Set<string>();
+  const unique: ObservationFailureDiagnostic[] = [];
+  for (const item of diagnostics) {
+    const accountId = /^[A-Za-z0-9_.:-]{1,160}$/.test(item.accountId) ? item.accountId : "unknown";
+    const sessionId = /^[A-Za-z0-9_.:-]{1,160}$/.test(item.sessionId) ? item.sessionId : "unknown";
+    const code: ObservationFailureCode = OBSERVATION_FAILURE_CODES.includes(item.code) ? item.code : "observation_error";
+    const rawStatus = item.httpStatus;
+    const httpStatus = Number.isInteger(rawStatus) && rawStatus !== undefined && rawStatus >= 100 && rawStatus <= 599 ? rawStatus : undefined;
+    const key = `${accountId}\0${sessionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({ accountId, sessionId, code, ...(httpStatus ? { httpStatus } : {}) });
+  }
+  return { items: unique.slice(0, cap), omitted: Math.max(0, unique.length - cap) };
+}
+
 function safeText(value: unknown): string | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
   let text = value;
