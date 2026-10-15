@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -50,12 +51,12 @@ test("dry-run uses the documented Claude Code command without writing config or 
   const homeDir = await tempHome(t);
   await writeFile(join(homeDir, ".claude.json"), JSON.stringify({ mcpServers: { other: { type: "http", url: "https://other.test/mcp" } } }));
   const calls = [];
-  const result = await configureClientConnection({ client: "claude-code", name: "token2oauth", url: "https://gateway.example/mcp" }, {
+  const result = await configureClientConnection({ client: "claude-code", name: "rotoxy", url: "https://gateway.example/mcp" }, {
     homeDir,
     runner: async (command, args) => { calls.push([command, args]); return mockCli()(command, args); },
   });
   assert.equal(result.applied, false);
-  assert.deepEqual(result.args, ["mcp", "add", "--transport", "http", "--scope", "user", "token2oauth", "https://gateway.example/mcp"]);
+  assert.deepEqual(result.args, ["mcp", "add", "--transport", "http", "--scope", "user", "rotoxy", "https://gateway.example/mcp"]);
   assert.deepEqual(calls, [["claude", ["--version"]], ["claude", ["mcp", "add", "--help"]], ["claude", ["mcp", "remove", "--help"]]]);
   assert.equal(await readFile(join(homeDir, ".claude.json"), "utf8"), JSON.stringify({ mcpServers: { other: { type: "http", url: "https://other.test/mcp" } } }));
   assert.equal(result.backupPath, undefined);
@@ -86,16 +87,16 @@ test("apply saves an exact private config backup before official Codex add witho
     "args = ['--secret', 'argument-secret']",
     "env = { TOKEN = 'env-secret' }",
   ].join("\n");
-  const result = await configureClientConnection({ client: "codex", name: "token2oauth", url: "https://gateway.example/mcp", apply: true }, {
+  const result = await configureClientConnection({ client: "codex", name: "rotoxy", url: "https://gateway.example/mcp", apply: true }, {
     homeDir,
     now: () => 123,
     runner: mockCli(async (command, args) => {
       calls.push([command, args]);
-      assert.equal((await readdir(join(homeDir, ".token2oauth", "mcp-backups"))).length, 1, "private backup exists before CLI mutation");
+      assert.equal((await readdir(join(homeDir, ".rotoxy", "mcp-backups"))).length, 1, "private backup exists before CLI mutation");
       return { exitCode: 0, stdout: "added" };
     }),
   });
-  assert.deepEqual(calls, [["codex", ["mcp", "add", "token2oauth", "--url", "https://gateway.example/mcp"]]]);
+  assert.deepEqual(calls, [["codex", ["mcp", "add", "rotoxy", "--url", "https://gateway.example/mcp"]]]);
   assert.equal(result.applied, true);
   assert.match(result.backupPath, /123-codex-[0-9a-f-]+-exact-config\.json$/);
   const backup = await readFile(result.backupPath, "utf8");
@@ -104,13 +105,15 @@ test("apply saves an exact private config backup before official Codex add witho
   assert.equal((await stat(result.backupPath)).mode & 0o777, 0o600);
   assert.doesNotMatch(JSON.stringify(result), /query-secret|PRIVATE_TOKEN_ENV|argument-secret|env-secret/);
   assert.equal(result.message.includes("successful tool execution"), true);
+  assert.match(result.message, /Finish the OAuth handoff in Codex CLI/);
+  assert.match(result.message, /does not copy client credentials/);
 });
 
 test("refuses a duplicate registration and rejects credentials in endpoint URLs", async (t) => {
   const homeDir = await tempHome(t);
-  await writeFile(join(homeDir, ".claude.json"), JSON.stringify({ mcpServers: { token2oauth: { type: "http", url: "https://existing.test/mcp" } } }));
+  await writeFile(join(homeDir, ".claude.json"), JSON.stringify({ mcpServers: { rotoxy: { type: "http", url: "https://existing.test/mcp" } } }));
   const runner = mockCli();
-  await assert.rejects(configureClientConnection({ client: "claude-code", name: "token2oauth", url: "https://gateway.example/mcp", apply: true }, { homeDir, runner }), /already registered/);
+  await assert.rejects(configureClientConnection({ client: "claude-code", name: "rotoxy", url: "https://gateway.example/mcp", apply: true }, { homeDir, runner }), /already registered/);
   await assert.rejects(configureClientConnection({ client: "claude-code", name: "new", url: "https://user:secret@gateway.example/mcp" }, { homeDir, runner }), /without embedded credentials/);
 });
 
@@ -119,27 +122,27 @@ test("removal is dry-run by default and delegates to the official CLI when appli
   const codexDir = join(homeDir, ".codex");
   await mkdir(codexDir);
   const configPath = join(codexDir, "config.toml");
-  const originalConfig = "model = 'kept'\n[mcp_servers.token2oauth]\nurl = 'https://gateway.example/mcp'\n[mcp_servers.local]\ncommand = 'local-server'\n";
+  const originalConfig = "model = 'kept'\n[mcp_servers.rotoxy]\nurl = 'https://gateway.example/mcp'\n[mcp_servers.local]\ncommand = 'local-server'\n";
   await writeFile(configPath, originalConfig);
   const originalMode = (await stat(configPath)).mode & 0o777;
   const calls = [];
   const runner = mockCli(async (command, args) => {
     calls.push([command, args]);
-    assert.equal((await readdir(join(homeDir, ".token2oauth", "mcp-backups"))).length, 1, "private backup exists before CLI mutation");
+    assert.equal((await readdir(join(homeDir, ".rotoxy", "mcp-backups"))).length, 1, "private backup exists before CLI mutation");
     await writeFile(configPath, "model = 'kept'\n[mcp_servers.local]\ncommand = 'local-server'\n");
     return { exitCode: 0, stdout: "removed" };
   });
-  const dryRun = await removeClientConnection({ client: "codex", name: "token2oauth" }, { homeDir, runner });
+  const dryRun = await removeClientConnection({ client: "codex", name: "rotoxy" }, { homeDir, runner });
   assert.equal(dryRun.applied, false);
-  assert.deepEqual(dryRun.args, ["mcp", "remove", "token2oauth"]);
+  assert.deepEqual(dryRun.args, ["mcp", "remove", "rotoxy"]);
   assert.equal(await readFile(configPath, "utf8"), originalConfig);
-  const applied = await removeClientConnection({ client: "codex", name: "token2oauth", apply: true }, { homeDir, runner });
+  const applied = await removeClientConnection({ client: "codex", name: "rotoxy", apply: true }, { homeDir, runner });
   assert.equal(applied.applied, true);
   assert.ok(applied.backupPath);
   const afterRemove = await readFile(configPath, "utf8");
   assert.match(afterRemove, /mcp_servers\.local/);
-  assert.doesNotMatch(afterRemove, /mcp_servers\.token2oauth/);
-  assert.deepEqual(calls, [["codex", ["mcp", "remove", "token2oauth"]]]);
+  assert.doesNotMatch(afterRemove, /mcp_servers\.rotoxy/);
+  assert.deepEqual(calls, [["codex", ["mcp", "remove", "rotoxy"]]]);
   const preview = await restoreClientConnection({ client: "codex", backupPath: applied.backupPath }, { homeDir });
   assert.equal(preview.applied, false);
   assert.equal(await readFile(configPath, "utf8"), afterRemove);
@@ -161,13 +164,13 @@ test("Claude add preserves unrelated MCP servers and guarded restore refuses lat
     await writeFile(configPath, JSON.stringify(config, null, 2));
     return { exitCode: 0, stdout: "added" };
   });
-  const result = await configureClientConnection({ client: "claude-code", name: "token2oauth", url: "https://gateway.example/mcp", apply: true }, { homeDir, runner });
+  const result = await configureClientConnection({ client: "claude-code", name: "rotoxy", url: "https://gateway.example/mcp", apply: true }, { homeDir, runner });
   const changed = JSON.parse(await readFile(configPath, "utf8"));
-  assert.deepEqual(Object.keys(changed.mcpServers).sort(), ["keep", "token2oauth"]);
+  assert.deepEqual(Object.keys(changed.mcpServers).sort(), ["keep", "rotoxy"]);
   assert.equal(changed.mcpServers.keep.headers.Authorization, "sensitive");
   await writeFile(configPath, `${await readFile(configPath, "utf8")}\n`); // Simulate an unrelated later edit.
   await assert.rejects(restoreClientConnection({ client: "claude-code", backupPath: result.backupPath, apply: true }, { homeDir }), /changed after this backup/);
-  assert.match(await readFile(configPath, "utf8"), /token2oauth/);
+  assert.match(await readFile(configPath, "utf8"), /rotoxy/);
 });
 
 test("refuses incompatible official CLI help before backup or configuration changes", async (t) => {
@@ -180,7 +183,7 @@ test("refuses incompatible official CLI help before backup or configuration chan
     if (args[1] === "add") return { exitCode: 0, stdout: "Usage: mcp add NAME URL" };
     return { exitCode: 0, stdout: "Usage: mcp remove --scope user" };
   };
-  await assert.rejects(configureClientConnection({ client: "claude-code", name: "token2oauth", url: "https://gateway.example/mcp", apply: true }, { homeDir, runner }), /does not advertise/);
+  await assert.rejects(configureClientConnection({ client: "claude-code", name: "rotoxy", url: "https://gateway.example/mcp", apply: true }, { homeDir, runner }), /does not advertise/);
   assert.equal(await readFile(configPath, "utf8"), original);
 });
 
@@ -190,11 +193,11 @@ test("add from an absent config can be restored to absence using only the saved 
   const configPath = join(configDir, "config.toml");
   const runner = mockCli(async () => {
     await mkdir(configDir, { recursive: true });
-    await writeFile(configPath, "[mcp_servers.token2oauth]\nurl = 'https://gateway.example/mcp'\n");
+    await writeFile(configPath, "[mcp_servers.rotoxy]\nurl = 'https://gateway.example/mcp'\n");
     return { exitCode: 0, stdout: "added" };
   });
-  const added = await configureClientConnection({ client: "codex", name: "token2oauth", url: "https://gateway.example/mcp", apply: true }, { homeDir, runner });
-  assert.match(await readFile(configPath, "utf8"), /token2oauth/);
+  const added = await configureClientConnection({ client: "codex", name: "rotoxy", url: "https://gateway.example/mcp", apply: true }, { homeDir, runner });
+  assert.match(await readFile(configPath, "utf8"), /rotoxy/);
   await restoreClientConnection({ client: "codex", backupPath: added.backupPath, apply: true }, { homeDir });
   await assert.rejects(readFile(configPath), { code: "ENOENT" });
 });
@@ -208,13 +211,54 @@ test("refuses an insecure backup directory before invoking the config-changing c
   await writeFile(configPath, original);
   let changed = false;
   const runner = mockCli(async () => { changed = true; return { exitCode: 0 }; });
-  await assert.rejects(configureClientConnection({ client: "claude-code", name: "token2oauth", url: "https://gateway.example/mcp", apply: true }, { homeDir, backupDir, runner }), /owner-only directory/);
+  await assert.rejects(configureClientConnection({ client: "claude-code", name: "rotoxy", url: "https://gateway.example/mcp", apply: true }, { homeDir, backupDir, runner }), /owner-only directory/);
   assert.equal(changed, false);
   assert.equal(await readFile(configPath, "utf8"), original);
 });
 
 test("manual web setup is labeled honestly and Desktop is unsupported", () => {
   assert.deepEqual(manualClientSetupNotes().map((row) => [row.client, row.support]), [
-    ["ChatGPT Web", "manual"], ["Claude Desktop", "unsupported"],
+    ["ChatGPT Web", "manual"], ["Claude Desktop", "unsupported"], ["OpenCode", "unsupported"],
   ]);
+  assert.match(manualClientSetupNotes().at(-1).note, /No OpenCode config writer or compatibility check/);
+});
+
+test("CLI help uses the canonical client name and describes legacy mount generically", () => {
+  const cli = new URL("../dist/cli.js", import.meta.url).pathname;
+  const lifecycleHelp = execFileSync(process.execPath, [cli, "lifecycle", "--help"], { encoding: "utf8" });
+  const lifecycleUpHelp = execFileSync(process.execPath, [cli, "lifecycle", "up", "--help"], { encoding: "utf8" });
+  const lifecycleDownHelp = execFileSync(process.execPath, [cli, "lifecycle", "down", "--help"], { encoding: "utf8" });
+  const exposeHelp = execFileSync(process.execPath, [cli, "tailscale", "expose", "--help"], { encoding: "utf8" });
+  const configureHelp = execFileSync(process.execPath, [cli, "clients", "configure", "--help"], { encoding: "utf8" });
+  const restoreHelp = execFileSync(process.execPath, [cli, "clients", "restore", "--help"], { encoding: "utf8" });
+  assert.doesNotMatch(lifecycleHelp, /token2oauth/i);
+  assert.doesNotMatch(lifecycleUpHelp, /token2oauth/i);
+  assert.doesNotMatch(lifecycleDownHelp, /token2oauth/i);
+  assert.doesNotMatch(exposeHelp, /token2oauth/i);
+  assert.match(lifecycleHelp, /compatibility mount/i);
+  assert.match(configureHelp, /root \/mcp\s+URL/);
+  assert.match(configureHelp, /rotoxy/);
+  assert.match(restoreHelp, /--apply/);
+  assert.match(restoreHelp, /dry-run/);
+});
+
+test("default restore discovers an older private backup path without moving it", async (t) => {
+  const homeDir = await tempHome(t);
+  const configPath = join(homeDir, ".codex", "config.toml");
+  const original = "[mcp_servers.rotoxy]\nurl = 'https://gateway.example/mcp'\n[mcp_servers.keep]\ncommand = 'keep'\n";
+  await mkdir(join(homeDir, ".codex"));
+  await writeFile(configPath, original);
+  const legacyBackupDir = join(homeDir, ".token2oauth", "mcp-backups");
+  const removed = await removeClientConnection({ client: "codex", name: "rotoxy", apply: true }, {
+    homeDir,
+    backupDir: legacyBackupDir,
+    runner: mockCli(async () => {
+      await writeFile(configPath, "[mcp_servers.keep]\ncommand = 'keep'\n");
+      return { exitCode: 0, stdout: "removed" };
+    }),
+  });
+  assert.match(removed.backupPath, /\.token2oauth\/mcp-backups/);
+  const restored = await restoreClientConnection({ client: "codex", backupPath: removed.backupPath, apply: true }, { homeDir });
+  assert.equal(restored.applied, true);
+  assert.equal(await readFile(configPath, "utf8"), original);
 });
