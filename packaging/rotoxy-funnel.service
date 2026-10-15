@@ -1,7 +1,7 @@
 [Unit]
-Description=ROTOXY foreground Tailscale Funnel to Token2OAuth on port 2030
-After=network-online.target rotoxy.target token2oauth.service
-Wants=token2oauth.service
+Description=ROTOXY foreground Tailscale Funnel to ROTOXY on port 2030
+After=network-online.target rotoxy.target rotoxy-gateway.service
+Wants=rotoxy-gateway.service
 # Keep the owned route during backend restarts; down stops Funnel explicitly.
 PartOf=rotoxy.target
 

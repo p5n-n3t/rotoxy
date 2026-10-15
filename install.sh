@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_URL="https://github.com/p5n-n3t/token2oauth.git"
+REPO_URL="https://github.com/p5n-n3t/rotoxy.git"
 BRANCH="main"
-PREFIX="${TOKEN2OAUTH_PREFIX:-$HOME/.local/share/token2oauth}"
-PORT="${TOKEN2OAUTH_PORT:-2030}"
-PUBLIC_PATH="${TOKEN2OAUTH_PATH:-/token2oauth}"
-MODE="${TOKEN2OAUTH_EXPOSE:-funnel}"
-PUBLIC_BASE_URL="${TOKEN2OAUTH_PUBLIC_BASE_URL:-}"
-UPSTREAM_URL="${TOKEN2OAUTH_UPSTREAM_URL:-}"
-INSTALL_TAILSCALE=1
-INSTALL_SERVICE=1
+PREFIX="${ROTOXY_PREFIX:-${TOKEN2OAUTH_PREFIX:-$HOME/.local/share/rotoxy}}"
+PORT="${ROTOXY_PORT:-${TOKEN2OAUTH_PORT:-2030}}"
+PUBLIC_PATH="${ROTOXY_PATH:-${TOKEN2OAUTH_PATH:-/}}"
+MODE="${ROTOXY_EXPOSE:-${TOKEN2OAUTH_EXPOSE:-none}}"
+PUBLIC_BASE_URL="${ROTOXY_PUBLIC_BASE_URL:-${TOKEN2OAUTH_PUBLIC_BASE_URL:-}}"
+UPSTREAM_URL="${ROTOXY_UPSTREAM_URL:-${TOKEN2OAUTH_UPSTREAM_URL:-}}"
+INSTALL_TAILSCALE=0
+INSTALL_SERVICE=0
 ASSUME_YES=0
 FORCE_ROOT=0
 DRY_RUN=0
 
 usage() {
   cat <<'EOF'
-Token2OAuth installer
+ROTOXY installer
 
 Usage:
   ./install.sh [options]
-  curl -fsSL https://raw.githubusercontent.com/p5n-n3t/token2oauth/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/p5n-n3t/rotoxy/main/install.sh | bash
 
 Options:
-  --prefix PATH            Install directory (default ~/.local/share/token2oauth)
+  --prefix PATH            Install directory (default ~/.local/share/rotoxy)
   --port N                 Local gateway port (default 2030)
-  --path PATH              Public URL path (default /token2oauth)
-  --mode MODE              funnel | serve | none (default funnel)
+  --path PATH              Public URL path (default /, only when --mode none)
+  --mode MODE              funnel | serve | none (default none)
   --public-base-url URL    Override auto-detected public base URL
   --upstream-url URL       Preconfigure the upstream MCP endpoint
   --branch NAME            Git branch/tag to install (default main)
@@ -39,14 +39,13 @@ Options:
   --dry-run                Print major actions without changing the machine
   -h, --help               Show this help
 
-The installer is idempotent: it upgrades an existing checkout, keeps encrypted
-state in ~/.config/token2oauth, and never resets Tailscale Serve/Funnel.
+The installer is idempotent for the selected prefix. It uses canonical ROTOXY paths and does not start a service or publish a route by default. Existing legacy state is discovered by the application until an operator performs the documented migration.
 EOF
 }
 
-log(){ printf '\033[1;36m[token2oauth]\033[0m %s\n' "$*"; }
-warn(){ printf '\033[1;33m[token2oauth]\033[0m %s\n' "$*" >&2; }
-die(){ printf '\033[1;31m[token2oauth]\033[0m %s\n' "$*" >&2; exit 1; }
+log(){ printf '\033[1;36m[rotoxy]\033[0m %s\n' "$*"; }
+warn(){ printf '\033[1;33m[rotoxy]\033[0m %s\n' "$*" >&2; }
+die(){ printf '\033[1;31m[rotoxy]\033[0m %s\n' "$*" >&2; exit 1; }
 run(){
   if (( DRY_RUN )); then printf '+ '; printf '%q ' "$@"; printf '\n'; else "$@"; fi
 }
@@ -80,12 +79,12 @@ PUBLIC_PATH="${PUBLIC_PATH%/}"
 [[ -n "$PUBLIC_PATH" ]] || PUBLIC_PATH="/"
 
 if [[ "$PUBLIC_PATH" == "/" && "$MODE" != "none" && "$FORCE_ROOT" -ne 1 ]]; then
-  die "Refusing to claim Tailscale root /. Use the default /token2oauth or pass --force-root deliberately."
+  die "Refusing to claim Tailscale root /. Use --mode none for the canonical root URL, or pass --force-root after reviewing route ownership."
 fi
 
 if (( ! ASSUME_YES )) && [[ -t 0 ]]; then
   cat <<EOF
-Token2OAuth will:
+ROTOXY will:
   • install/update into: $PREFIX
   • listen on:          127.0.0.1:$PORT
   • exposure mode:      $MODE
@@ -145,7 +144,7 @@ if (( INSTALL_TAILSCALE )) && command -v tailscale >/dev/null 2>&1; then
   fi
 fi
 
-log "Installing Token2OAuth…"
+log "Installing ROTOXY…"
 if [[ -d "$PREFIX/.git" ]]; then
   run git -C "$PREFIX" fetch --tags origin
   run git -C "$PREFIX" checkout "$BRANCH"
@@ -162,7 +161,10 @@ if (( ! DRY_RUN )); then
   npm prune --omit=dev
   chmod +x dist/cli.js install.sh uninstall.sh
   mkdir -p "$HOME/.local/bin"
-  ln -sfn "$PREFIX/dist/cli.js" "$HOME/.local/bin/token2oauth"
+  ln -sfn "$PREFIX/dist/cli.js" "$HOME/.local/bin/rotoxy-cli"
+  mkdir -p "$HOME/.local/lib"
+  install -m755 "$PREFIX/scripts/rotoxy-control.mjs" "$HOME/.local/lib/rotoxy-control.mjs"
+  ln -sfn "$HOME/.local/lib/rotoxy-control.mjs" "$HOME/.local/bin/rotoxy"
 fi
 
 if [[ -z "$PUBLIC_BASE_URL" ]]; then
@@ -186,7 +188,7 @@ fi
 
 if (( INSTALL_SERVICE )); then
   SERVICE_DIR="$HOME/.config/systemd/user"
-  SERVICE_FILE="$SERVICE_DIR/token2oauth.service"
+  SERVICE_FILE="$SERVICE_DIR/rotoxy-gateway.service"
   NODE_BIN="$(command -v node || true)"
   if [[ -n "$NODE_BIN" ]] && command -v systemctl >/dev/null 2>&1; then
     log "Installing systemd user service…"
@@ -194,7 +196,7 @@ if (( INSTALL_SERVICE )); then
       mkdir -p "$SERVICE_DIR"
       cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=Token2OAuth MCP OAuth Gateway
+Description=ROTOXY MCP OAuth Gateway
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
@@ -206,22 +208,19 @@ Restart=on-failure
 RestartSec=3
 Environment=NODE_ENV=production
 
-[Install]
-WantedBy=default.target
 EOF
       systemctl --user daemon-reload
-      systemctl --user enable --now token2oauth.service
     else
       echo "+ write $SERVICE_FILE"
-      echo "+ systemctl --user enable --now token2oauth.service"
+      echo "+ install manual unit; no service enabled or started"
     fi
   else
     warn "systemd user services unavailable; run manually: $PREFIX/dist/cli.js serve --port $PORT"
   fi
 fi
 
-if [[ "$MODE" != "none" && "$PUBLIC_PATH" == "/" ]]; then
-  die "Refusing to mount Token2OAuth at the Tailscale root '/': it is shared with other services. Use --path /token2oauth."
+if [[ "$MODE" != "none" && "$PUBLIC_PATH" == "/" && "$FORCE_ROOT" -ne 1 ]]; then
+  die "Refusing to mount ROTOXY at the shared Tailscale root '/'. Review route ownership and pass --force-root deliberately."
 fi
 
 if [[ "$MODE" != "none" ]]; then
@@ -241,9 +240,9 @@ fi
 cat <<EOF
 
 ╭──────────────────────────────────────────────────────────────╮
-│ Token2OAuth installed                                       │
+│ ROTOXY installed                                       │
 ╰──────────────────────────────────────────────────────────────╯
-Gateway:  $PUBLIC_BASE_URL/
+Gateway:  $PUBLIC_BASE_URL
 MCP URL:  $PUBLIC_BASE_URL/mcp
 Admin:    $PUBLIC_BASE_URL/admin
 
@@ -254,11 +253,11 @@ Next:
   4. Add ONLY the MCP URL above to ChatGPT.
 
 Useful commands:
-  token2oauth doctor
-  token2oauth account add --label "Account 1"
-  token2oauth account list
-  token2oauth pool status
-  token2oauth tailscale status
+  rotoxy doctor
+  rotoxy account add --label "Account 1"
+  rotoxy account list
+  rotoxy pool status
+  rotoxy tailscale status
 
 If ~/.local/bin is not on PATH:
   export PATH="\$HOME/.local/bin:\$PATH"

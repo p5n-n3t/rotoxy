@@ -1,6 +1,6 @@
 [Unit]
 Description=ROTOXY manually controlled local services and foreground Funnel
-Documentation=file:%h/.local/share/token2oauth/docs/implementation/rotoxy-lifecycle.md
+Documentation=file:%h/.local/share/rotoxy/docs/implementation/rotoxy-lifecycle.md
 
 # This is an activation anchor, deliberately not WantedBy=default.target.
 # `rotoxy-control.mjs up` starts it only after an operator request.
