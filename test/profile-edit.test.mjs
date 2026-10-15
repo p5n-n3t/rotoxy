@@ -22,7 +22,7 @@ test("profile and Ollama metadata edits preserve auth, ownership, secrets, and u
     if (oldConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = oldConfig;
   });
 
-  const [{ StateStore }, { CodexProfiles }, { ModelCredentialStore }] = await Promise.all([
+  const [{ StateStore }, { CodexProfiles, renderCodexProfilesPage }, { ModelCredentialStore }] = await Promise.all([
     import("../dist/store.js"), import("../dist/codex-profiles.js"), import("../dist/model-credentials.js"),
   ]);
   const store = new StateStore();
@@ -38,6 +38,8 @@ test("profile and Ollama metadata edits preserve auth, ownership, secrets, and u
   const two = await profiles.registerProfile("Team Two");
   const authFixture = "synthetic-existing-auth-file-preserve-exactly";
   await writeFile(join(one.profileDir, "auth.json"), authFixture, { mode: 0o600 });
+  const removableAuthFixture = "synthetic-auth-retained-after-profile-removal";
+  await writeFile(join(two.profileDir, "auth.json"), removableAuthFixture, { mode: 0o600 });
   await profiles.bindThread("thread-synthetic-123", one.id);
 
   // Hold the exact interprocess lock shared with StateStore, then race edits
@@ -69,6 +71,21 @@ test("profile and Ollama metadata edits preserve auth, ownership, secrets, and u
   await assert.rejects(profiles.renameProfile(one.id, "\n"), /profile label/);
   await assert.rejects(profiles.updateProfile(one.id, { label: "Changed", profileDir: "/tmp/unsafe" }), /update is invalid/);
   assert.equal(JSON.stringify(listedProfiles).includes(authFixture), false);
+  const page = renderCodexProfilesPage(listedProfiles, [], "/gateway");
+  assert.match(page, /action="\/gateway\/admin\/codex\/action"/);
+  assert.match(page, /name="action" value="rename"/);
+  assert.match(page, /name="action" value="remove"/);
+  assert.match(page, /value="Team One Renamed"/);
+  await assert.rejects(profiles.removeProfile(one.id), /owns Codex threads/);
+  assert.equal((await profiles.listProfiles()).length, 2, "owned thread prevents deletion");
+  await profiles.removeProfile(two.id);
+  assert.deepEqual((await profiles.listProfiles()).map((profile) => profile.id), [one.id]);
+  assert.equal(await readFile(join(two.profileDir, "auth.json"), "utf8"), removableAuthFixture, "removal preserves private auth directory");
+  const codexRegistry = JSON.parse(await readFile(join(store.dir, "codex-profiles.json"), "utf8"));
+  assert.equal(codexRegistry.audit.at(-1).action, "profile_removed");
+  assert.equal(codexRegistry.audit.at(-1).profileId, two.id);
+  assert.equal(Number.isSafeInteger(codexRegistry.audit.at(-1).at), true);
+  assert.equal(JSON.stringify(codexRegistry.audit).includes(removableAuthFixture), false);
 
   const credentialStoreA = new ModelCredentialStore(store);
   const storeB = new StateStore();
@@ -76,6 +93,7 @@ test("profile and Ollama metadata edits preserve auth, ownership, secrets, and u
   const credentialStoreB = new ModelCredentialStore(storeB);
   const credentialA = await credentialStoreA.addCredential("Ollama One", "synthetic-ollama-secret-0001");
   const credentialB = await credentialStoreA.addCredential("Ollama Two", "synthetic-ollama-secret-0002");
+  const independentToken = await credentialStoreA.issueToken({ scopes: ["model:read"], expiresInSeconds: 3600 });
   const [editedA] = await Promise.all([
     credentialStoreA.updateCredential(credentialA.id, { label: "Ollama One Renamed", enabled: false }),
     credentialStoreB.updateCredential(credentialB.id, { label: "Ollama Two Renamed" }),
@@ -95,4 +113,82 @@ test("profile and Ollama metadata edits preserve auth, ownership, secrets, and u
   assert.equal(encrypted.includes("synthetic-ollama-secret-0002"), false);
   assert.deepEqual((await store.load()).accounts, stateAccountsBefore);
   assert.equal(upstream.id, stateAccountsBefore[0].id);
+  await credentialStoreA.removeCredential(credentialA.id);
+  assert.deepEqual((await credentialStoreA.listCredentials()).map((account) => account.id), [credentialB.id]);
+  assert.equal(await credentialStoreA.credentialForRequest(credentialA.id), undefined);
+  assert.equal((await credentialStoreA.credentialForRequest(credentialB.id)).apiKey, "synthetic-ollama-secret-0002");
+  assert.deepEqual((await credentialStoreA.listTokens()).map((token) => token.id), [independentToken.id]);
+  const afterRemoval = JSON.parse(await readFile(join(store.dir, "model-credentials.json"), "utf8"));
+  assert.equal(afterRemoval.audit.at(-1).action, "credential_removed");
+  assert.equal(afterRemoval.audit.at(-1).credentialId, credentialA.id);
+  assert.equal(Number.isSafeInteger(afterRemoval.audit.at(-1).at), true);
+  assert.doesNotMatch(JSON.stringify(afterRemoval.audit), /synthetic-ollama-secret/);
+  await assert.rejects(credentialStoreA.removeCredential(credentialA.id), /not found/);
+});
+
+test("Codex removal blocks pending login and in-flight work, then leaves auth data and records an audit", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "t2o-profile-remove-"));
+  const oldHome = process.env.HOME;
+  const oldConfig = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.HOME = join(root, "home");
+  process.env.TOKEN2OAUTH_CONFIG_DIR = join(root, "config");
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(process.env.HOME, { mode: 0o700, recursive: true });
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = oldConfig;
+  });
+  const [{ StateStore }, { CodexProfiles }] = await Promise.all([import("../dist/store.js"), import("../dist/codex-profiles.js")]);
+  const store = new StateStore();
+  await store.init({ adminPassword: "synthetic-profile-remove-password" });
+  const binary = join(root, "codex");
+  await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(binary, 0o700);
+  let releaseRead;
+  let readStarted;
+  let holdRead = false;
+  const transports = [];
+  const profiles = new CodexProfiles({ codexBinary: binary, configDir: store.dir, transportFactory: (_binary, profileDir) => {
+    const transport = {
+    async request(method) {
+      if (method === "account/login/start") return { loginId: "synthetic-login-id", verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-1234" };
+      if (method === "account/login/cancel") return {};
+      if (method === "account/read" && holdRead) {
+        readStarted();
+        await new Promise((resolve) => { releaseRead = resolve; });
+      }
+      if (method === "account/read") return { account: { type: "chatgpt" } };
+      if (method === "model/list") return { data: [] };
+      if (method === "account/rateLimits/read") return { rateLimits: {} };
+      return {};
+    },
+    notify() {}, onNotification() { return () => {}; }, async close() { this.closed = true; },
+    };
+    transports.push({ profileId: profileDir.split(/[\\/]/).at(-1), transport });
+    return transport;
+  } });
+  t.after(() => profiles.close());
+  const pending = await profiles.registerProfile("Pending login");
+  await profiles.startDeviceLogin(pending.id);
+  await assert.rejects(profiles.removeProfile(pending.id), /pending device login/);
+  assert.equal((await profiles.listProfiles()).some((profile) => profile.id === pending.id), true);
+  await profiles.cancelDeviceLogin(pending.id);
+
+  const active = await profiles.registerProfile("Busy profile");
+  const auth = "synthetic-active-auth";
+  await writeFile(join(active.profileDir, "auth.json"), auth, { mode: 0o600 });
+  holdRead = true;
+  const started = new Promise((resolve) => { readStarted = resolve; });
+  const refreshing = profiles.refreshProfile(active.id);
+  await started;
+  await assert.rejects(profiles.removeProfile(active.id), /in-flight operation/);
+  releaseRead();
+  await refreshing;
+  holdRead = false;
+  await profiles.removeProfile(active.id);
+  assert.equal(await readFile(join(active.profileDir, "auth.json"), "utf8"), auth);
+  assert.equal(transports.find((entry) => entry.profileId === active.id)?.transport.closed, true);
+  assert.equal((await profiles.listProfiles()).some((profile) => profile.id === active.id), false);
+  const registry = JSON.parse(await readFile(join(store.dir, "codex-profiles.json"), "utf8"));
+  assert.equal(registry.audit.some((event) => event.profileId === active.id && event.action === "profile_removed"), true);
 });

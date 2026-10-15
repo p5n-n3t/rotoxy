@@ -10,8 +10,10 @@ export interface ModelCredentialView { id: string; label: string; enabled: boole
 export interface ModelCredentialUpdate { label?: string; enabled?: boolean }
 interface ModelAccount extends ModelCredentialView { secret: EncryptedSecret }
 interface ModelToken { id: string; hash: string; scopes: ModelScope[]; createdAt: number; expiresAt: number }
-interface ModelDocument { version: 1; accounts: ModelAccount[]; tokens: ModelToken[] }
+interface ModelCredentialAuditEntry { action: "credential_removed"; credentialId: string; at: number }
+interface ModelDocument { version: 1; accounts: ModelAccount[]; tokens: ModelToken[]; audit?: ModelCredentialAuditEntry[] }
 const EMPTY: ModelDocument = { version: 1, accounts: [], tokens: [] };
+const MAX_CREDENTIAL_AUDIT = 500;
 const TOKEN_LIFETIME_MAX_SECONDS = 90 * 24 * 60 * 60;
 const labelRe = /^[^\u0000-\u001f\u007f]{1,80}$/;
 
@@ -31,7 +33,11 @@ export class ModelCredentialStore {
   private async read(): Promise<ModelDocument> {
     try {
       const doc = JSON.parse(await readFile(this.file, "utf8")) as ModelDocument;
-      if (doc.version !== 1 || !Array.isArray(doc.accounts) || !Array.isArray(doc.tokens)) throw new Error("invalid model credential store");
+      if (doc.version !== 1 || !Array.isArray(doc.accounts) || !Array.isArray(doc.tokens) ||
+          doc.audit !== undefined && (!Array.isArray(doc.audit) || doc.audit.length > MAX_CREDENTIAL_AUDIT || doc.audit.some((entry) =>
+            !entry || entry.action !== "credential_removed" || typeof entry.credentialId !== "string" || !validId(entry.credentialId) || !Number.isSafeInteger(entry.at)))) {
+        throw new Error("invalid model credential store");
+      }
       return doc;
     } catch (error: any) {
       if (error?.code === "ENOENT") return structuredClone(EMPTY);
@@ -119,6 +125,17 @@ export class ModelCredentialStore {
 
   async renameCredential(id: string, label: string): Promise<ModelCredentialView> {
     return this.updateCredential(id, { label });
+  }
+
+  /** Remove one Ollama credential while preserving independent client tokens and audit history. */
+  async removeCredential(id: string): Promise<void> {
+    if (!validId(id)) throw new TypeError("model credential id is invalid");
+    await this.mutate((doc) => {
+      const index = doc.accounts.findIndex((entry) => entry.id === id);
+      if (index < 0) throw new Error("model credential not found");
+      doc.accounts.splice(index, 1);
+      doc.audit = [...(doc.audit || []), { action: "credential_removed" as const, credentialId: id, at: Date.now() }].slice(-MAX_CREDENTIAL_AUDIT);
+    });
   }
 
   async setCooldown(id: string, cooldownUntil: number): Promise<void> {
