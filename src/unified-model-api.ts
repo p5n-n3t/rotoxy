@@ -27,6 +27,8 @@ interface CatalogResult { body: CatalogBody; ollamaSource: "live" | "unavailable
 export interface UnifiedModelApiOptions {
   cloudflareAdapter?: Pick<CloudflareAIAdapter, "run">;
   ollamaFetch?: typeof globalThis.fetch;
+  /** Trusted test injection; production custom providers use pinned public HTTPS. */
+  externalPublicFetch?: typeof globalThis.fetch;
   timeoutMs?: number;
   now?: () => number;
 }
@@ -142,7 +144,7 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
   const cloudflareCredentials = new CloudflareCredentialStore(store);
   const routingRules = new ResourceRoutingRulesStore(store);
   const externalStore = new InferenceProviderStore(store);
-  const externalAdapter = new OpenAICompatibleInferenceAdapter(externalStore);
+  const externalAdapter = new OpenAICompatibleInferenceAdapter(externalStore, { publicFetch: options.externalPublicFetch });
   const cloudflare = options.cloudflareAdapter ?? new CloudflareAIAdapter(cloudflareCredentials);
   const ollamaFetch = options.ollamaFetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 15_000;

@@ -36,6 +36,7 @@ test("DNS must return only public addresses and selected address is pinned with 
   assert.equal(capture.options.servername, "api.vendor.example");
   assert.equal(capture.options.rejectUnauthorized, true);
   await new Promise((resolve, reject) => capture.options.lookup("api.vendor.example", {}, (error, address, family) => error ? reject(error) : (assert.equal(address, "8.8.8.8"), assert.equal(family, 4), resolve())));
+  await new Promise((resolve, reject) => capture.options.lookup("api.vendor.example", { all: true }, (error, addresses) => error ? reject(error) : (assert.deepEqual(addresses, [{ address: "8.8.8.8", family: 4 }]), resolve())));
   let requested = false;
   const mixed = createPinnedPublicProviderFetch({ resolve: async () => [{ address: "8.8.8.8", family: 4 }, { address: "10.0.0.2", family: 4 }], request: (...args) => { requested = true; return fakeRequest("ok", {})(...args); } });
   await assert.rejects(mixed("https://api.vendor.example/v1/chat/completions", { method: "POST", body: "{}" }), /not_public/);
@@ -55,4 +56,16 @@ test("transport does not follow redirects and bounds response with abort cleanup
   await started;
   abort.abort();
   await assert.rejects(pending);
+});
+
+
+test("DNS resolution observes abort and the absolute transport deadline", async () => {
+  let called = false;
+  const options = { resolve: () => new Promise(() => {}), request: () => { called = true; throw Error("unexpected request"); }, timeoutMs: 20 };
+  await assert.rejects(createPinnedPublicProviderFetch(options)("https://api.vendor.example/v1", { method: "POST", body: "{}" }), /provider_timeout/);
+  const controller = new AbortController();
+  const promise = createPinnedPublicProviderFetch({ ...options, timeoutMs: 10000 })("https://api.vendor.example/v1", { method: "POST", body: "{}", signal: controller.signal });
+  controller.abort(new Error("test_abort"));
+  await assert.rejects(promise, /test_abort/);
+  assert.equal(called, false);
 });

@@ -170,14 +170,12 @@ test("OpenAI and OpenRouter configured allowlist edits invalidate the merged cat
 });
 
 test("custom provider namespaced catalog dispatches only to saved origin", async t => {
-  const originalFetch = globalThis.fetch;
   const calls = [];
-  globalThis.fetch = async (url, init) => {
-    if (String(url).startsWith("https://api.vendor.example/")) { calls.push([String(url), init.headers.authorization]); return Response.json({ id: "ok" }); }
-    return originalFetch(url, init);
+  const externalPublicFetch = async (url, init) => {
+    calls.push([String(url), init.headers.authorization]);
+    return Response.json({ id: "ok" });
   };
-  t.after(() => { globalThis.fetch = originalFetch; });
-  const { store, api, base } = await fixture(t);
+  const { store, api, base } = await fixture(t, { externalPublicFetch });
   const providers = new InferenceProviderStore(store);
   const p = await providers.addCustomProvider("Vendor", "https://api.vendor.example/v1");
   await providers.addAccount({ provider: p.id, label: "Vendor account", token: "synthetic-vendor-token", allowedModels: ["chat-model"] });

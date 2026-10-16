@@ -40,13 +40,28 @@ export function createPinnedPublicProviderFetch(options: PublicProviderHttpOptio
   return async (input, init = {}) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.port && url.port !== "443") throw new TypeError("provider_url_invalid");
-    const records = await resolve(url.hostname);
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(new Error("provider_timeout")), options.timeoutMs ?? 60_000);
+    const signal = init.signal ? AbortSignal.any([init.signal, deadline.signal]) : deadline.signal;
+    try {
+    const records = await new Promise<Array<{ address: string; family: number }>>((accept, reject) => {
+      let settled = false;
+      const finish = (error?: unknown, value?: Array<{ address: string; family: number }>) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", aborted);
+        if (error) reject(error); else accept(value!);
+      };
+      const aborted = () => finish(signal.reason ?? new Error("aborted"));
+      if (signal.aborted) { aborted(); return; }
+      signal.addEventListener("abort", aborted, { once: true });
+      Promise.resolve().then(() => resolve(url.hostname)).then(value => finish(undefined, value), error => finish(error));
+    });
     if (!records.length || records.some(record => !isPublicProviderAddress(record.address))) throw new TypeError("provider_address_not_public");
     const selected = records[0]!;
     const body = typeof init.body === "string" ? init.body : "";
     if (Buffer.byteLength(body, "utf8") > MAX_REQUEST_BYTES) throw new TypeError("request_too_large");
     if ((init.method ?? "POST") !== "POST") throw new TypeError("method_invalid");
-    const signal = init.signal ?? undefined;
     if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
     const headers = new Headers(init.headers);
     if ([...headers.keys()].some(name => !["authorization", "content-type", "accept"].includes(name.toLowerCase()))) throw new TypeError("headers_invalid");
@@ -55,7 +70,7 @@ export function createPinnedPublicProviderFetch(options: PublicProviderHttpOptio
       const requestOptions: RequestOptions = {
         protocol: "https:", hostname: url.hostname, port: 443, method: init.method ?? "POST", path: `${url.pathname}${url.search}`,
         headers: Object.fromEntries(headers.entries()), servername: url.hostname, rejectUnauthorized: true,
-        lookup: (_host: string, _opts: unknown, callback: (error: NodeJS.ErrnoException | null, address: string, family: number) => void) => callback(null, selected.address, selected.family),
+        lookup: ((_host: string, opts: { all?: boolean }, callback: (...args: any[]) => void) => opts?.all ? callback(null, [selected]) : callback(null, selected.address, selected.family)) as RequestOptions["lookup"],
       };
       const onAbort = () => request.destroy(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
       try {
@@ -78,5 +93,6 @@ export function createPinnedPublicProviderFetch(options: PublicProviderHttpOptio
     for (const [name, value] of Object.entries(response.headers)) if (value !== undefined) responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
     const responseBody = [204, 205, 304].includes(response.status) ? null : new Uint8Array(response.body);
     return new Response(responseBody, { status: response.status, headers: responseHeaders });
+    } finally { clearTimeout(timer); }
   };
 }

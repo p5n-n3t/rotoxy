@@ -35,7 +35,7 @@ test("workspace command centre is authenticated and renders bounded real resourc
   const oracleSnapshot = { available: true, hosts: [
     { host: "ora1", models: ["qwen3.5:9b"], lastCatalogCheck: 1760000000, catalogCheckState: "checked", assignedTasks: 8, completedTasks: 5, runningTasks: 2, catalogError: "private oracle error" },
     { host: "ora3", models: ["gpt-oss:20b"], lastCatalogCheck: null, catalogCheckState: "never_checked", assignedTasks: 1, completedTasks: 1, runningTasks: 0 },
-    { host: "ora5", models: ["tev1:0.8b", "invented-model"], lastCatalogCheck: null, catalogCheckState: "unknown", assignedTasks: 0, completedTasks: 0, runningTasks: 0 },
+    { host: "ora5", models: ["tev1:0.8b", "custom-model"], lastCatalogCheck: null, catalogCheckState: "unknown", assignedTasks: 0, completedTasks: 0, runningTasks: 0 },
     { host: "ora9", models: ["qwen3.5:9b"], catalogCheckState: "checked", assignedTasks: 99, completedTasks: 99, runningTasks: 99 },
   ], summary: {}, tasks: {}, events: {}, advisoryModel: {} };
   const backend = {
@@ -60,13 +60,13 @@ test("workspace command centre is authenticated and renders bounded real resourc
   const snapshotResponse = await fetch(base + "/admin/api/v1/workspace/snapshot", { headers: { cookie } });
   assert.equal(snapshotResponse.status, 200);
   const snapshot = await snapshotResponse.json();
-  assert.deepEqual(snapshot.counts, { gateway: 1, models: 1, cloudflare: 1, oracleHosts: 3, codexProfiles: 1 });
+  assert.deepEqual(snapshot.counts, { gateway: 1, models: 1, cloudflare: 1, oracleHosts: 4, codexProfiles: 1 });
   assert.equal(snapshot.accounts.gateway[0].label, "Primary MCP");
   assert.equal(snapshot.accounts.models[0].label, "Ollama primary");
   assert.equal(snapshot.accounts.cloudflare[0].label, "Edge models");
-  assert.deepEqual(snapshot.oracle.hosts.map((host) => host.host), ["ora1", "ora3", "ora5"]);
+  assert.deepEqual(snapshot.oracle.hosts.map((host) => host.host), ["ora1", "ora3", "ora5", "ora9"]);
   assert.equal(snapshot.oracle.hosts[0].runningTasks, 2);
-  assert.deepEqual(snapshot.oracle.hosts[2].models, ["tev1:0.8b"]);
+  assert.deepEqual(snapshot.oracle.hosts[2].models, ["tev1:0.8b", "custom-model"]);
   assert.equal(snapshot.codex.profiles[0].label, "<script>Profile</script>");
   assert.equal(snapshot.codex.profiles[0].state, "unknown");
   assert.equal(Object.hasOwn(snapshot.codex.profiles[0], "profileDir"), false);
@@ -79,8 +79,8 @@ test("workspace command centre is authenticated and renders bounded real resourc
   assert.equal(JSON.stringify(snapshot).includes("must-not-leak"), false);
   assert.equal(JSON.stringify(snapshot).includes("mock-codex-secret"), false);
   assert.equal(JSON.stringify(snapshot).includes("private oracle error"), false);
-  assert.equal(JSON.stringify(snapshot).includes("invented-model"), false);
-  assert.equal(JSON.stringify(snapshot).includes("ora9"), false);
+  assert.equal(JSON.stringify(snapshot).includes("custom-model"), true);
+  assert.equal(JSON.stringify(snapshot).includes("ora9"), true);
   assert.deepEqual(reads, ["project-a"]);
 
   const response = await fetch(base + "/admin/workspace", { headers: { cookie } });

@@ -1,6 +1,8 @@
 import { AgentWorkspaceService, createAgentWorkspaceRouter } from "./agent-workspace.js";
 import { renderAgentWorkspace } from "./agent-workspace-ui.js";
 import { createJobsAdminRouter } from "./jobs-admin.js";
+import { createOracleFleetAdminRouter } from "./oracle-fleet-admin.js";
+import { createProviderHubRouter } from "./provider-hub.js";
 import { createInferenceProviderAdminRouter } from "./inference-provider-admin.js";
 import { createResourceRoutingAdminRouter } from "./resource-routing-admin.js";
 import { createCommandWorkspaceRouter } from "./command-workspace.js";
@@ -69,6 +71,8 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(modelGateway.router);
   router.use(cloudflare.router);
   router.use(createInferenceProviderAdminRouter(store, sessions).router);
+  router.use(createProviderHubRouter(store, sessions));
+  router.use(createOracleFleetAdminRouter(store, sessions).router);
   router.use(createResourceRoutingAdminRouter(store, sessions).router);
   router.use(createAgentWorkspaceAccessRouter(store, sessions, options.supervisorBackend));
   router.use(createAgentWorkspaceRouter(store, sessions, agentWorkspace, renderAgentWorkspace));

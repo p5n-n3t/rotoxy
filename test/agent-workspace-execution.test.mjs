@@ -164,20 +164,31 @@ test("workspace execution persists before submit, replays once, reconciles owner
     const background = submission("job-background-handoff");
     assert.equal((await mcp(owner,"workspace_dispatch",background)).value.accepted,true);
     const submitCount=calls.filter(c=>c.name==="job_submit").length;
+    // Observe the real scheduled sync completing rather than repeatedly spawning
+    // snapshot subprocesses while the background reconciler needs the same CPU.
+    const originalSync = restartedApp.agentWorkspace.sync;
+    let signalBackground;
+    const synchronized = new Promise(resolve => { signalBackground = resolve; });
+    restartedApp.agentWorkspace.sync = async (...args) => {
+      const result = await originalSync.apply(restartedApp.agentWorkspace, args);
+      if (args[1] === background.jobId && result.projectionPending === false) signalBackground();
+      return result;
+    };
     const reconciler=restartedApp.agentWorkspace.createReconciler(200);
-    let backgroundArtifact;
+    let timeout;
     try {
       reconciler.start();
-      const deadline=Date.now()+30000;
-      while(Date.now()<deadline) {
-        const observed=(await mcp(collaborator,"workspace_snapshot",{projectId:"project-a"})).value;
-        const task=observed.tasks.find(t=>t.jobId===background.jobId);
-        backgroundArtifact=observed.artifacts.find(a=>a.taskId===task?.id);
-        if(backgroundArtifact) break;
-        await new Promise(resolve=>setTimeout(resolve,500));
-      }
-    } finally { reconciler.stop(); }
-    assert.ok(backgroundArtifact,"background reconciliation publishes results after the initiating HTTP request ended");
+      await Promise.race([synchronized, new Promise((_, reject) => {
+        timeout=setTimeout(()=>reject(new Error("background reconciliation did not publish before deadline")),60000);
+      })]);
+    } finally {
+      clearTimeout(timeout);
+      reconciler.stop();
+      restartedApp.agentWorkspace.sync = originalSync;
+    }
+    const observed=(await mcp(collaborator,"workspace_snapshot",{projectId:"project-a"})).value;
+    const backgroundTask=observed.tasks.find(t=>t.jobId===background.jobId);
+    assert.ok(observed.artifacts.some(a=>a.taskId===backgroundTask?.id),"background reconciliation publishes results after the initiating HTTP request ended");
     assert.equal(calls.filter(c=>c.name==="job_submit").length,submitCount,"background observation never launches another inference/job");
 
   } finally {

@@ -90,11 +90,11 @@ function safeOracleHosts(raw: unknown): { available: boolean; hosts: OracleHostV
   const seen = new Set<string>();
   const hosts: OracleHostView[] = [];
   for (const value of raw.hosts) {
-    if (!isRecord(value) || typeof value.host !== "string" || !(ORACLE_OPS_HOSTS as readonly string[]).includes(value.host) || seen.has(value.host)) continue;
+    if (!isRecord(value) || typeof value.host !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(value.host) || seen.has(value.host)) continue;
     seen.add(value.host);
     const catalogState = ["checked", "check_failed", "never_checked", "unknown"].includes(String(value.catalogCheckState)) ? String(value.catalogCheckState) : "unknown";
     const lastCatalogCheck = typeof value.lastCatalogCheck === "number" && Number.isFinite(value.lastCatalogCheck) && value.lastCatalogCheck > 0 && value.lastCatalogCheck <= 8_640_000_000_000 ? value.lastCatalogCheck : null;
-    const models = Array.isArray(value.models) ? value.models.filter((model): model is string => typeof model === "string" && (ORACLE_OPS_MODELS as readonly string[]).includes(model)).slice(0, ORACLE_OPS_MODELS.length) : [];
+    const models = Array.isArray(value.models) ? value.models.filter((model): model is string => typeof model === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:+/-]{0,159}$/.test(model)).slice(0, 64) : [];
     hosts.push({ host: value.host, models, catalogState, lastCatalogCheck,
       assignedTasks: safeCount(value.assignedTasks), completedTasks: safeCount(value.completedTasks), runningTasks: safeCount(value.runningTasks) });
   }
