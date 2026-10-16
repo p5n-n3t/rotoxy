@@ -14,6 +14,8 @@ This extends the connected-workspace checkpoint. Installation and live execution
 
 Eight supplied Cloudflare accounts match the configured registry. All eight independently authenticated and returned a valid catalog. A real request through the Cloudflare adapter, with a 16-token output maximum, returned `ROTOXY_OK` from `@cf/meta/llama-3.1-8b-instruct`: 42 prompt and 4 completion tokens, with approximately 0.31245 reported neurons. No remaining balance or monetary charge is inferred. The supported catalog/run routes are documented by [Cloudflare's API reference](https://developers.cloudflare.com/api/resources/ai/).
 
+After deployment, a separate scoped client called the public `/v1/models` and `/v1/chat/completions` endpoints. The Cloudflare model appeared in the catalog and returned `ROTOXY_OK` with 42 prompt and 4 completion tokens. Both requests returned HTTP 200; the completion took 930 ms. The temporary gateway token was revoked immediately afterward. This verifies downstream model execution in addition to the earlier direct adapter check.
+
 A credential-free pinned-HTTPS request reached OpenAI's official API and returned the expected 401. That proves DNS/TLS/request transport, not vendor inference with a newly configured account. No NVIDIA credential was supplied or claimed verified.
 
 The existing ora3 LiteLLM container answered passive liveness and model-list reads. Its Claude-named aliases include routes to Ollama models; an alias must not be displayed as proof of Anthropic execution. The existing Loopback connector reports a desktop gateway and SSH fleet targets. An actual read-only request through its ora3 target returned hostname `ora3`. Loopback and LiteLLM are different capabilities; neither service was replaced or restarted for these checks.
@@ -36,3 +38,9 @@ Remaining work is explicit:
 6. Existing broader roadmap items: automatic task decomposition, native approval integrations, additional workspace providers, and supported resumable runner control. Dormant web-chat wake-up remains unsupported.
 
 No purchases/top-ups, new provider permissions, credential extraction, provider-policy bypass, or automatic infrastructure restart was performed in this checkpoint.
+
+## Deployment receipt
+
+The installed code checkpoint is `57e117853a9e624d182beb2719b44dad1790299c`. The subsequent release-note commit changes documentation only. The runtime was swapped using a backed-up staged installation; the gateway, Oracle pool, and workforce monitor were deliberately restarted for deployment. Existing LiteLLM and Loopback services were not restarted. The master-key checksum remained unchanged, the workspace database passed SQLite `quick_check`, and all four ROTOXY runtime/Funnel services reported active. Public diagnostics passed process, config, credentials, upstream initialization, OAuth, tool inventory, and Funnel routing with no findings. Official Claude Code MCP reconnection reported `Connected`; the previous end-to-end tool-execution proof remains recorded separately.
+
+Seven reviewed LightSprint artifacts were imported into the durable agent workspace, producing 20 recorded tasks at import time. Their actual session/account/model attribution and Git references are preserved; local assignment identifiers are not passed off as upstream task identifiers. A provider's idle state remains separate from artifact approval.
