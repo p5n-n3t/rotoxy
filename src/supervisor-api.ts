@@ -23,6 +23,16 @@ export interface SupervisorControlInput {
   value?: number;
 }
 
+export interface WorkspaceAccessProject { projectId: string; clientIds: string[] }
+export interface WorkspaceAccessClient { clientId: string; label: string }
+export interface WorkspaceAccessSnapshot {
+  projects: WorkspaceAccessProject[];
+  clients: WorkspaceAccessClient[];
+  revision: string;
+  editable: boolean;
+}
+export interface WorkspaceAccessUpdate { projectId: string; clientIds: string[]; expectedRevision: string }
+
 /** Semantic injection seam. A concrete adapter delegates to the durable supervisor bridge. */
 export interface SupervisorBackend {
   callTool(name: JobToolName, args: unknown, caller: SupervisorCaller): Promise<unknown>;
@@ -39,6 +49,12 @@ export interface SupervisorBackend {
   acknowledgeSupervision?(projectId: string, eventId: number): Promise<unknown>;
   /** Admin-only one-shot message to a configured existing worker session. */
   guidanceAdmin?(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult>;
+  /** Read-only discovery limited to projects explicitly authorized for this OAuth client. */
+  workspaceProjects?(clientId: string): Promise<Array<{ projectId: string }>>;
+  /** Sanitized project/client membership snapshot for the authenticated admin. */
+  workspaceAccessAdmin?(): Promise<WorkspaceAccessSnapshot>;
+  /** Explicitly change only one project's OAuth client membership. */
+  updateWorkspaceAccessAdmin?(input: WorkspaceAccessUpdate): Promise<WorkspaceAccessSnapshot>;
 }
 
 export class SupervisorUnavailable extends Error {
