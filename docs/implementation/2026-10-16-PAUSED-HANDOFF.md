@@ -1,5 +1,11 @@
-# PAUSED — account switch — 2026-10-16
-User explicitly requested immediate checkpoint and pause. DO NOT resume tasks, polling, tests, or model use until user explicitly resumes.
+# Historical pause — account switch — 2026-10-16
+
+**Superseded:** the user explicitly resumed work. See
+`2026-10-16-agent-workspace-release.md` for the subsequent deployed milestone and
+current integration limits. The paused state below is retained as historical
+recovery evidence and is not a current instruction to stop services.
+
+At this checkpoint the user explicitly requested immediate checkpoint and pause.
 
 Git: integration worktree /home/jq/Desktop/Token2OAuth/.worktrees/unified-platform; branch codex/unified-platform-20261010; HEAD 4fe46d4931092d3691e8c2440faf5fe2e967b48f. GitHub canonical p5n-n3t/rotoxy, main last pushed2c0bc90. Commits after that (cutover evidence, client attribution, release scripts, client polish, monitor diagnostics) are committed locally, not all pushed/deployed.
 
