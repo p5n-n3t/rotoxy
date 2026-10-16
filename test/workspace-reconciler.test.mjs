@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +25,14 @@ test("SQLite reconciliation lease is scoped, durable, and only settles terminal 
   const store = new StateStore();
   await store.init({ adminPassword: "test-only" });
   const db = join(store.dir, "agent-workspace.sqlite3");
+  const legacySchema = `import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("""CREATE TABLE workspace_execution_bindings(
+    project_id TEXT NOT NULL, job_id TEXT NOT NULL, remote_job_id TEXT NOT NULL, client_id TEXT NOT NULL,
+    actor TEXT NOT NULL, idempotency_key TEXT NOT NULL, remote_idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+    submission_json TEXT NOT NULL, remote_submission_json TEXT NOT NULL, state TEXT NOT NULL, remote_state TEXT,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(project_id,client_id,job_id),
+    UNIQUE(project_id,client_id,idempotency_key), UNIQUE(project_id,remote_job_id))"""); db.commit()`;
+  const oldDb = spawnSync("/usr/bin/python3", ["-c", legacySchema, db], { encoding: "utf8" });
+  assert.equal(oldDb.status, 0, oldDb.stderr);
   const ledger = (request) => {
     const proc = spawnSync("/usr/bin/python3", ["-m", "snooze.workspace_execution", "--db", db], { cwd: supervisor, input: JSON.stringify(request), encoding: "utf8" });
     return { status: proc.status, value: JSON.parse(proc.stdout) };
@@ -53,10 +61,12 @@ test("SQLite reconciliation lease is scoped, durable, and only settles terminal 
   assert.equal(reserve("job-terminal").status, 0);
   const service = new WorkspaceExecutionService(store);
   const syncCalls = [];
-  const reconciler = new WorkspaceReconciler(service.reconciliationCallbacks(async (row) => {
+  const callbacks = service.reconciliationCallbacks(async (row) => {
     syncCalls.push(row);
     return { dispatch: { state: "completed" }, projectionPending: false, resultsUnavailable: false };
-  }));
+  });
+  assert.deepEqual(Object.keys(callbacks).sort(), ["claim", "settle", "sync"], "reconciliation has no submit callback");
+  const reconciler = new WorkspaceReconciler(callbacks);
   const run = await reconciler.runOnce();
   assert.deepEqual(run, { claimed: 1, settled: 1, errors: 0, skipped: false });
   assert.deepEqual(syncCalls, [binding("job-terminal")]);
@@ -92,6 +102,4 @@ test("SQLite reconciliation lease is scoped, durable, and only settles terminal 
   assert.deepEqual(processed, ["one"], "stop halts remaining rows");
   assert.equal((await local.runOnce()).skipped, true);
 
-  let submits = 0;
-  assert.equal(submits, 0, "reconciliation callbacks contain no submission operation");
 });

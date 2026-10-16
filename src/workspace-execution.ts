@@ -24,7 +24,7 @@ export function isWorkspaceExecutionToolName(name: unknown): name is WorkspaceEx
 export function workspaceExecutionRequiredScope(_name: WorkspaceExecutionToolName): "jobs:write" { return "jobs:write"; }
 
 export class WorkspaceExecutionError extends Error {
-  constructor(readonly code: "invalid_input" | "execution_not_found" | "idempotency_conflict" | "supervisor_unavailable" | "ledger_unavailable" | "bridge_timeout" | "bridge_output_invalid") { super(code); }
+  constructor(readonly code: "invalid_input" | "invalid_limit" | "execution_not_found" | "idempotency_conflict" | "supervisor_unavailable" | "ledger_unavailable" | "bridge_timeout" | "bridge_output_invalid") { super(code); }
 }
 
 export type WorkspaceExecutionSummary = { projectId: string; jobId: string; state: string; provider: "lightsprint"; taskCount: number; createdAt: number; updatedAt: number };
