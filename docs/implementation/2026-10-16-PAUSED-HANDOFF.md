@@ -1,7 +1,7 @@
 # Historical pause — account switch — 2026-10-16
 
 **Superseded:** the user explicitly resumed work. See
-`2026-10-16-agent-workspace-release.md` for the subsequent deployed milestone and
+`2026-10-16-connected-workspace-release.md` for the subsequent connected milestone and
 current integration limits. The paused state below is retained as historical
 recovery evidence and is not a current instruction to stop services.
 
