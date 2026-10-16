@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .oracle_pool import APPROVED_MODELS, HOSTS
+from .oracle_pool import HOSTS, HOST_ID_RE, MODEL_NAME_RE, PoolError, validate_config
 
 
 HOST_IDS = tuple(host["id"] for host in HOSTS)
@@ -111,24 +111,44 @@ def load_snapshot(config_path: str | Path, db_path: str | Path, *, limit: int = 
         return _empty_snapshot(limit, offset, after_event)
     now = float(now if now is not None else __import__("time").time())
     try:
+        _, configured_hosts = validate_config(json.loads(config.read_text(encoding="utf-8")))
+        configured = {host["id"]: host for host in configured_hosts}
         with _readonly_db(database) as db:
             db.execute("BEGIN")
             host_rows = {row["id"]: row for row in db.execute(
-                "SELECT id,models,updated,error_code FROM pool_hosts WHERE id IN (?,?,?)", HOST_IDS)}
+                "SELECT id,models,updated,error_code FROM pool_hosts")
+                if isinstance(row["id"], str) and HOST_ID_RE.fullmatch(row["id"])}
+            history_ids = set(host_rows)
+            for row in db.execute("SELECT DISTINCT assigned_host FROM pool_tasks WHERE assigned_host IS NOT NULL"):
+                if isinstance(row[0], str) and HOST_ID_RE.fullmatch(row[0]):
+                    history_ids.add(row[0])
+            for row in db.execute("SELECT data FROM pool_events"):
+                try:
+                    event_data = json.loads(row[0])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                event_host = event_data.get("host") if isinstance(event_data, dict) else None
+                if isinstance(event_host, str) and HOST_ID_RE.fullmatch(event_host):
+                    history_ids.add(event_host)
+            host_ids = tuple([host["id"] for host in configured_hosts] +
+                             sorted(history_ids - set(configured)))
             hosts = []
-            assignment_counts = {host_id: 0 for host_id in HOST_IDS}
-            completed_by_host = {host_id: 0 for host_id in HOST_IDS}
-            running_by_host = {host_id: 0 for host_id in HOST_IDS}
-            for host_id in HOST_IDS:
+            assignment_counts = {host_id: 0 for host_id in host_ids}
+            completed_by_host = {host_id: 0 for host_id in host_ids}
+            running_by_host = {host_id: 0 for host_id in host_ids}
+            for host_id in host_ids:
                 row = host_rows.get(host_id)
+                host_config = configured.get(host_id)
                 models: list[str] = []
                 catalog_error = None
                 if row:
                     try:
                         decoded = json.loads(row["models"])
                         if isinstance(decoded, list):
+                            allowed = set(host_config["allowedModels"]) if host_config else None
                             models = list(dict.fromkeys(model for model in decoded
-                                                        if isinstance(model, str) and model in APPROVED_MODELS))
+                                                        if isinstance(model, str) and MODEL_NAME_RE.fullmatch(model)
+                                                        and (allowed is None or model in allowed)))
                         else:
                             catalog_error = "catalog_data_invalid"
                     except (TypeError, json.JSONDecodeError):
@@ -137,7 +157,8 @@ def load_snapshot(config_path: str | Path, db_path: str | Path, *, limit: int = 
                         catalog_error = catalog_error or _safe_error(row["error_code"]) or "catalog_error"
                 updated = _number(row["updated"]) if row else None
                 check_state = "check_failed" if catalog_error else "checked" if updated is not None else "never_checked"
-                hosts.append({"host": host_id, "models": models, "lastCatalogCheck": updated,
+                hosts.append({"host": host_id, "models": models, "enabled": host_config["enabled"] if host_config else False,
+                              "configured": host_config is not None, "lastCatalogCheck": updated,
                               "catalogCheckState": check_state, **({"catalogError": catalog_error} if catalog_error else {}),
                               "assignedTasks": 0, "completedTasks": 0, "runningTasks": 0})
             status_counts = {name: 0 for name in (*STATUSES, "unknown")}
@@ -161,7 +182,7 @@ def load_snapshot(config_path: str | Path, db_path: str | Path, *, limit: int = 
             denominator = sum(assignment_counts.values())
             distribution = [{"host": host_id, "count": assignment_counts[host_id],
                              "share": assignment_counts[host_id] / denominator if denominator else None}
-                            for host_id in HOST_IDS]
+                            for host_id in host_ids]
             token_values = {}
             for field, result_name in (("prompt_tokens", "promptTokens"), ("eval_tokens", "evalTokens")):
                 row = db.execute(f"SELECT COUNT({field}),SUM({field}) FROM pool_tasks WHERE {field} IS NOT NULL AND {field}>=0").fetchone()
@@ -176,9 +197,9 @@ def load_snapshot(config_path: str | Path, db_path: str | Path, *, limit: int = 
             tasks = []
             for row in task_rows:
                 status = row["status"] if row["status"] in STATUSES else "unknown"
-                model = row["model"] if row["model"] in APPROVED_MODELS else None
-                assigned = row["assigned_host"] if row["assigned_host"] in HOST_IDS else None
-                actual_model = row["actual_model"] if isinstance(row["actual_model"], str) and row["actual_model"] in APPROVED_MODELS else None
+                model = row["model"] if isinstance(row["model"], str) and MODEL_NAME_RE.fullmatch(row["model"]) else None
+                assigned = row["assigned_host"] if isinstance(row["assigned_host"], str) and HOST_ID_RE.fullmatch(row["assigned_host"]) else None
+                actual_model = row["actual_model"] if isinstance(row["actual_model"], str) and MODEL_NAME_RE.fullmatch(row["actual_model"]) else None
                 attempts = row["attempts"] if type(row["attempts"]) is int and row["attempts"] >= 0 else None
                 tokens = {field: row[field] if type(row[field]) is int and row[field] >= 0 else None
                           for field in ("prompt_tokens", "eval_tokens")}
@@ -200,14 +221,15 @@ def load_snapshot(config_path: str | Path, db_path: str | Path, *, limit: int = 
                     data = {}
                 if not isinstance(data, dict):
                     data = {}
-                host = data.get("host") if data.get("host") in HOST_IDS else None
-                model = data.get("model") if data.get("model") in APPROVED_MODELS else None
-                actual = data.get("actual_model") if data.get("actual_model") in APPROVED_MODELS else None
+                host = data.get("host") if isinstance(data.get("host"), str) and HOST_ID_RE.fullmatch(data["host"]) else None
+                model = data.get("model") if isinstance(data.get("model"), str) and MODEL_NAME_RE.fullmatch(data["model"]) else None
+                actual = data.get("actual_model") if isinstance(data.get("actual_model"), str) and MODEL_NAME_RE.fullmatch(data["actual_model"]) else None
                 events.append({"eventId": row["id"], "kind": row["kind"] if row["kind"] in STATUSES else "event",
                                "at": _number(row["at"]), "status": data.get("status") if data.get("status") in STATUSES else None,
                                "host": host, "model": model, "actualModel": actual,
                                "errorCode": _safe_error(data.get("error_code"))})
-            available_models = {model for host in hosts for model in host["models"]}
+            available_models = {model for host in configured_hosts if host["enabled"]
+                                for model in host["allowedModels"]}
             return {
                 "available": True,
                 "hosts": hosts,
@@ -222,7 +244,7 @@ def load_snapshot(config_path: str | Path, db_path: str | Path, *, limit: int = 
                            "hasMore": event_has_more},
                 "advisoryModel": {"model": "tev1:0.8b", "availability": "available" if "tev1:0.8b" in available_models else "unknown"},
             }
-    except (OSError, sqlite3.Error, KeyError, TypeError):
+    except (OSError, sqlite3.Error, KeyError, TypeError, PoolError, json.JSONDecodeError):
         return _empty_snapshot(limit, offset, after_event)
 
 
