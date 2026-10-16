@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from .agent_workspace import AgentWorkspace, WorkspaceError
+from .agent_workspace import AgentWorkspace, WorkspaceError, _clean_text
 
 ACTOR = "client:claude-worker-local"
 MAX_STDOUT = 256 * 1024
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS claude_workspace_attempts (
 """
 
 _SAFE_ID = re.compile(r'^[A-Za-z0-9_\-\.]{1,128}$')
-_SAFE_MODEL = re.compile(r'^[A-Za-z0-9_\-\.:/]{1,128}$')
+_SAFE_MODEL = "claude-sonnet-4-6"
 
 
 def safe_id(v):
@@ -67,6 +67,18 @@ def insert_intent(db_path, project_id, task_id, model_requested, prompt_digest):
     return True
 
 
+def attempt_status(db_path, project_id, task_id):
+    conn = open_attempt_db(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status FROM claude_workspace_attempts WHERE project_id=? AND task_id=?",
+            (project_id, task_id),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def update_attempt(db_path, project_id, task_id, status, model_reported=None,
                    total_cost_usd=None, result=None):
     conn = open_attempt_db(db_path)
@@ -80,13 +92,22 @@ def update_attempt(db_path, project_id, task_id, status, model_reported=None,
 
 
 def default_runner(argv, stdin_text, timeout_seconds):
+    env = {name: os.environ[name] for name in (
+        "HOME", "PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "USER", "LOGNAME", "SystemRoot"
+    ) if name in os.environ}
+    env.update({
+        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+        "MAX_THINKING_TOKENS": "1024",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "2048",
+        "CLAUDE_CODE_EFFORT_LEVEL": "low",
+    })
     proc = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         shell=False,
-        env={**os.environ, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING":"1", "MAX_THINKING_TOKENS":"1024", "CLAUDE_CODE_MAX_OUTPUT_TOKENS":"2048", "CLAUDE_CODE_EFFORT_LEVEL":"low"}
+        env=env
     )
     stdout_chunks = []
     overflow = threading.Event()
@@ -119,8 +140,10 @@ def default_runner(argv, stdin_text, timeout_seconds):
         proc.kill()
         proc.wait()
         done.wait(timeout=5)
+        proc.stdout.close()
         return None, "timeout"
     done.wait(timeout=10)
+    proc.stdout.close()
     if overflow.is_set():
         return None, "overflow"
     if proc.returncode != 0:
@@ -138,20 +161,22 @@ def parse_cli_result(raw):
         return None, "not_dict"
     if data.get("is_error") is True:
         return None, "cli_error"
-    result = data.get("result", "")
-    if not result:
+    result = data.get("result")
+    if not isinstance(result, str) or not result:
         return None, "empty_result"
-    result_text = str(result)[:900]
+    result_text = result[:900]
     model_reported = None
     usage = data.get("modelUsage")
-    if isinstance(usage, dict):
-        keys = list(usage.keys())
-        if keys:
-            model_reported = str(keys[0])[:128]
-    cost = data.get("total_cost_usd") or data.get("cost_usd")
+    if isinstance(usage, dict) and _SAFE_MODEL in usage:
+        model_reported = _SAFE_MODEL
+    cost = data.get("total_cost_usd") if "total_cost_usd" in data else data.get("cost_usd")
     total_cost = None
-    if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
-        total_cost = float(cost)
+    if type(cost) in (int, float) and cost >= 0:
+        try:
+            value = float(cost)
+            if math.isfinite(value): total_cost = value
+        except (OverflowError, ValueError):
+            pass
     return {"result_text": result_text, "model_reported": model_reported,
             "total_cost": total_cost}, None
 
@@ -176,6 +201,9 @@ def run_task(args, runner=None):
     model = args.model
     budget = args.max_budget_usd
     timeout = args.timeout_seconds
+
+    if attempt_status(db_path, project, task_id) is not None:
+        return {"status": "skipped", "message": "attempt already recorded; idempotent no-op"}
 
     ws = AgentWorkspace(db_path)
 
@@ -279,11 +307,12 @@ def run_task(args, runner=None):
         return {"status": "ambiguous", "message": parse_err}
 
     result_text = parsed["result_text"]
-    model_reported = parsed.get("model_reported") or model
+    model_reported = parsed.get("model_reported")
     total_cost = parsed.get("total_cost")
+    result_text = _clean_text(parsed["result_text"], 900)
 
     artifact_id = f"artifact-{task_id}-result"
-    title = f"Result [{model_reported[:64]}]"[:256]
+    title = f"Result [reported {model_reported[:64]}]" if model_reported else "Result [actual model unreported]"
 
     try:
         snap6 = ws.snapshot(project, ACTOR)
@@ -297,15 +326,6 @@ def run_task(args, runner=None):
             "kind": "text",
             "reference": result_text[:1000],
             "title": title
-        })
-        snap7 = ws.snapshot(project, ACTOR)
-        revision = snap7["revision"]
-        ws.update(project, ACTOR, {
-            "action": "task_update",
-            "idempotencyKey": f"review-{task_id}",
-            "expectedRevision": revision,
-            "taskId": task_id,
-            "state": "review"
         })
     except WorkspaceError as e:
         update_attempt(db_path, project, task_id, "artifact_failed",
@@ -377,8 +397,8 @@ def validate_args(args):
     elif cb.name != "claude":
         errors.append("--claude-binary basename must be 'claude'")
 
-    if not _SAFE_MODEL.match(args.model):
-        errors.append("--model must be safe identifier")
+    if args.model != "claude-sonnet-4-6":
+        errors.append("--model must be claude-sonnet-4-6 for the bounded worker policy")
 
     if not (0.01 <= args.max_budget_usd <= 1.0):
         errors.append("--max-budget-usd must be between 0.01 and 1.0")
