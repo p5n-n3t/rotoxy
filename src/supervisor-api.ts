@@ -26,6 +26,8 @@ export interface SupervisorControlInput {
 /** Semantic injection seam. A concrete adapter delegates to the durable supervisor bridge. */
 export interface SupervisorBackend {
   callTool(name: JobToolName, args: unknown, caller: SupervisorCaller): Promise<unknown>;
+  /** Verify project membership for shared agent collaboration; no caller-supplied actor identity. */
+  authorizeWorkspace?(projectId: string, clientId: string): void | Promise<void>;
   /** Project-scoped authoritative admin snapshot. */
   listProjects?(): string[];
   readAdmin?(projectId: string): Promise<unknown>;

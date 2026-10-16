@@ -31,7 +31,7 @@ export interface AgentWorkspaceSnapshot {
   events: unknown[];
   nextCursor: number;
 }
-export interface AgentWorkspaceRenderOptions { projectId: string; base: string; csrf: string }
+export interface AgentWorkspaceRenderOptions { projectId: string; base: string; csrf: string; csrfToken: string; projects: string[] }
 export type AgentWorkspaceRenderer = (snapshot: AgentWorkspaceSnapshot, options: AgentWorkspaceRenderOptions) => string;
 
 export interface AgentWorkspaceCommandOptions {
@@ -48,7 +48,7 @@ export type AgentWorkspaceCommandRunner = (
 export interface AgentWorkspaceServiceOptions { runner?: AgentWorkspaceCommandRunner }
 
 export class AgentWorkspaceError extends Error {
-  constructor(readonly code: "invalid_project" | "project_unavailable" | "invalid_actor" | "invalid_input" | "bridge_unavailable" | "bridge_timeout" | "bridge_output_invalid") {
+  constructor(readonly code: "revision_conflict" | "idempotency_conflict" | "assignee_required" | "independent_reviewer_required" | "task_not_claimable" | "dependencies_incomplete" | "invalid_project" | "project_unavailable" | "invalid_actor" | "invalid_input" | "bridge_unavailable" | "bridge_timeout" | "bridge_output_invalid") {
     super(code); this.name = "AgentWorkspaceError";
   }
 }
@@ -106,8 +106,12 @@ async function runPython(executable: string, args: string[], stdin: string, opti
     });
     child.on("error", () => finish(new AgentWorkspaceError("bridge_unavailable")));
     child.on("close", (code) => {
-      if (code !== 0) return finish(new AgentWorkspaceError("bridge_unavailable"));
-      finish(undefined, Buffer.concat(chunks, size).toString("utf8"));
+      const output = Buffer.concat(chunks, size).toString("utf8");
+      if (code !== 0) {
+        try { const failure = JSON.parse(output); if (typeof failure.error === "string" && /^[a-z_]{1,60}$/.test(failure.error)) return finish(new AgentWorkspaceError(["revision_conflict", "idempotency_conflict", "assignee_required", "independent_reviewer_required", "task_not_claimable", "dependencies_incomplete"].includes(failure.error) ? failure.error : "invalid_input")); } catch {}
+        return finish(new AgentWorkspaceError("bridge_unavailable"));
+      }
+      finish(undefined, output);
     });
     child.stdin.on("error", () => finish(new AgentWorkspaceError("bridge_unavailable")));
     child.stdin.end(stdin);
@@ -255,7 +259,7 @@ export function createAgentWorkspaceRouter(
       const requestOrigin = req.get("host") ? `${req.protocol}://${req.get("host")}` : "";
       allowedOrigins = [configuredOrigin, requestOrigin].filter(Boolean);
     } catch { /* fail closed */ }
-    if (!token || !sessions.verifyCsrf(token, req.get("x-csrf-token")) || !req.get("origin") || !allowedOrigins.includes(req.get("origin")!)) {
+    if (!token || !sessions.verifyCsrf(token, req.get("x-csrf-token") ?? (typeof req.body?._csrf === "string" ? req.body._csrf : undefined)) || !req.get("origin") || !allowedOrigins.includes(req.get("origin")!)) {
       return res.status(403).json({ error: "csrf_or_origin_invalid" });
     }
     next();
@@ -263,7 +267,7 @@ export function createAgentWorkspaceRouter(
   const json = express.json({ limit: "32kb", strict: true });
   const errorResponse = (res: Response, error: unknown) => {
     const code = error instanceof AgentWorkspaceError ? error.code : "agent_workspace_unavailable";
-    const status = code === "invalid_input" || code === "invalid_actor" || code === "invalid_project" ? 400 : code === "project_unavailable" ? 404 : 503;
+    const status = ["revision_conflict", "idempotency_conflict", "task_not_claimable", "dependencies_incomplete"].includes(code) ? 409 : ["assignee_required", "independent_reviewer_required"].includes(code) ? 403 : code === "invalid_input" || code === "invalid_actor" || code === "invalid_project" ? 400 : code === "project_unavailable" ? 404 : 503;
     return res.status(status).json({ error: code });
   };
 
@@ -275,15 +279,15 @@ export function createAgentWorkspaceRouter(
       if (!sessions.valid(token, adminEpoch(state))) return res.redirect(302, `${base}/admin/login?next=${encodeURIComponent(req.originalUrl)}`);
       const csrf = sessions.csrfToken(token) ?? "";
       const projects = await service.projects();
-      const selected = typeof req.query.project === "string" ? req.query.project : "";
+      const selected = typeof req.query.project === "string" ? req.query.project : projects[0] ?? "";
       if (!selected) {
         const body = `<main class="wrap"><h1>Agent Workspace</h1><p>Choose a configured supervisor project to view durable participants, tasks, messages, artifacts, reviews, and events.</p><ul>${projects.map((id) => `<li><a href="${esc(base)}/admin/agents?project=${encodeURIComponent(id)}">${esc(id)}</a></li>`).join("") || "<li>No configured projects.</li>"}</ul></main>`;
         return res.type("html").send(page("Agent Workspace", body));
       }
       if (!PROJECT_ID.test(selected) || !projects.includes(selected)) return res.status(404).type("html").send(page("Agent Workspace", "<main><h1>Project unavailable</h1></main>"));
       const snapshot = await service.snapshot(selected, "admin:local", 0);
-      const content = renderer?.(snapshot, { projectId: selected, base, csrf }) ?? `<main class="wrap"><h1>Agent Workspace · ${esc(selected)}</h1><p>Durable workspace data is available. Detailed rendering is not connected yet.</p><pre>${esc(JSON.stringify(snapshot, null, 2))}</pre><p><a href="${esc(base)}/admin/agents">All projects</a></p></main>`;
-      return res.type("html").send(page("Agent Workspace", content));
+      const content = renderer?.(snapshot, { projectId: selected, base, csrf, csrfToken: csrf, projects }) ?? `<main class="wrap"><h1>Agent Workspace · ${esc(selected)}</h1><p>Durable workspace data is available. Detailed rendering is not connected yet.</p><pre>${esc(JSON.stringify(snapshot, null, 2))}</pre><p><a href="${esc(base)}/admin/agents">All projects</a></p></main>`;
+      return res.type("html").send(renderer ? content : page("Agent Workspace", content));
     } catch (error) { return errorResponse(res, error); }
   });
 
@@ -297,12 +301,28 @@ export function createAgentWorkspaceRouter(
     } catch (error) { return errorResponse(res, error); }
   });
 
-  router.post("/admin/api/v1/agent-workspace/:projectId/update", authenticate, csrfAndOrigin, json, async (req, res) => {
+  router.post("/admin/api/v1/agent-workspace/:projectId/update", authenticate, json, express.urlencoded({ extended: false, limit: "32kb" }), csrfAndOrigin, async (req, res) => {
     try {
       const projectId = req.params.projectId;
       if (typeof projectId !== "string") throw new AgentWorkspaceError("invalid_project");
-      if (!isRecord(req.body) || Object.keys(req.body).some((key) => key !== "input") || !isRecord(req.body.input)) throw new AgentWorkspaceError("invalid_input");
-      return res.json(await service.update(projectId, "admin:local", req.body.input));
+      const form = req.is("application/x-www-form-urlencoded");
+      let input: Record<string, unknown>;
+      if (form) {
+        if (!isRecord(req.body)) throw new AgentWorkspaceError("invalid_input");
+        const { _csrf, ...fields } = req.body;
+        input = { ...fields, expectedRevision: /^\d+$/.test(String(fields.expectedRevision)) ? Number(fields.expectedRevision) : NaN };
+        if (fields.action === "task_create") {
+          input.dependsOn = typeof fields.dependsOn === "string" ? fields.dependsOn.split(",").map(x => x.trim()).filter(Boolean) : [];
+          for (const key of ["jobId", "externalTaskId"]) if (input[key] === "") delete input[key];
+        }
+        for (const key of ["model", "accountId", "taskId", "note"]) if (input[key] === "") delete input[key];
+      } else {
+        if (!isRecord(req.body) || Object.keys(req.body).some((key) => key !== "input") || !isRecord(req.body.input)) throw new AgentWorkspaceError("invalid_input");
+        input = req.body.input;
+      }
+      const result = await service.update(projectId, "admin:local", input);
+      if (form) return res.redirect(303, res.locals.awBase + "/admin/agents?project=" + encodeURIComponent(projectId));
+      return res.json(result);
     } catch (error) { return errorResponse(res, error); }
   });
 

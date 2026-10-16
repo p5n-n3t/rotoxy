@@ -5,10 +5,10 @@ import { page } from "../dist/ui.js";
 
 const render = (active = "supervisor", base = "/token2oauth") => page("Console", `<main class="wrap">${adminNav(base, active)}<section><h1>Existing page</h1></section></main>`);
 
-test("shared renderer exposes the four audited workspace groups and current route", () => {
+test("shared renderer exposes the three operational workspace groups and current route", () => {
   const html = render();
-  assert.deepEqual(NAV_GROUPS.map((group) => group.label), ["Command", "Resources", "Insights", "Settings"]);
-  for (const label of ["Overview", "Supervisor", "Workspace accounts", "Models &amp; APIs", "Private workers", "Search", "Activity", "Clients", "Auth", "Diagnostics"]) assert.ok(html.includes(label));
+  assert.deepEqual(NAV_GROUPS.map((group) => group.label), ["Command", "Resources", "Settings"]);
+  for (const label of ["Overview", "Supervisor", "Agent providers", "Models &amp; APIs", "Private workers", "Search", "Clients", "Auth", "Diagnostics"]) assert.ok(html.includes(label));
   for (const path of ["/token2oauth/admin", "/token2oauth/admin/supervisor", "/token2oauth/admin#accounts", "/token2oauth/admin/models", "/token2oauth/admin/oracle", "/token2oauth/admin/resources", "/token2oauth/admin/security", "/token2oauth/admin/diagnostics"]) assert.ok(html.includes(`href="${path}"`), path);
   assert.equal((html.match(/aria-current="page"/g) || []).length, 2);
   assert.match(html, /aria-current="page">Supervisor/);

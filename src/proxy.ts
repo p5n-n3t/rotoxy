@@ -1,3 +1,5 @@
+import { AgentWorkspaceError, AW_TOOL_DEFINITIONS, isAgentWorkspaceToolName, awRequiredScope, type AgentWorkspaceService } from "./agent-workspace.js";
+import type { SupervisorBackend } from "./supervisor-api.js";
 import { OracleTools, OracleToolError, ORACLE_TOOL_DEFINITIONS, isOracleToolName, oracleToolRequiredScope } from "./oracle-tools.js";
 import { Readable, Transform, pipeline } from "node:stream";
 import type { Request, Response } from "express";
@@ -166,6 +168,7 @@ export class McpProxy {
     private readonly supervisor = new SupervisorApi(),
     private readonly oracle?: OracleTools,
     private readonly webTools?: ConfiguredWebTools,
+    private readonly workspace?: { service: AgentWorkspaceService; backend?: SupervisorBackend },
   ) {}
 
   handler = async (req: Request, res: Response) => {
@@ -555,10 +558,26 @@ export class McpProxy {
     res.send(rewritten);
   }
 
+  private async callWorkspace(name: string, raw: unknown, clientId: string): Promise<unknown> {
+    if (!this.workspace?.backend?.authorizeWorkspace) throw new SupervisorUnavailable();
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new JobInputError("invalid workspace arguments");
+    const args = raw as Record<string, unknown>;
+    const allowed = name === "workspace_snapshot" ? ["projectId", "after"] : ["projectId", "input"];
+    if (Object.keys(args).some(key => !allowed.includes(key)) || typeof args.projectId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(args.projectId)) throw new JobInputError("invalid workspace arguments");
+    await this.workspace.backend.authorizeWorkspace(args.projectId, clientId);
+    const actor = "client:" + clientId;
+    if (name === "workspace_snapshot") {
+      if (args.after !== undefined && (!Number.isSafeInteger(args.after) || Number(args.after) < 0)) throw new JobInputError("invalid event cursor");
+      return this.workspace.service.snapshot(args.projectId, actor, Number(args.after ?? 0));
+    }
+    if (!args.input || typeof args.input !== "object" || Array.isArray(args.input)) throw new JobInputError("workspace input is required");
+    return this.workspace.service.update(args.projectId, actor, args.input as Record<string, unknown>);
+  }
+
   private async availableJobTools(claims: AccessClaims | undefined): Promise<Record<string, unknown>[]> {
-    if ((!this.supervisor.enabled && !this.oracle && !this.webTools) || !claims) return [];
+    if ((!this.supervisor.enabled && !this.oracle && !this.webTools && !this.workspace?.backend?.authorizeWorkspace) || !claims) return [];
     const scopes = new Set(claims.scope.split(/\s+/));
-    return [...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : []), ...(this.webTools ? await this.webTools.definitionsFor(claims.client_id, scopes) : [])].map((definition) => ({ ...definition }));
+    return [...(this.workspace?.backend?.authorizeWorkspace ? AW_TOOL_DEFINITIONS.filter((d) => scopes.has(awRequiredScope(d.name))) : []), ...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : []), ...(this.webTools ? await this.webTools.definitionsFor(claims.client_id, scopes) : [])].map((definition) => ({ ...definition }));
   }
 
   /** Serve only OAuth-authorized local job tools when no general upstream exists. */
@@ -606,7 +625,7 @@ export class McpProxy {
     record: (input: { status?: number; attempts: number; errorClass?: string; message?: string }) => void,
   ): Promise<boolean> {
     if (req.method !== "POST" || !rpc) return false;
-    const local = rpc.messages.filter((message) => message.method === "tools/call" && (isJobToolName(message.params?.name) || isOracleToolName(message.params?.name) || message.params?.name === "web_search" || message.params?.name === "web_extract"));
+    const local = rpc.messages.filter((message) => message.method === "tools/call" && (isAgentWorkspaceToolName(message.params?.name) || isJobToolName(message.params?.name) || isOracleToolName(message.params?.name) || message.params?.name === "web_search" || message.params?.name === "web_extract"));
     if (!local.length) return false;
     const mixed = rpc.messages.some((message) => !local.includes(message));
     if (mixed) {
@@ -615,7 +634,7 @@ export class McpProxy {
       return true;
     }
     const scopeSet = new Set(claims?.scope.split(/\s+/) || []);
-    const scopeFor = (name: string) => name === "web_search" ? "web:search" : name === "web_extract" ? "web:extract" : isOracleToolName(name) ? oracleToolRequiredScope(name) : requiredJobScope(name as JobToolName);
+    const scopeFor = (name: string) => isAgentWorkspaceToolName(name) ? awRequiredScope(name) : name === "web_search" ? "web:search" : name === "web_extract" ? "web:extract" : isOracleToolName(name) ? oracleToolRequiredScope(name) : requiredJobScope(name as JobToolName);
     const missing = local.find((message) => !scopeSet.has(scopeFor(String(message.params!.name))));
     if (missing || !claims) {
       const responses = local.filter((message) => message.id !== undefined).map((message) => rpcError(message.id, -32003, "insufficient_scope", { requiredScope: scopeFor(String(message.params!.name)) }));
@@ -624,7 +643,7 @@ export class McpProxy {
       res.status(403).json(rpc.batch ? responses : responses[0]);
       return true;
     }
-    const unavailable = local.filter((message) => isOracleToolName(message.params?.name) ? !this.oracle : isJobToolName(message.params?.name) ? !this.supervisor.enabled : !this.webTools);
+    const unavailable = local.filter((message) => isAgentWorkspaceToolName(message.params?.name) ? !this.workspace?.backend?.authorizeWorkspace : isOracleToolName(message.params?.name) ? !this.oracle : isJobToolName(message.params?.name) ? !this.supervisor.enabled : !this.webTools);
     if (unavailable.length) {
       const responses = unavailable.filter((message) => message.id !== undefined).map((message) => rpcError(message.id, -32000, message.params?.name === "web_search" || message.params?.name === "web_extract" ? "web tools are not configured" : "durable supervisor is not configured"));
       record({ status: 503, attempts: 0, errorClass: "supervisor-unavailable" });
@@ -637,7 +656,9 @@ export class McpProxy {
     for (const message of local) {
       try {
         const name = String(message.params!.name);
-        const value = isOracleToolName(name)
+        const value = isAgentWorkspaceToolName(name)
+          ? await this.callWorkspace(name, message.params?.arguments ?? {}, claims.client_id)
+          : isOracleToolName(name)
           ? await this.oracle!.call(name, message.params?.arguments ?? {}, claims.client_id)
           : name === "web_search" || name === "web_extract"
             ? await this.webTools!.call(name, message.params?.arguments ?? {}, claims.client_id)
@@ -646,7 +667,10 @@ export class McpProxy {
         if (Buffer.byteLength(text) > 1_048_576) throw new Error("result too large");
         if (message.id !== undefined) responses.push({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }] } });
       } catch (error) {
-        if (error instanceof OracleToolError) {
+        if (error instanceof AgentWorkspaceError) {
+          status = ["revision_conflict", "idempotency_conflict", "task_not_claimable", "dependencies_incomplete"].includes(error.code) ? 409 : ["assignee_required", "independent_reviewer_required"].includes(error.code) ? 403 : 400;
+          if (message.id !== undefined) responses.push(rpcError(message.id, -32000, error.code));
+        } else if (error instanceof OracleToolError) {
           if (message.id !== undefined) responses.push(rpcError(message.id, -32000, error.code));
         } else if (error instanceof WebToolError) {
           status = error.code === "tool_not_allowed" ? 403 : 502;

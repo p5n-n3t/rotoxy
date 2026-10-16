@@ -469,6 +469,10 @@ export class SupervisorRuntime implements SupervisorBackend {
     throw new JobInputError("global supervisor controls are unavailable through project-scoped MCP");
   }
 
+  authorizeWorkspace(projectId: string, clientId: string): void {
+    configuredProject(this.config, { projectId, clientId });
+  }
+
   async readAdmin(projectId: string): Promise<unknown> {
     const project = this.config.projects.find((item) => item.projectId === projectId);
     if (!project) throw new Error("project unavailable");

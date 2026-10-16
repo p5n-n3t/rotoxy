@@ -14,7 +14,7 @@ const { page } = await import("../dist/ui.js");
 
 test("grouped navigation keeps every legacy admin URL and marks the active page", () => {
   const html = adminNav("https://gw.example/token2oauth", "supervisor");
-  assert.deepEqual(NAV_GROUPS.map((g) => g.label), ["Command", "Resources", "Insights", "Settings"]);
+  assert.deepEqual(NAV_GROUPS.map((g) => g.label), ["Command", "Resources", "Settings"]);
   for (const path of ["/admin", "/admin/supervisor", "/admin/tools", "/admin/diagnostics", "/admin/security", "/admin/logout"]) {
     assert.ok(html.includes(`https://gw.example/token2oauth${path}"`), path);
   }

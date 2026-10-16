@@ -1,3 +1,5 @@
+import { AgentWorkspaceService, createAgentWorkspaceRouter } from "./agent-workspace.js";
+import { renderAgentWorkspace } from "./agent-workspace-ui.js";
 import { createJobsAdminRouter } from "./jobs-admin.js";
 import { createInferenceProviderAdminRouter } from "./inference-provider-admin.js";
 import { createResourceRoutingAdminRouter } from "./resource-routing-admin.js";
@@ -49,8 +51,10 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const modelGateway = createModelGateway(store);
   const supervisor = new SupervisorApi(options.supervisorBackend);
   const webTools = options.webTools ?? liveWebToolsConfig(options.webToolsConfigPath ?? join(store.dir, "web-tools.json"), store);
-  const codexProfiles = process.env.TOKEN2OAUTH_CODEX_BINARY ? new CodexProfiles({ codexBinary: process.env.TOKEN2OAUTH_CODEX_BINARY, configDir: store.dir }) : undefined;
-  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools);
+  const codexBinary = process.env.ROTOXY_CODEX_BINARY ?? process.env.TOKEN2OAUTH_CODEX_BINARY;
+  const codexProfiles = codexBinary ? new CodexProfiles({ codexBinary, configDir: store.dir }) : undefined;
+  const agentWorkspace = new AgentWorkspaceService(store, options.supervisorBackend);
+  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools, { service: agentWorkspace, backend: options.supervisorBackend });
   const ui = new (await import("./ui.js")).AdminUi(store, pool, sessions, { oauth, telemetry });
 
   const app = express();
@@ -65,6 +69,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(cloudflare.router);
   router.use(createInferenceProviderAdminRouter(store, sessions).router);
   router.use(createResourceRoutingAdminRouter(store, sessions).router);
+  router.use(createAgentWorkspaceRouter(store, sessions, agentWorkspace, renderAgentWorkspace));
   router.use(createCommandWorkspaceRouter(store, sessions, options.supervisorBackend));
   router.use(createJobsAdminRouter(store, sessions, options.supervisorBackend));
   router.use(createControlPlaneAdminRouter(store, sessions, modelGateway.credentials, fileURLToPath(new URL("../supervisor/", import.meta.url)), codexProfiles, modelGateway.snapshot));
@@ -90,7 +95,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   });
 
   app.use((error: any, _req: any, res: any, _next: any) => {
-    console.error("[token2oauth]", error);
+    console.error("[rotoxy] request failed");
     if (res.headersSent) return;
     res.status(500).json({ error: "internal_error", message: String(error?.message || error) });
   });
@@ -113,7 +118,7 @@ export async function startServer(options: ServerOptions = {}) {
 
   const server = app.listen(port, host, () => {
     console.log("");
-    console.log("  Token2OAuth");
+    console.log("  ROTOXY");
     console.log("  ───────────────────────────────────────────");
     console.log("  Local:  http://" + host + ":" + port);
     void store.load().then((state) => {

@@ -23,22 +23,22 @@ export interface NavGroup { label: string; items: readonly NavItem[] }
  * rendered as unavailable text; never send an operator to a fabricated page.
  */
 export const NAV_GROUPS: readonly NavGroup[] = [
-  { label: "Command", items: [{ key: "workspace", label: "Workspace", href: "/admin/workspace" }, { key: "pool", label: "Overview", href: "/admin" }, { key: "jobs", label: "Jobs", href: "/admin/jobs" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
+  { label: "Command", items: [{ key: "agents", label: "Agent workspace", href: "/admin/agents" }, { key: "pool", label: "Overview", href: "/admin" }, { key: "jobs", label: "Jobs", href: "/admin/jobs" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
   { label: "Resources", items: [
-    { key: "accounts", label: "Workspace accounts", href: "/admin#accounts" },
+    { key: "accounts", label: "Agent providers", href: "/admin#accounts" },
     { key: "models", label: "Models & APIs", href: "/admin/models" },
+    { key: "codex", label: "ChatGPT accounts", href: "/admin/codex" },
     { key: "oracle", label: "Private workers", href: "/admin/oracle" },
     { key: "resources", label: "Search", href: "/admin/resources" },
     { key: "credits", label: "Usage & credits", href: "/admin/credits" },
   ] },
-  { label: "Insights", items: [{ key: "activity", label: "Activity", href: "/admin" }, { key: "analytics", label: "Analytics", href: "" }] },
   { label: "Settings", items: [{ key: "clients", label: "Clients", href: "/admin/models" }, { key: "tools", label: "Tools", href: "/admin/tools" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "routing", label: "Routing", href: "/admin/routing" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
 ];
 
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {
   const b = esc(base);
-  const navActive = ["cloudflare", "inference", "codex"].includes(active) ? "models" : active;
-  const labels: Record<string, string> = { cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "Codex profiles" };
+  const navActive = ["cloudflare", "inference"].includes(active) ? "models" : active;
+  const labels: Record<string, string> = { cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map" };
   const current = labels[active] ?? groups.flatMap((group) => group.items).find((item) => item.key === navActive)?.label ?? active;
   const link = (item: NavItem) => item.href
     ? `<a class="nav-link" href="${b}${esc(item.href)}"${navActive === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`
