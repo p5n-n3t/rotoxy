@@ -84,6 +84,47 @@ test("ambiguous chat mutation is never replayed", async () => {
   assert.equal(resultBodies[0].outcome, "ambiguous");
 });
 
+test("operation adapter is selected only for a valid claimed chat operation and replaces the fallback", async () => {
+  let claimed = false; let specialized = 0; let fallback = 0; let sends = 0;
+  const bridge = { async request(_method, route, body) {
+    if (route === "/v1/operations/claim") { claimed = true; return op("trusted-claim", "account-a"); }
+    if (route.endsWith("/result")) return { state: body.outcome };
+    throw new Error("unexpected route");
+  } };
+  const worker = createJobWorker({ bridge,
+    adapterFactory: () => { fallback++; return adapter("account-a"); },
+    operationAdapterFactory: async (operation) => {
+      assert.equal(claimed, true);
+      assert.equal(operation.operationId, "trusted-claim");
+      specialized++;
+      return adapter("account-a", { sendMessage: async () => { sends++; return ok("account-a"); } });
+    },
+    isAccountEligible: () => true, workerId: "worker-test", allowedModels: ["gpt-6-luna"], maxConcurrent: 1,
+  });
+  worker.start(); await until(() => specialized > 0 && sends > 0); await worker.stop();
+  assert.equal(specialized, 1);
+  assert.equal(fallback, 0);
+  assert.equal(sends, 1);
+});
+
+test("claimed chat is rejected when the trusted operation factory declines its binding", async () => {
+  let fallback = 0; let posted;
+  const bridge = { async request(_method, route, body) {
+    if (route === "/v1/operations/claim") return op("unregistered-session", "account-a");
+    if (route.endsWith("/result")) { posted = body; return {}; }
+    throw new Error("unexpected route");
+  } };
+  const worker = createJobWorker({ bridge,
+    adapterFactory: () => { fallback++; return adapter("account-a"); },
+    operationAdapterFactory: async () => undefined,
+    isAccountEligible: () => true, workerId: "worker-test", allowedModels: ["gpt-6-luna"], maxConcurrent: 1,
+  });
+  worker.start(); await until(() => posted); await worker.stop();
+  assert.equal(posted.outcome, "rejected");
+  assert.equal(posted.errorClass, "operation_not_trusted");
+  assert.equal(fallback, 0);
+});
+
 test("a failed result acknowledgment retries only the stored receipt", async () => {
   let sends = 0; let resultAttempts = 0; const receipts = [];
   let claimAvailable = true;
