@@ -89,3 +89,42 @@ test("caps rendered collections and includes responsive, reduced-motion, and key
   assert.match(html, /Runner 99/);
   assert.doesNotMatch(html, /Runner 100/);
 });
+
+test("sparse review-only boards use a compact four-state bar and a two-column task grid", () => {
+  const reviewOnly = {
+    ...structuredClone(snapshot),
+    tasks: Array.from({ length: 4 }, (_, index) => ({
+      id: `review-${index + 1}`, title: `Review item ${index + 1}`, description: `Long detail ${index + 1}`,
+      state: "review", assignee: "client:worker-a", dependsOn: [],
+    })),
+  };
+  const html = renderAgentWorkspace(reviewOnly, options);
+  assert.match(html, /class="aw-state-bar" aria-label="Task state counts"/);
+  assert.match(html, /href="#aw-state-queued">Queued<span class="aw-count">0/);
+  assert.match(html, /id="aw-state-queued">Queued: no tasks reported/);
+  assert.match(html, /class="aw-sparse-task-grid"/);
+  assert.match(html, /grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.equal((html.match(/class="aw-task"/g) ?? []).length, 4);
+  assert.doesNotMatch(html, /class="aw-column"/);
+  assert.match(html, /<details class="aw-task-description"><summary>Description<\/summary>/);
+  assert.match(html, /<details class="aw-work-disclosure"><summary>Inbox/);
+  assert.match(html, /<details class="aw-work-disclosure"><summary>Activity/);
+  assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
+  assert.doesNotMatch(html, /<script\b/i);
+});
+
+test("review and artifact controls remain available but closed until selected", () => {
+  const reviewOnly = structuredClone(snapshot);
+  reviewOnly.tasks = [{ id: "task-r", title: "Review this", description: "Details", state: "review", assignee: "client:worker-a", dependsOn: [] }];
+  reviewOnly.artifacts = [{ id: "artifact-r", taskId: "task-r", kind: "text", reference: "artifact ref", title: "Reviewable artifact" }];
+  const html = renderAgentWorkspace(reviewOnly, options);
+  assert.match(html, /<details class="aw-work-disclosure"><summary>Artifacts &amp; reviews/);
+  assert.match(html, /<details class="aw-review-actions"><summary>Review artifact<\/summary>/);
+  for (const action of ["review_decide", "artifact_submit", "task_update", "task_create", "participant_upsert", "message_send"]) assert.match(html, new RegExp(`name="action" value="${action}"`));
+  assert.match(html, /name="expectedRevision" value="7"/);
+  assert.match(html, /name="idempotencyKey" value="[0-9a-f-]{36}"/);
+  assert.match(html, /name="_csrf" value="csrf&lt;&amp;"/);
+  assert.match(html, /\.aw-description\{[^}]*font-size:12px/);
+  assert.match(html, /\.aw-note\{[^}]*font-size:12px/);
+  assert.match(html, /\.aw-review-list li,.aw-events li\{[^}]*font-size:12px/);
+});
