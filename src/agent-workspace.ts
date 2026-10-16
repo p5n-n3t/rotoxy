@@ -186,16 +186,23 @@ export class AgentWorkspaceService {
   async dispatch(raw: unknown, clientId: string): Promise<unknown> {
     if (!this.backend?.authorizeWorkspace) throw new WorkspaceExecutionError("supervisor_unavailable");
     const submission = validateJobSubmission(raw);
+    await this.backend.authorizeWorkspace(submission.projectId, clientId);
     const result = await this.execution.dispatch(submission, { projectId: submission.projectId, clientId });
-    if (result.accepted) await this.projectSubmission(submission, `client:${clientId}`, [], []);
+    if (result.accepted) {
+      await this.backend.authorizeWorkspace(submission.projectId, clientId);
+      await this.projectSubmission(submission, `client:${clientId}`, [], []);
+    }
     return { dispatch: result.dispatch, accepted: result.accepted, replayed: result.replayed, ...(result.providerError ? { providerError: result.providerError } : {}) };
   }
 
   async sync(projectId: string, jobId: string, clientId: string): Promise<unknown> {
     if (!this.backend?.authorizeWorkspace) throw new WorkspaceExecutionError("supervisor_unavailable");
+    await this.backend.authorizeWorkspace(projectId, clientId);
     const result = await this.execution.sync(projectId, jobId, { projectId, clientId });
     const stored = await this.execution.getOwned(projectId, jobId, clientId);
-    await this.projectSubmission(stored.submission, `client:${clientId}`, result.results, result.status.tasks);
+    await this.backend.authorizeWorkspace(projectId, clientId);
+    if (stored.actor !== `client:${clientId}`) throw new WorkspaceExecutionError("execution_not_found");
+    await this.projectSubmission(stored.submission, stored.actor, result.results, result.status.tasks);
     return { dispatch: result.dispatch, status: result.status, results: result.results, resultsUnavailable: result.resultsUnavailable, resultsTruncated: result.resultsTruncated, ...(result.resultError ? { resultError: result.resultError } : {}) };
   }
 

@@ -43,6 +43,23 @@ def _connect(path):
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         PRIMARY KEY(project_id,job_id), UNIQUE(project_id,idempotency_key))""")
     db.execute("CREATE INDEX IF NOT EXISTS workspace_executions_project ON workspace_executions(project_id,updated_at DESC)")
+    db.execute("""CREATE TABLE IF NOT EXISTS workspace_execution_bindings(
+        project_id TEXT NOT NULL, job_id TEXT NOT NULL, remote_job_id TEXT NOT NULL,
+        client_id TEXT NOT NULL, actor TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+        remote_idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+        submission_json TEXT NOT NULL, remote_submission_json TEXT NOT NULL,
+        state TEXT NOT NULL, remote_state TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY(project_id,client_id,job_id), UNIQUE(project_id,client_id,idempotency_key),
+        UNIQUE(project_id,remote_job_id))""")
+    db.execute("CREATE INDEX IF NOT EXISTS workspace_execution_bindings_project ON workspace_execution_bindings(project_id,updated_at DESC)")
+    # Older checkpoint bindings remain read-only sync targets under their
+    # original remote IDs. Never replay their already-reserved submissions.
+    for row in db.execute("SELECT * FROM workspace_executions").fetchall():
+        db.execute("""INSERT OR IGNORE INTO workspace_execution_bindings(
+            project_id,job_id,remote_job_id,client_id,actor,idempotency_key,remote_idempotency_key,
+            request_hash,submission_json,remote_submission_json,state,remote_state,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (row["project_id"],row["job_id"],row["job_id"],row["client_id"],row["actor"],row["idempotency_key"],row["idempotency_key"],row["request_hash"],row["submission_json"],row["submission_json"],row["state"],row["remote_state"],row["created_at"],row["updated_at"]))
     return db
 
 
@@ -62,7 +79,7 @@ def handle(path, request):
         raise WorkspaceError("invalid_request")
     command = request["command"]
     allowed = {
-        "reserve": {"command", "projectId", "jobId", "clientId", "actor", "idempotencyKey", "requestHash", "submission"},
+        "reserve": {"command", "projectId", "jobId", "remoteJobId", "clientId", "actor", "idempotencyKey", "remoteIdempotencyKey", "requestHash", "submission", "remoteSubmission"},
         "set_state": {"command", "projectId", "jobId", "clientId", "state"},
         "get": {"command", "projectId", "jobId", "clientId"},
         "list": {"command", "projectId"},
@@ -74,30 +91,33 @@ def handle(path, request):
     try:
         if command == "reserve":
             job = _id(request["jobId"], "job_id")
+            remote_job = _id(request["remoteJobId"], "remote_job_id")
             client = _id(request["clientId"], "client_id")
             actor = "client:" + client
-            if request["actor"] != actor or not isinstance(request["submission"], dict):
+            if request["actor"] != actor or not isinstance(request["submission"], dict) or not isinstance(request["remoteSubmission"], dict):
                 raise WorkspaceError("invalid_owner")
             key = _id(request["idempotencyKey"], "idempotency_key")
+            remote_key = _id(request["remoteIdempotencyKey"], "remote_idempotency_key")
             digest = request["requestHash"]
             if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
                 raise WorkspaceError("invalid_request_hash")
             submission = json.dumps(request["submission"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            remote_submission = json.dumps(request["remoteSubmission"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
             now = int(time.time() * 1000)
             db.execute("BEGIN IMMEDIATE")
             try:
-                by_job = db.execute("SELECT * FROM workspace_executions WHERE project_id=? AND job_id=?", (project, job)).fetchone()
-                by_key = db.execute("SELECT * FROM workspace_executions WHERE project_id=? AND idempotency_key=?", (project, key)).fetchone()
+                by_job = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? AND client_id=? AND job_id=?", (project, client, job)).fetchone()
+                by_key = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? AND client_id=? AND idempotency_key=?", (project, client, key)).fetchone()
                 existing = by_job or by_key
                 if existing:
-                    if existing["client_id"] != client or existing["job_id"] != job or existing["idempotency_key"] != key or existing["request_hash"] != digest:
+                    if existing["job_id"] != job or existing["idempotency_key"] != key or existing["request_hash"] != digest or existing["remote_job_id"] != remote_job:
                         raise WorkspaceError("idempotency_conflict")
                     db.execute("COMMIT")
                     return {"created": False, "shouldSubmit": False, "dispatch": _summary(existing)}
-                db.execute("INSERT INTO workspace_executions(project_id,job_id,client_id,actor,idempotency_key,request_hash,submission_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)",
-                           (project, job, client, actor, key, digest, submission, now, now))
+                db.execute("INSERT INTO workspace_execution_bindings(project_id,job_id,remote_job_id,client_id,actor,idempotency_key,remote_idempotency_key,request_hash,submission_json,remote_submission_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)",
+                           (project, job, remote_job, client, actor, key, remote_key, digest, submission, remote_submission, now, now))
                 db.execute("COMMIT")
-                row = db.execute("SELECT * FROM workspace_executions WHERE project_id=? AND job_id=?", (project, job)).fetchone()
+                row = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? AND client_id=? AND job_id=?", (project, client, job)).fetchone()
                 return {"created": True, "shouldSubmit": True, "dispatch": _summary(row)}
             except Exception:
                 db.execute("ROLLBACK")
@@ -109,20 +129,20 @@ def handle(path, request):
             if state not in STATES:
                 raise WorkspaceError("invalid_state")
             now = int(time.time() * 1000)
-            db.execute("UPDATE workspace_executions SET state=?,remote_state=?,updated_at=? WHERE project_id=? AND job_id=? AND client_id=?",
+            db.execute("UPDATE workspace_execution_bindings SET state=?,remote_state=?,updated_at=? WHERE project_id=? AND job_id=? AND client_id=?",
                        ("accepted" if state == "accepted" else state, state, now, project, job, client))
-            row = db.execute("SELECT * FROM workspace_executions WHERE project_id=? AND job_id=? AND client_id=?", (project, job, client)).fetchone()
+            row = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? AND job_id=? AND client_id=?", (project, job, client)).fetchone()
             if row is None:
                 raise WorkspaceError("execution_not_found")
             return _summary(row)
         if command == "get":
             job = _id(request["jobId"], "job_id")
             client = _id(request["clientId"], "client_id")
-            row = db.execute("SELECT * FROM workspace_executions WHERE project_id=? AND job_id=? AND client_id=?", (project, job, client)).fetchone()
+            row = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? AND job_id=? AND client_id=?", (project, job, client)).fetchone()
             if row is None:
                 raise WorkspaceError("execution_not_found")
-            return {"dispatch": _summary(row), "submission": json.loads(row["submission_json"])}
-        rows = db.execute("SELECT * FROM workspace_executions WHERE project_id=? ORDER BY updated_at DESC,job_id LIMIT 100", (project,)).fetchall()
+            return {"dispatch": _summary(row), "submission": json.loads(row["submission_json"]), "remoteJobId": row["remote_job_id"], "actor": row["actor"]}
+        rows = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? ORDER BY updated_at DESC,job_id LIMIT 100", (project,)).fetchall()
         return {"executions": [_summary(row) for row in rows]}
     finally:
         db.close()

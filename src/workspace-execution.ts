@@ -38,6 +38,9 @@ function canonical(v: unknown): string {
   return JSON.stringify(v) ?? "null";
 }
 function safeId(v: unknown): v is string { return typeof v === "string" && SAFE_ID.test(v); }
+function workspaceId(kind: string, projectId: string, clientId: string, sourceId: string): string {
+  return "ws-" + createHash("sha256").update(`rotoxy:workspace:${kind}:v1\0${projectId}\0${clientId}\0${sourceId}`).digest("hex").slice(0, 48);
+}
 function safeProviderError(error: unknown): string {
   let value = error instanceof Error ? error.message : "provider operation failed";
   value = value.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
@@ -91,16 +94,20 @@ export class WorkspaceExecutionService {
     if (!this.backend) throw new WorkspaceExecutionError("supervisor_unavailable");
     const submission = validateJobSubmission(raw);
     if (submission.projectId !== caller.projectId || !safeId(caller.clientId)) throw new WorkspaceExecutionError("invalid_input");
+    await this.backend.authorizeWorkspace?.(caller.projectId, caller.clientId);
     const requestHash = createHash("sha256").update(canonical(submission)).digest("hex");
+    const remoteJobId = workspaceId("job", caller.projectId, caller.clientId, submission.jobId);
+    const remoteIdempotencyKey = workspaceId("idem", caller.projectId, caller.clientId, submission.idempotencyKey);
+    const remoteSubmission: JobSubmission = { ...submission, jobId: remoteJobId, idempotencyKey: remoteIdempotencyKey };
     const reservation = await this.ledger<{ created: boolean; shouldSubmit: boolean; dispatch: WorkspaceExecutionSummary }>({
-      command: "reserve", projectId: caller.projectId, jobId: submission.jobId, clientId: caller.clientId,
-      actor: `client:${caller.clientId}`, idempotencyKey: submission.idempotencyKey, requestHash, submission,
+      command: "reserve", projectId: caller.projectId, jobId: submission.jobId, remoteJobId, clientId: caller.clientId,
+      actor: `client:${caller.clientId}`, idempotencyKey: submission.idempotencyKey, remoteIdempotencyKey, requestHash, submission, remoteSubmission,
     });
     if (!reservation.shouldSubmit) {
       const dispatch = reservation.dispatch.state === "pending" ? await this.setState(caller, submission.jobId, "needs_reconciliation") : reservation.dispatch;
       return { dispatch, accepted: ["accepted", "queued", "running", "held", "blocked", "complete", "completed"].includes(dispatch.state), replayed: true };
     }
-    try { await this.backend.callTool("job_submit", submission, caller); }
+    try { await this.backend.callTool("job_submit", remoteSubmission, caller); }
     catch (error) {
       const state = await this.setState(caller, submission.jobId, "needs_reconciliation");
       return { dispatch: state, accepted: false, replayed: false, providerError: safeProviderError(error) };
@@ -109,31 +116,33 @@ export class WorkspaceExecutionService {
     return { dispatch: state, accepted: true, replayed: false };
   }
 
-  async getOwned(projectId: string, jobId: string, clientId: string): Promise<{ dispatch: WorkspaceExecutionSummary; submission: JobSubmission }> {
+  async getOwned(projectId: string, jobId: string, clientId: string): Promise<{ dispatch: WorkspaceExecutionSummary; submission: JobSubmission; remoteJobId: string; actor: string }> {
     return this.ledger({ command: "get", projectId, jobId, clientId });
   }
 
   async sync(projectId: string, jobId: string, caller: SupervisorCaller): Promise<{ dispatch: WorkspaceExecutionSummary; status: { state: string; revision?: number; error?: string; tasks: { taskId: string; state?: string; error?: string }[] }; results: { taskId: string; text: string; truncated?: boolean; reportedModel?: string; assistantAt?: number }[]; resultsUnavailable: boolean; resultsTruncated: boolean; resultError?: string }> {
     if (!this.backend || projectId !== caller.projectId || !safeId(jobId) || !safeId(caller.clientId)) throw new WorkspaceExecutionError("invalid_input");
-    await this.getOwned(projectId, jobId, caller.clientId);
+    await this.backend.authorizeWorkspace?.(projectId, caller.clientId);
+    const binding = await this.getOwned(projectId, jobId, caller.clientId);
     let rawStatus: unknown;
-    try { rawStatus = await this.backend.callTool("job_status", { projectId, jobId }, caller); }
+    try { rawStatus = await this.backend.callTool("job_status", { projectId, jobId: binding.remoteJobId }, caller); }
     catch (error) { const dispatch = await this.setState(caller, jobId, "needs_reconciliation"); return { dispatch, status: { state: "unknown", error: safeProviderError(error), tasks: [] }, results: [], resultsUnavailable: true, resultsTruncated: false }; }
     const state = remoteState(rawStatus);
     const dispatch = await this.setState(caller, jobId, state);
     const statusObj = isObject(rawStatus) ? rawStatus : {};
-    const taskRows = Array.isArray(statusObj.tasks) ? statusObj.tasks.filter(isObject).slice(0, 100).map(task => ({ taskId: String(task.taskId ?? task.task_id ?? "").slice(0, 128), ...(typeof task.state === "string" ? { state: task.state.slice(0, 32) } : {}), ...(typeof task.error === "string" ? { error: safeProviderError(new Error(task.error)) } : {}) })).filter(task => safeId(task.taskId)) : [];
+    const allowedTasks = new Set(binding.submission.tasks.map(task => task.taskId));
+    const taskRows = Array.isArray(statusObj.tasks) ? statusObj.tasks.filter(isObject).slice(0, 100).map(task => ({ taskId: String(task.taskId ?? task.task_id ?? "").slice(0, 128), ...(typeof task.state === "string" ? { state: task.state.slice(0, 32) } : {}), ...(typeof task.error === "string" ? { error: safeProviderError(new Error(task.error)) } : {}) })).filter(task => safeId(task.taskId) && allowedTasks.has(task.taskId)) : [];
     let results: { taskId: string; text: string; reportedModel?: string; assistantAt?: number }[] = [];
     let resultsUnavailable = false;
     let resultsTruncated = false;
     let resultError: string | undefined;
     try {
-      const rawResults = await this.backend.callTool("job_results", { projectId, jobId }, caller);
+      const rawResults = await this.backend.callTool("job_results", { projectId, jobId: binding.remoteJobId }, caller);
       const list = isObject(rawResults) && Array.isArray(rawResults.results) ? rawResults.results : [];
       let resultBytes = 0;
       results = list.filter(isObject).slice(0, 100).flatMap(item => {
         const taskId = item.taskId ?? item.task_id;
-        if (!safeId(taskId) || typeof item.text !== "string") return [];
+        if (!safeId(taskId) || !allowedTasks.has(taskId) || typeof item.text !== "string") return [];
         const room = MAX_RESULT_BYTES - resultBytes;
         if (room <= 0) { resultsTruncated = true; return []; }
         const bytes = Buffer.from(item.text, "utf8");
