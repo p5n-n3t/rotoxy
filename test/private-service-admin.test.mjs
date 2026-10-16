@@ -62,7 +62,8 @@ test("private services are owner-only, explicit-probe, CSRF protected and fixed 
   const beforeInvalid = calls.length;
   response = await post({ action: "add", revision: current.revision, id: "bad", kind: "litellm", label: "Bad", hostId: "https://attacker.invalid", enabled: "1" });
   assert.equal(response.status, 400); assert.equal(calls.length, beforeInvalid);
-  response = await post({ action: "probe", revision: current.revision, targetId: "litellm-ora3", url: "https://attacker.invalid" });
-  assert.equal(response.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "probe", revision: current.revision, targetId: "litellm-ora3" });
+  const probeRevision = current.revision;
+  response = await post({ action: "probe", revision: probeRevision, targetId: "litellm-ora3", url: "https://attacker.invalid" });
+  assert.equal(response.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "probe", revision: probeRevision, targetId: "litellm-ora3" });
   assert.ok(calls.every((call) => !call.input.includes("synthetic-admin-only") && !call.input.includes("attacker.invalid")));
 });

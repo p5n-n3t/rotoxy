@@ -419,3 +419,14 @@ test("token transcript without newest user turn remains incomplete until support
   assert.equal(result.reason, 'missing_user_turn');
   assert.equal(result.latestAssistantComplete, false);
 });
+
+test("a trusted operation permit remains single-use when the raw policy independently allows chat", async () => {
+  let unused = true, sends = 0;
+  const adapter = new LightSprintJobsAdapter(store(), ACCOUNT_ID, {
+    trustedChatMutationPermit: () => { if (!unused) return false; unused = false; return true; },
+    clientFactory: clientFactory(async () => { sends++; return ok({ accepted: true }); }),
+  });
+  assert.equal((await adapter.sendMessage(SESSION_ID, "approved work", "attempt:1")).classification, "accepted");
+  assert.equal((await adapter.sendMessage(SESSION_ID, "approved work", "attempt:1")).reason, "policy_denied");
+  assert.equal(sends, 1);
+});

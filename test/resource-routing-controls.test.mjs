@@ -76,7 +76,7 @@ test("routing editor enforces admin CSRF and rules alter real Cloudflare/Ollama 
     [modelA.id]: { enabled: true, weight: 1, allowedModels: [] }, [modelB.id]: { enabled: true, weight: 3, capacity: 99, allowedModels: ["gpt-oss:20b"] },
   } };
   const saved = await submit(JSON.stringify(rules));
-  assert.equal(saved.status, 303);
+  assert.equal(saved.status, 303, await saved.text());
   const wildcardRules = { version: 1, resources: { [cfA.id]: { allowedModels: ["*"] } } };
   assert.equal((await submit(JSON.stringify(wildcardRules))).status, 400, "wildcard model policy is rejected");
   await cfAdapter.run({ model, input: { prompt: "after" } });

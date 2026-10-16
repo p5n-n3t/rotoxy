@@ -481,7 +481,7 @@ export class LightSprintJobsAdapter {
   private readonly timeoutMs: number;
   private readonly verifiedInstructions = new Map<string, string>();
 
-  constructor(private readonly store: StateStore, readonly accountId: string, options: LightSprintJobsOptions = {}) {
+  constructor(private readonly store: StateStore, readonly accountId: string, private readonly options: LightSprintJobsOptions = {}) {
     validateId(accountId, "accountId");
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.factory = options.clientFactory ?? createLightSprintMcpClient;
@@ -533,7 +533,7 @@ export class LightSprintJobsAdapter {
     try {
       const state = await this.store.load();
       const allowed = evaluateToolCall(state.config?.toolPolicy, { name: "lightsprint_api", arguments: { method, path, ...(body === undefined ? {} : { body }) } }).allowed;
-      if (!allowed) {
+      if (!allowed || trustedChatMutation && this.options.trustedChatMutationPermit) {
         const keys = body && Object.keys(body).sort();
         const exactChat = trustedChatMutation && method === "POST" &&
           /^\/api\/agent-sessions\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/chat$/.test(path) &&

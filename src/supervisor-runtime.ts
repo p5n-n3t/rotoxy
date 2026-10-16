@@ -371,10 +371,10 @@ export class SupervisorRuntime implements SupervisorBackend {
       const expected = Object.freeze({ path: `/api/agent-sessions/${sessionId}/chat`, message, clientMessageId });
       let unused = true;
       const permit = (request: Readonly<{ method: "POST"; path: string; body: Readonly<{ message: string; clientMessageId: string }> }>): boolean => {
-        if (!unused || request.method !== "POST" || request.path !== expected.path ||
-            request.body.message !== expected.message || request.body.clientMessageId !== expected.clientMessageId) return false;
-        unused = false; // spend before LightSprint client creation or any provider network request
-        return true;
+        if (!unused) return false;
+        unused = false; // invalidate on the first attempt, before any provider network request
+        return request.method === "POST" && request.path === expected.path &&
+          request.body.message === expected.message && request.body.clientMessageId === expected.clientMessageId;
       };
       return new LightSprintJobsAdapter(this.options.store, op.selectedAccountId, {
         timeoutMs: limits.timeoutMs, trustedChatMutationPermit: permit,

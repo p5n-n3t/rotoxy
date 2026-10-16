@@ -30,10 +30,10 @@ A desktop Node run exposed a background-test timing failure while RAM/swap were 
 
 Remaining work is explicit:
 
-1. Controlled-batch dashboard approval and narrowly trusted worker-adapter tool-policy integration; no live grant or unrestricted production paid fanout is claimed. Default strict admission remains enabled.
+1. The subsequent [operator-controls checkpoint](2026-10-16-operator-controls.md) adds dashboard approval and narrowly trusted worker dispatch. Default strict admission remains enabled; production paid fanout under the new grant mechanism is still a separate verification boundary.
 2. One durable execution scheduler for LightSprint, Oracle, Claude, and additional runners; current queues are not yet fully unified.
 3. Runtime-compatible OpenCode/Hermes runner adapters and configured-model discovery. Official research is in `docs/research/agent-cli-integration-20261016.md`; a directory entry is not an implemented runner. The installed Hermes executable/config were found, but its bounded help probe did not finish, and OpenCode was not found on the current PATH.
-4. Authenticated in-app LiteLLM/Loopback inventory and management adapters. Connectivity is verified; lifecycle/configuration controls are not implemented. Loopback's listed fleet targets currently differ from ROTOXY's Oracle fleet and must not silently replace it.
+4. The operator-controls checkpoint adds authenticated LiteLLM/Loopback inventory and passive probes. Lifecycle/configuration controls remain unimplemented. Loopback's listed fleet targets differ from ROTOXY's Oracle fleet and must not silently replace it.
 5. Model installation/removal, automatic fleet provisioning, and a safe apply/restart workflow. Model allowlist management does not imply those operations exist.
 6. Existing broader roadmap items: automatic task decomposition, native approval integrations, additional workspace providers, and supported resumable runner control. Dormant web-chat wake-up remains unsupported.
 

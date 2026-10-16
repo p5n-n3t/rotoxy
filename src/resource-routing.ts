@@ -43,7 +43,7 @@ export type ResourceRoutingPlan = {
 };
 
 const FILE = "resource-routing-rules.json";
-const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^@?[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/;
 const DEFAULT_RULES: ResourceRoutingRules = { version: 1, unknownCapacity: 1, providerCaps: {}, resources: {} };
 function obj(value: unknown): Record<string, unknown> | undefined { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }

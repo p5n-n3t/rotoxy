@@ -37,8 +37,8 @@ export const NAV_GROUPS: readonly NavGroup[] = [
 
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {
   const b = esc(base);
-  const navActive = ["cloudflare", "inference"].includes(active) ? "models" : active;
-  const labels: Record<string, string> = { cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map" };
+  const navActive = active === "dispatch-approvals" ? "jobs" : ["cloudflare", "inference"].includes(active) ? "models" : active;
+  const labels: Record<string, string> = { "dispatch-approvals": "Dispatch approvals", cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map" };
   const current = labels[active] ?? groups.flatMap((group) => group.items).find((item) => item.key === navActive)?.label ?? active;
   const link = (item: NavItem) => item.href
     ? `<a class="nav-link" href="${b}${esc(item.href)}"${navActive === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`

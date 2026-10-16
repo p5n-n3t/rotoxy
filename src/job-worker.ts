@@ -254,6 +254,9 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
       if (!adapter) { errorClass = "operation_not_trusted"; return await submit(op, outcome, result, errorClass); }
       if (adapter.accountId !== undefined && adapter.accountId !== op.selectedAccountId) { errorClass = "account_identity_mismatch"; return await submit(op, outcome, result, errorClass); }
       if (op.kind === "chat_session") {
+        if (!sessionId || !message || !clientMessageId) {
+          return await submit(op, "rejected", {}, "invalid_operation_input");
+        }
         if (stopped || !running || (leaseDeadlines.get(op.operationId) ?? 0) - now() <= adapterTimeoutMs + requestTimeoutMs) {
           errorClass = "worker_stopping_or_lease_insufficient"; return await submit(op, outcome, result, errorClass);
         }

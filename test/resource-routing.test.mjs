@@ -106,3 +106,12 @@ test("inference planning intersects exact allowedModels while absent model rules
   const legacy = planResourceRouting({ resources: [resource], task });
   assert.equal(legacy.assignments[0].resourceId, "ollama-a");
 });
+
+test("routing accepts credential IDs with every URL-safe base64 leading character", async () => {
+  const { validateResourceRoutingRules } = await import("../dist/resource-routing.js");
+  for (const id of ["_account123", "-account123"]) {
+    const rules = validateResourceRoutingRules({ version: 1, resources: { [id]: { enabled: true, weight: 1 } } });
+    assert.equal(rules.resources[id].enabled, true);
+  }
+  assert.throws(() => validateResourceRoutingRules({ version: 1, resources: { "../account": { enabled: true, weight: 1 } } }));
+});
