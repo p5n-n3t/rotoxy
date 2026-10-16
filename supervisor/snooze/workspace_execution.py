@@ -114,7 +114,7 @@ def handle(path, request):
                         raise WorkspaceError("idempotency_conflict")
                     db.execute("COMMIT")
                     return {"created": False, "shouldSubmit": False, "dispatch": _summary(existing)}
-                db.execute("INSERT INTO workspace_execution_bindings(project_id,job_id,remote_job_id,client_id,actor,idempotency_key,remote_idempotency_key,request_hash,submission_json,remote_submission_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)",
+                db.execute("INSERT INTO workspace_execution_bindings(project_id,job_id,remote_job_id,client_id,actor,idempotency_key,remote_idempotency_key,request_hash,submission_json,remote_submission_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?)",
                            (project, job, remote_job, client, actor, key, remote_key, digest, submission, remote_submission, now, now))
                 db.execute("COMMIT")
                 row = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? AND client_id=? AND job_id=?", (project, client, job)).fetchone()

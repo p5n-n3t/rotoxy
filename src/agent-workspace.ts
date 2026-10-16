@@ -188,7 +188,9 @@ export class AgentWorkspaceService {
     const submission = validateJobSubmission(raw);
     await this.backend.authorizeWorkspace(submission.projectId, clientId);
     const result = await this.execution.dispatch(submission, { projectId: submission.projectId, clientId });
-    if (result.accepted) {
+    // Replays can race the original submit. Avoid concurrent projection writes;
+    // explicit workspace_sync repairs a missing projection after a crash.
+    if (result.accepted && !result.replayed) {
       await this.backend.authorizeWorkspace(submission.projectId, clientId);
       await this.projectSubmission(submission, `client:${clientId}`, [], []);
     }
@@ -208,8 +210,12 @@ export class AgentWorkspaceService {
 
   private async projectSubmission(submission: JobSubmission, actor: string, results: { taskId: string; text: string }[], taskStatuses: { taskId: string; state?: string }[]): Promise<void> {
     let snapshot = await this.snapshot(submission.projectId, actor);
+    // Bind every projected identifier to the verified dispatch author and project.
+    // A second OAuth client reusing a public job/task id must not collide with it.
+    const projectionKey = createHash("sha256").update(`rotoxy:workspace-projection:v1\0${submission.projectId}\0${actor}\0${submission.jobId}`).digest("hex");
+    const projectedTaskId = (taskId: string) => "exec-" + createHash("sha256").update(`${projectionKey}\0${taskId}`).digest("hex").slice(0, 32);
     const apply = async (input: Record<string, unknown>) => {
-      await this.update(submission.projectId, actor, { ...input, idempotencyKey: `exec-${createHash("sha256").update(`${submission.jobId}:${String(input.action)}:${String(input.taskId ?? input.artifactId ?? "")}`).digest("hex").slice(0, 48)}`, expectedRevision: snapshot.revision });
+      await this.update(submission.projectId, actor, { ...input, idempotencyKey: `exec-${createHash("sha256").update(`${projectionKey}:${String(input.action)}:${String(input.taskId ?? input.artifactId ?? "")}`).digest("hex").slice(0, 48)}`, expectedRevision: snapshot.revision });
       snapshot = await this.snapshot(submission.projectId, actor);
     };
     if (!(snapshot.participants as any[]).some(row => row.id === actor)) await apply({ action: "participant_upsert", label: "ROTOXY execution owner", provider: "lightsprint" });
@@ -219,13 +225,13 @@ export class AgentWorkspaceService {
     const visit = (taskId: string) => { if (visited.has(taskId)) return; visited.add(taskId); for (const dep of taskById.get(taskId)?.dependsOn ?? []) visit(dep); const item = taskById.get(taskId); if (item) ordered.push(item); };
     for (const task of submission.tasks) visit(task.taskId);
     for (const task of ordered) {
-      const workspaceTaskId = "exec-" + createHash("sha256").update(`${submission.jobId}\0${task.taskId}`).digest("hex").slice(0, 32);
+      const workspaceTaskId = projectedTaskId(task.taskId);
       let projected = (snapshot.tasks as any[]).find(row => row.id === workspaceTaskId);
       if (!projected) {
         await apply({ action: "task_create", taskId: workspaceTaskId, title: `Published execution · ${task.taskId}`,
           description: `Published task ${task.taskId} from execution ${submission.jobId}. Instructions remain private to the execution owner.`,
           jobId: submission.jobId, externalTaskId: task.taskId,
-          dependsOn: task.dependsOn.map(dep => "exec-" + createHash("sha256").update(`${submission.jobId}\0${dep}`).digest("hex").slice(0, 32)) });
+          dependsOn: task.dependsOn.map(projectedTaskId) });
         projected = (snapshot.tasks as any[]).find(row => row.id === workspaceTaskId);
       }
       const reportedState = taskStatuses.find(row => row.taskId === task.taskId)?.state?.toLowerCase();
