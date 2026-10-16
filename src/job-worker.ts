@@ -45,6 +45,8 @@ export interface JobOperation {
 export interface JobWorkerOptions {
   bridge: JobBridge;
   adapterFactory: (accountId: string, limits: { timeoutMs: number }) => PinnedJobsAdapter | Promise<PinnedJobsAdapter>;
+  /** Called only for a structurally valid, durably claimed operation. When supplied for chat dispatch it must return undefined to reject an operation outside its trusted binding. */
+  operationAdapterFactory?: (operation: JobOperation, limits: { timeoutMs: number }) => PinnedJobsAdapter | undefined | Promise<PinnedJobsAdapter | undefined>;
   /** Includes current enabled/auth/quota eligibility; this must be rechecked immediately before mutation. */
   isAccountEligible: (accountId: string) => boolean | Promise<boolean>;
   workerId: string;
@@ -171,7 +173,7 @@ function newestAssistant(transcript: unknown, dispatchAtSeconds: number, instruc
 function validOperation(value: unknown): value is JobOperation {
   const row = object(value);
   return !!row && ID.test(String(row.operationId ?? "")) && ID.test(String(row.attemptId ?? "")) &&
-    Number.isInteger(row.generation) && Number(row.generation) > 0 && ID.test(String(row.selectedAccountId ?? "")) &&
+    Number.isSafeInteger(row.generation) && Number(row.generation) > 0 && ID.test(String(row.selectedAccountId ?? "")) &&
     typeof row.kind === "string" && object(row.input) !== undefined;
 }
 
@@ -238,13 +240,20 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
     const input = op.input;
     try {
       if (!await options.isAccountEligible(op.selectedAccountId)) { errorClass = "account_unavailable"; return await submit(op, outcome, result, errorClass); }
-      const adapter = await options.adapterFactory(op.selectedAccountId, { timeoutMs: adapterTimeoutMs });
-      if (adapter.accountId !== undefined && adapter.accountId !== op.selectedAccountId) { errorClass = "account_identity_mismatch"; return await submit(op, outcome, result, errorClass); }
       const sessionId = text(op.sessionId ?? input.sessionId, 128);
+      const message = op.kind === "chat_session" ? text(input.instructions, 20_000) : undefined;
+      const clientMessageId = op.kind === "chat_session" ? text(input.clientMessageId, 128) : undefined;
+      if (op.kind === "chat_session" && (!sessionId || !ID.test(sessionId) ||
+          (op.sessionId !== undefined && input.sessionId !== undefined && op.sessionId !== input.sessionId) ||
+          !message || !clientMessageId || !MESSAGE_ID.test(clientMessageId))) {
+        errorClass = "invalid_operation_input"; return await submit(op, outcome, result, errorClass);
+      }
+      const adapter = op.kind === "chat_session" && options.operationAdapterFactory
+        ? await options.operationAdapterFactory(op, { timeoutMs: adapterTimeoutMs })
+        : await options.adapterFactory(op.selectedAccountId, { timeoutMs: adapterTimeoutMs });
+      if (!adapter) { errorClass = "operation_not_trusted"; return await submit(op, outcome, result, errorClass); }
+      if (adapter.accountId !== undefined && adapter.accountId !== op.selectedAccountId) { errorClass = "account_identity_mismatch"; return await submit(op, outcome, result, errorClass); }
       if (op.kind === "chat_session") {
-        const message = text(input.instructions, 20_000);
-        const clientMessageId = text(input.clientMessageId, 128);
-        if (!sessionId || !message || !clientMessageId || !MESSAGE_ID.test(clientMessageId)) { errorClass = "invalid_operation_input"; return await submit(op, outcome, result, errorClass); }
         if (stopped || !running || (leaseDeadlines.get(op.operationId) ?? 0) - now() <= adapterTimeoutMs + requestTimeoutMs) {
           errorClass = "worker_stopping_or_lease_insufficient"; return await submit(op, outcome, result, errorClass);
         }

@@ -40,6 +40,8 @@ export interface LightSprintJobsOptions {
   fetch?: typeof globalThis.fetch;
   clientFactory?: LightSprintMcpClientFactory;
   timeoutMs?: number;
+  /** Single-use authorization for one exact claimed chat POST when the global policy denies it. Never used by other adapter methods. */
+  trustedChatMutationPermit?: (request: Readonly<{ method: "POST"; path: string; body: Readonly<{ message: string; clientMessageId: string }> }>) => boolean;
 }
 
 const MAX_MCP_RESPONSE_BYTES = 1_048_576;
@@ -525,12 +527,21 @@ export class LightSprintJobsAdapter {
     return this.clientPromise;
   }
 
-  private async api<T = unknown>(method: string, path: string, body?: Record<string, unknown>, transcript = false): Promise<JobResult<T>> {
+  private async api<T = unknown>(method: string, path: string, body?: Record<string, unknown>, transcript = false,
+    trustedChatMutation = false): Promise<JobResult<T>> {
     let raw: unknown;
     try {
       const state = await this.store.load();
-      if (!evaluateToolCall(state.config?.toolPolicy, { name: "lightsprint_api", arguments: { method, path, ...(body === undefined ? {} : { body }) } }).allowed) {
-        return rejected<T>(this.accountId, "policy_denied");
+      const allowed = evaluateToolCall(state.config?.toolPolicy, { name: "lightsprint_api", arguments: { method, path, ...(body === undefined ? {} : { body }) } }).allowed;
+      if (!allowed) {
+        const keys = body && Object.keys(body).sort();
+        const exactChat = trustedChatMutation && method === "POST" &&
+          /^\/api\/agent-sessions\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/chat$/.test(path) &&
+          !!body && keys?.length === 2 && keys[0] === "clientMessageId" && keys[1] === "message" &&
+          typeof body.message === "string" && typeof body.clientMessageId === "string";
+        const request = exactChat ? Object.freeze({ method: "POST" as const, path,
+          body: Object.freeze({ message: body.message as string, clientMessageId: body.clientMessageId as string }) }) : undefined;
+        if (!request || !this.options.trustedChatMutationPermit?.(request)) return rejected<T>(this.accountId, "policy_denied");
       }
       const client = await this.client();
       raw = await client.request("tools/call", {
@@ -622,7 +633,7 @@ export class LightSprintJobsAdapter {
     validateId(sessionId, "sessionId");
     validateText(message, "message", MAX_MESSAGE_LENGTH);
     if (typeof clientMessageId !== "string" || !CLIENT_MESSAGE_ID_RE.test(clientMessageId)) throw new TypeError("clientMessageId is invalid");
-    return this.api("POST", `/api/agent-sessions/${sessionId}/chat`, { message, clientMessageId });
+    return this.api("POST", `/api/agent-sessions/${sessionId}/chat`, { message, clientMessageId }, false, true);
   }
 
   cancelTurn(sessionId: string): Promise<JobResult> {

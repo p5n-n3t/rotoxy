@@ -349,6 +349,37 @@ export class SupervisorRuntime implements SupervisorBackend {
       if (!adapter) { adapter = new LightSprintJobsAdapter(this.options.store, accountId, { timeoutMs: limits.timeoutMs }); this.adapterCache.set(accountId, adapter); }
       return adapter;
     });
+    const operationAdapters: JobWorkerOptions["operationAdapterFactory"] = async (op, limits) => {
+      // This factory is reached only after the bridge has durably claimed the operation.
+      // Bind its single chat mutation to one private runtime registration; never infer
+      // authority from the operation's project/client fields or caller-supplied headers.
+      if (op.kind !== "chat_session" || !safeId(op.operationId) || !safeId(op.attemptId) ||
+          !Number.isSafeInteger(op.generation) || op.generation < 1 || !safeId(op.selectedAccountId)) return undefined;
+      const sessionId = op.sessionId ?? op.input.sessionId;
+      const message = op.input.instructions;
+      const clientMessageId = op.input.clientMessageId;
+      const model = op.input.model;
+      const registration = this.config.projects.flatMap((project) => project.registeredSessions)
+        .filter((session) => session.accountId === op.selectedAccountId && session.sessionId === sessionId);
+      if (registration.length !== 1 || typeof sessionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(sessionId) ||
+          (op.sessionId !== undefined && op.input.sessionId !== undefined && op.sessionId !== op.input.sessionId) ||
+          typeof model !== "string" || model !== registration[0].model || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(model) ||
+          typeof message !== "string" || message.trim().length === 0 || message.length > 20_000 ||
+          typeof clientMessageId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(clientMessageId)) return undefined;
+      // Preserve the injected adapter seam for deterministic tests and embedders.
+      if (this.options.adapterFactory) return this.options.adapterFactory(op.selectedAccountId, limits);
+      const expected = Object.freeze({ path: `/api/agent-sessions/${sessionId}/chat`, message, clientMessageId });
+      let unused = true;
+      const permit = (request: Readonly<{ method: "POST"; path: string; body: Readonly<{ message: string; clientMessageId: string }> }>): boolean => {
+        if (!unused || request.method !== "POST" || request.path !== expected.path ||
+            request.body.message !== expected.message || request.body.clientMessageId !== expected.clientMessageId) return false;
+        unused = false; // spend before LightSprint client creation or any provider network request
+        return true;
+      };
+      return new LightSprintJobsAdapter(this.options.store, op.selectedAccountId, {
+        timeoutMs: limits.timeoutMs, trustedChatMutationPermit: permit,
+      });
+    };
     const workerBridge: JobBridge = {
       request: async <T = unknown>(method: "POST", route: string, body?: unknown, requestOptions?: { signal?: AbortSignal; timeoutMs?: number }): Promise<T | undefined> => {
         // The current worker emits ISO text for assistantAt; Python persists seconds. Newer
@@ -369,6 +400,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       this.worker = createJobWorker({
         bridge: workerBridge,
         adapterFactory: adapters,
+        operationAdapterFactory: operationAdapters,
         isAccountEligible: async (accountId) => {
           const latest = await this.options.store.load();
           const signal = accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl));

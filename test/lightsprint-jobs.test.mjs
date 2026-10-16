@@ -338,6 +338,32 @@ test("live gateway tool policy also fences internal job adapter mutations", asyn
   assert.equal(calls, 3);
 });
 
+test("a single-use trusted permit authorizes only its exact claimed chat request after global denial", async () => {
+  const backing = store(); let calls = 0; let permitCalls = 0; let unused = true;
+  const expected = Object.freeze({ path: `/api/agent-sessions/${SESSION_ID}/chat`, message: "approved claimed work", clientMessageId: "attempt:1" });
+  const guarded = { ...backing, load: async () => ({ ...await backing.load(), config: { toolPolicy: { endpoints: [
+    { tool: "lightsprint_api", rules: [{ methods: ["GET"], path: "/api/agent-sessions/{sessionId}/status" }] },
+  ] } } }) };
+  const adapter = new LightSprintJobsAdapter(guarded, ACCOUNT_ID, {
+    clientFactory: clientFactory(async () => { calls++; return ok({ accepted: true }); }),
+    trustedChatMutationPermit: (request) => {
+      permitCalls++;
+      if (!unused || request.method !== "POST" || request.path !== expected.path ||
+          request.body.message !== expected.message || request.body.clientMessageId !== expected.clientMessageId) return false;
+      unused = false;
+      return true;
+    },
+  });
+  assert.equal((await adapter.sendMessage(SESSION_ID, "wrong message", "attempt:1")).reason, "policy_denied");
+  assert.equal((await adapter.sendMessage("other-session", expected.message, expected.clientMessageId)).reason, "policy_denied");
+  assert.equal((await adapter.sendMessage(SESSION_ID, expected.message, expected.clientMessageId)).classification, "accepted");
+  assert.equal((await adapter.sendMessage(SESSION_ID, expected.message, expected.clientMessageId)).reason, "policy_denied");
+  // Other methods cannot present this permit, even if their verb is mutating.
+  assert.equal((await adapter.cancelTurn(SESSION_ID)).reason, "policy_denied");
+  assert.equal(permitCalls, 4); // wrong message, wrong session, accepted exact request, replay
+  assert.equal(calls, 1);
+});
+
 test("documented item transcript anchors last assistant snapshot to newest user turn", async () => {
   const items = [
     {seq: 40, turnId: 'old-turn', type: 'assistant_snapshot', time: '2026-10-15T10:00:00Z', payload: {content: 'stale'}},
