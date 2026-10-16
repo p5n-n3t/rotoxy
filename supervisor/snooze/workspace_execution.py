@@ -51,7 +51,15 @@ def _connect(path):
         state TEXT NOT NULL, remote_state TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         PRIMARY KEY(project_id,client_id,job_id), UNIQUE(project_id,client_id,idempotency_key),
         UNIQUE(project_id,remote_job_id))""")
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(workspace_execution_bindings)")}
+    if "settled" not in columns:
+        db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN settled INTEGER NOT NULL DEFAULT 0")
+    if "last_polled_at" not in columns:
+        db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN last_polled_at INTEGER")
+    if "lease_until" not in columns:
+        db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0")
     db.execute("CREATE INDEX IF NOT EXISTS workspace_execution_bindings_project ON workspace_execution_bindings(project_id,updated_at DESC)")
+    db.execute("CREATE INDEX IF NOT EXISTS workspace_execution_reconciliation ON workspace_execution_bindings(settled,lease_until,last_polled_at,created_at)")
     # Older checkpoint bindings remain read-only sync targets under their
     # original remote IDs. Never replay their already-reserved submissions.
     for row in db.execute("SELECT * FROM workspace_executions").fetchall():
@@ -83,10 +91,12 @@ def handle(path, request):
         "set_state": {"command", "projectId", "jobId", "clientId", "state"},
         "get": {"command", "projectId", "jobId", "clientId"},
         "list": {"command", "projectId"},
+        "claim_reconciliation": {"command", "limit"},
+        "settle_reconciliation": {"command", "projectId", "jobId", "clientId"},
     }
     if command not in allowed or set(request) != allowed[command]:
         raise WorkspaceError("invalid_request")
-    project = _id(request["projectId"], "project_id")
+    project = None if command == "claim_reconciliation" else _id(request["projectId"], "project_id")
     db = _connect(path)
     try:
         if command == "reserve":
@@ -142,6 +152,46 @@ def handle(path, request):
             if row is None:
                 raise WorkspaceError("execution_not_found")
             return {"dispatch": _summary(row), "submission": json.loads(row["submission_json"]), "remoteJobId": row["remote_job_id"], "actor": row["actor"]}
+        if command == "claim_reconciliation":
+            limit = request["limit"]
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 5:
+                raise WorkspaceError("invalid_limit")
+            now = int(time.time() * 1000)
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = db.execute("""SELECT project_id,job_id,client_id FROM workspace_execution_bindings
+                    WHERE settled=0 AND COALESCE(lease_until,0)<=?
+                    AND (last_polled_at IS NULL OR last_polled_at<=?)
+                    ORDER BY created_at ASC,project_id ASC,job_id ASC,client_id ASC LIMIT ?""",
+                    (now, now - 30_000, limit)).fetchall()
+                claimed = []
+                for row in rows:
+                    changed = db.execute("""UPDATE workspace_execution_bindings SET last_polled_at=?,lease_until=?
+                        WHERE project_id=? AND job_id=? AND client_id=? AND settled=0
+                        AND COALESCE(lease_until,0)<=? AND (last_polled_at IS NULL OR last_polled_at<=?)""",
+                        (now, now + 120_000, row["project_id"], row["job_id"], row["client_id"], now, now - 30_000)).rowcount
+                    if changed:
+                        claimed.append({"projectId": row["project_id"], "jobId": row["job_id"], "clientId": row["client_id"]})
+                db.execute("COMMIT")
+                return {"bindings": claimed}
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        if command == "settle_reconciliation":
+            project = _id(request["projectId"], "project_id")
+            job = _id(request["jobId"], "job_id")
+            client = _id(request["clientId"], "client_id")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                changed = db.execute("UPDATE workspace_execution_bindings SET settled=1,lease_until=0 WHERE project_id=? AND job_id=? AND client_id=?",
+                                     (project, job, client)).rowcount
+                if not changed:
+                    raise WorkspaceError("execution_not_found")
+                db.execute("COMMIT")
+                return {"settled": True}
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
         rows = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? ORDER BY updated_at DESC,job_id LIMIT 100", (project,)).fetchall()
         return {"executions": [_summary(row) for row in rows]}
     finally:

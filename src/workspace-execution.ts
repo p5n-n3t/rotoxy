@@ -28,6 +28,12 @@ export class WorkspaceExecutionError extends Error {
 }
 
 export type WorkspaceExecutionSummary = { projectId: string; jobId: string; state: string; provider: "lightsprint"; taskCount: number; createdAt: number; updatedAt: number };
+export interface WorkspaceReconciliationBinding { projectId: string; jobId: string; clientId: string }
+export interface WorkspaceReconciliationCallbacks {
+  claim(limit: number): Promise<WorkspaceReconciliationBinding[]>;
+  sync(binding: WorkspaceReconciliationBinding): Promise<unknown>;
+  settle(binding: WorkspaceReconciliationBinding): Promise<void>;
+}
 type LedgerRunner = (executable: string, args: string[], stdin: string, options: { cwd: string; timeoutMs: number; maxStdoutBytes: number }) => Promise<string>;
 export interface WorkspaceExecutionOptions { runner?: LedgerRunner }
 
@@ -62,7 +68,7 @@ async function runPython(executable: string, args: string[], stdin: string, opti
     const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new WorkspaceExecutionError("bridge_timeout")); }, options.timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => { size += chunk.length; if (size > options.maxStdoutBytes) { child.kill("SIGKILL"); finish(new WorkspaceExecutionError("bridge_output_invalid")); } else buffers.push(Buffer.from(chunk)); });
     child.on("error", () => finish(new WorkspaceExecutionError("ledger_unavailable")));
-    child.on("close", code => { const output = Buffer.concat(buffers).toString("utf8"); if (code !== 0) { try { const failure = JSON.parse(output); const allowed = ["execution_not_found", "idempotency_conflict", "invalid_input", "invalid_owner", "invalid_request", "invalid_state"]; finish(new WorkspaceExecutionError(allowed.includes(failure.error) ? failure.error : "ledger_unavailable")); } catch { finish(new WorkspaceExecutionError("ledger_unavailable")); } } else finish(undefined, output); });
+    child.on("close", code => { const output = Buffer.concat(buffers).toString("utf8"); if (code !== 0) { try { const failure = JSON.parse(output); const allowed = ["execution_not_found", "idempotency_conflict", "invalid_input", "invalid_limit", "invalid_owner", "invalid_request", "invalid_state"]; finish(new WorkspaceExecutionError(allowed.includes(failure.error) ? failure.error : "ledger_unavailable")); } catch { finish(new WorkspaceExecutionError("ledger_unavailable")); } } else finish(undefined, output); });
     child.stdin.on("error", () => finish(new WorkspaceExecutionError("ledger_unavailable")));
     child.stdin.end(stdin);
   });
@@ -115,6 +121,35 @@ export class WorkspaceExecutionService {
 
   async getOwned(projectId: string, jobId: string, clientId: string): Promise<{ dispatch: WorkspaceExecutionSummary; submission: JobSubmission; remoteJobId: string; actor: string }> {
     return this.ledger({ command: "get", projectId, jobId, clientId });
+  }
+
+  /** Expose owner-scoped ledger operations only as callbacks for the internal reconciler. */
+  reconciliationCallbacks(sync: WorkspaceReconciliationCallbacks["sync"]): WorkspaceReconciliationCallbacks {
+    return {
+      claim: (limit = 3) => this.claimReconciliation(limit),
+      sync,
+      settle: (binding) => this.settleReconciliation(binding),
+    };
+  }
+
+  private async claimReconciliation(limit = 3): Promise<WorkspaceReconciliationBinding[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5) throw new WorkspaceExecutionError("invalid_input");
+    const result = await this.ledger<{ bindings?: WorkspaceReconciliationBinding[] }>({ command: "claim_reconciliation", limit });
+    if (!Array.isArray(result.bindings)) throw new WorkspaceExecutionError("bridge_output_invalid");
+    const seen = new Set<string>();
+    return result.bindings.slice(0, limit).filter((row) => {
+      if (!isObject(row) || !safeId(row.projectId) || !safeId(row.jobId) || !safeId(row.clientId)) return false;
+      const key = `${row.projectId}\0${row.clientId}\0${row.jobId}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  private async settleReconciliation(binding: WorkspaceReconciliationBinding): Promise<void> {
+    if (!binding || !safeId(binding.projectId) || !safeId(binding.jobId) || !safeId(binding.clientId)) throw new WorkspaceExecutionError("invalid_input");
+    const result = await this.ledger<{ settled?: boolean }>({ command: "settle_reconciliation", ...binding });
+    if (result.settled !== true) throw new WorkspaceExecutionError("bridge_output_invalid");
   }
 
   async sync(projectId: string, jobId: string, caller: SupervisorCaller): Promise<{ dispatch: WorkspaceExecutionSummary; status: { state: string; revision?: number; error?: string; tasks: { taskId: string; state?: string; error?: string }[] }; results: { taskId: string; text: string; truncated?: boolean; reportedModel?: string; assistantAt?: number }[]; resultsUnavailable: boolean; resultsTruncated: boolean; resultError?: string }> {
