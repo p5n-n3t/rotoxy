@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { decryptSecret, encryptSecret, ensureMasterKey, randomToken } from "./crypto.js";
 import type { EncryptedSecret } from "./types.js";
 import type { StateStore } from "./store.js";
+import { createPinnedPublicProviderFetch, type PublicProviderHttpOptions } from "./public-provider-http.js";
 
 export type InferenceProvider = "openai" | "openrouter" | `custom-${string}`;
 export type FixedInferenceProvider = "openai" | "openrouter";
@@ -51,7 +52,7 @@ function validateModels(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > MAX_MODELS || value.some(model => typeof model !== "string" || !MODEL.test(model))) throw new TypeError("model allowlist is invalid");
   return [...new Set(value as string[])];
 }
-function viewOf({ secret: _secret, ...view }: InferenceAccount): InferenceAccountView { return { ...view, allowedModels: [...view.allowedModels] }; }
+function viewOf({ secret: _secret, tokenOrigin: _tokenOrigin, ...view }: InferenceAccount): InferenceAccountView { return { ...view, allowedModels: [...view.allowedModels] }; }
 
 const BLOCKED_HOST = /^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.test)$/i;
 export function validateCustomOrigin(value: unknown): string {
@@ -160,7 +161,7 @@ export class InferenceProviderStore {
     });
   }
 
-  async credentialForRequest(id: string): Promise<{ view: InferenceAccountView; token: string } | undefined> {
+  async credentialForRequest(id: string): Promise<{ view: InferenceAccountView; token: string; origin?: string } | undefined> {
     const doc = await this.read();
     const account = doc.accounts.find(item => item.id === id);
     if (!account) return undefined;
@@ -169,8 +170,8 @@ export class InferenceProviderStore {
     // deliberately makes old credentials unusable until the operator replaces the token.
     const bound = (account as InferenceAccount & { tokenOrigin?: string }).tokenOrigin;
     const currentOrigin = account.provider.startsWith("custom-") ? (doc.customProviders ?? []).find(p => p.id === account.provider)?.origin : INFERENCE_PROVIDER_PRESETS[account.provider as FixedInferenceProvider].origin;
-    if (bound && bound !== currentOrigin) return undefined;
-    return { view: viewOf(account), token: decryptSecret(account.secret, await ensureMasterKey(this.store.keyPath)) };
+    if (account.provider.startsWith("custom-") && (!bound || bound !== currentOrigin)) return undefined;
+    return { view: viewOf(account), token: decryptSecret(account.secret, await ensureMasterKey(this.store.keyPath)), origin: currentOrigin };
   }
 
   async setCooldown(id: string, until: number): Promise<void> {
@@ -188,7 +189,10 @@ export class InferenceProviderError extends Error {
   }
 }
 export interface InferenceProviderOptions {
+  /** Test seam for fixed preset transport only. Custom providers require publicFetch injection explicitly. */
   fetch?: typeof globalThis.fetch;
+  publicFetch?: typeof globalThis.fetch;
+  publicHttp?: PublicProviderHttpOptions;
   timeoutMs?: number;
   maxInflightPerAccount?: number;
   now?: () => number;
@@ -217,6 +221,7 @@ async function responseJson(response: globalThis.Response): Promise<unknown> {
 /** Fixed-origin adapter. It sends each inference at most once and never follows redirects. */
 export class OpenAICompatibleInferenceAdapter {
   private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly publicFetch: typeof globalThis.fetch;
   private readonly timeoutMs: number;
   private readonly maxInflight: number;
   private readonly now: () => number;
@@ -225,6 +230,7 @@ export class OpenAICompatibleInferenceAdapter {
 
   constructor(private readonly accounts: InferenceProviderStore, options: InferenceProviderOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.publicFetch = options.publicFetch ?? createPinnedPublicProviderFetch({ ...options.publicHttp, timeoutMs: options.timeoutMs ?? 60_000 });
     this.timeoutMs = options.timeoutMs ?? 60_000;
     this.maxInflight = options.maxInflightPerAccount ?? 1;
     this.now = options.now ?? Date.now;
@@ -272,13 +278,17 @@ export class OpenAICompatibleInferenceAdapter {
       try {
         let response: globalThis.Response;
         try {
-          const origin = await this.accounts.providerOrigin(request.provider);
+          const custom = request.provider.startsWith("custom-");
+          const origin = custom ? credential.origin : INFERENCE_PROVIDER_PRESETS[request.provider as FixedInferenceProvider].origin;
           if (!origin) throw new InferenceProviderError("no_eligible_account");
-          response = await this.fetchImpl(`${origin.replace(/\/$/, "")}/chat/completions`, {
+          response = await (custom ? this.publicFetch : this.fetchImpl)(`${origin.replace(/\/$/, "")}/chat/completions`, {
             method: "POST", signal: controller.signal, redirect: "error",
             headers: { authorization: `Bearer ${credential.token}`, "content-type": "application/json", accept: "application/json" }, body: encoded,
           });
-        } catch { throw new InferenceProviderError("upstream_ambiguous"); }
+        } catch (caught) {
+          if (caught instanceof Error && caught.message === "response_too_large") throw new InferenceProviderError("response_too_large");
+          throw new InferenceProviderError("upstream_ambiguous");
+        }
         if (!response.ok) {
           await response.body?.cancel().catch(() => undefined);
           if (response.status === 429 || response.status === 402) await this.accounts.setCooldown(selected.id, this.now() + 30_000);
