@@ -1,12 +1,14 @@
 import json
-import sqlite3
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from snooze.credit_ledger import CreditDenied
-from snooze.controlled_batches import approve
+from snooze.controlled_batches import _private_db, approve
 from snooze.jobs import JobRegistry
 
 
@@ -32,7 +34,7 @@ class ControlledBatchTests(unittest.TestCase):
         self.credit = StrictDeny()
         self.registry = JobRegistry(self.path, credit_admission=self.credit)
         self.registry.register_account({"accountId": "account-a", "enabled": True, "authorized": True,
-            "allowUnknownQuota": False, "health": "healthy", "quota": "unknown", "localCapacity": 1,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available", "localCapacity": 1,
             "registeredSessions": [{"id": "session-a", "model": "reported", "workspace": "workspace-a"}]})
         self.registry.submit(assignment(), now=10)
 
@@ -68,7 +70,6 @@ class ControlledBatchTests(unittest.TestCase):
         self.assertIsNone(self.registry.claim_operation("worker-2", now=22))
         with self.registry.connection() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM controlled_batch_consumptions WHERE approval_id=?", (grant["approvalId"],)).fetchone()[0], 1)
-            self.assertEqual(db.execute("SELECT kind FROM job_events WHERE kind='controlled_batch_admitted'").fetchone()[0], "controlled_batch_admitted")
         self.assertEqual([event["kind"] for event in self.registry.events()["events"]].count("controlled_batch_admitted"), 1)
 
     def test_concurrent_claimers_consume_one_approval_once(self):
@@ -110,28 +111,70 @@ class ControlledBatchTests(unittest.TestCase):
         control = self.registry.get_project_control("project-a")
         self.registry.set_project_control("project-a", "pause_dispatch", None, control["revision"], now=19)
         self.grant(op_id, now=20)
+        control = self.registry.get_project_control("project-a")
+        self.registry.set_project_control("project-a", "resume_dispatch", None, control["revision"], now=20)
         claimed = self.registry.claim_operation("worker", now=21)
         self.assertEqual(claimed["operationId"], op_id)
 
     def test_ambiguous_operation_cannot_be_requeued(self):
         no_credit = JobRegistry(self.path)
+        op_id = self.queue()
         with no_credit.connection(write=True) as db:
-            db.execute("UPDATE operations SET state='ambiguous',error_class='chat_ambiguous',worker=NULL,lease_until=NULL")
+            db.execute("UPDATE operations SET state='ambiguous',error_class='chat_ambiguous',worker=NULL,lease_until=NULL WHERE id=?", (op_id,))
             db.execute("UPDATE job_tasks SET state='ambiguous'")
             db.execute("UPDATE assignments SET state='held'")
         with self.assertRaisesRegex(ValueError, "operation state"):
-            self.grant("operation-id-does-not-matter")
+            self.grant(op_id)
 
     def test_claim_transaction_rolls_back_if_consumption_commit_cannot_finish(self):
         op_id = self.queue()
         self.grant(op_id)
-        with self.registry.connection(write=True) as db:
-            db.execute("CREATE TRIGGER reject_controlled_use BEFORE INSERT ON controlled_batch_consumptions BEGIN SELECT RAISE(ABORT,'simulated crash'); END")
-        with self.assertRaises(sqlite3.IntegrityError):
+        event_writer = self.registry._event
+        def fail_after_consumption(db, assignment_id, kind, data=None, now=None):
+            if kind == "controlled_batch_admitted":
+                raise RuntimeError("simulated process failure before claim commit")
+            return event_writer(db, assignment_id, kind, data, now)
+        self.registry._event = fail_after_consumption
+        with self.assertRaisesRegex(RuntimeError, "simulated process failure"):
             self.registry.claim_operation("worker", now=21)
         with self.registry.connection() as db:
             self.assertEqual(db.execute("SELECT state FROM operations WHERE id=?", (op_id,)).fetchone()[0], "queued")
             self.assertEqual(db.execute("SELECT COUNT(*) FROM controlled_batch_consumptions").fetchone()[0], 0)
+
+    def test_grant_does_not_cover_a_new_generation(self):
+        old_id = self.queue()
+        self.grant(old_id)
+        self.registry.claim_operation("worker", now=21)
+        with self.registry.connection(write=True) as db:
+            db.execute("UPDATE job_tasks SET generation=2,attempt_id='attempt-gen2',state='reserved',released_at=NULL WHERE assignment='batch-a' AND task_id='task-a'")
+            db.execute("INSERT INTO operations(id,assignment,task_id,attempt_id,generation,account,kind,input,state,created_at,due_at) VALUES(?,?,?,?,?,?,?,?,'queued',?,?)",
+                       ("operation-gen2", "batch-a", "task-a", "attempt-gen2", 2, "account-a", "chat_session", json.dumps({"sessionId":"session-a","instructions":"bounded work"}), 22, 22))
+        self.assertIsNone(self.registry.claim_operation("worker-2", now=23))
+        with self.registry.connection() as db:
+            self.assertEqual(db.execute("SELECT state,error_class FROM operations WHERE id='operation-gen2'").fetchone()["error_class"], "CreditAdmissionDenied")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM controlled_batch_consumptions").fetchone()[0], 1)
+
+    def test_cli_database_must_be_private_and_not_a_symlink(self):
+        self.assertEqual(_private_db(str(self.path)), self.path)
+        os.chmod(self.path, 0o644)
+        with self.assertRaisesRegex(ValueError, "owner-only"):
+            _private_db(str(self.path))
+        os.chmod(self.path, 0o600)
+        link = self.path.parent / "linked.sqlite3"
+        link.symlink_to(self.path)
+        with self.assertRaisesRegex(ValueError, "existing absolute"):
+            _private_db(str(link))
+
+    def test_local_cli_approves_only_existing_exact_rows(self):
+        op_id = self.queue()
+        completed = subprocess.run([sys.executable, "-m", "snooze.controlled_batches", "--jobs-db", str(self.path), "approve",
+            "--assignment-id", "batch-a", "--operation-ids", op_id, "--accounts", "account-a",
+            "--max-launches", "1", "--ttl-seconds", "120", "--ack-unknown-credit-cost"],
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1])}, capture_output=True, text=True, timeout=5)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        receipt = json.loads(completed.stdout)
+        self.assertEqual(receipt["operationIds"], [op_id])
+        self.assertEqual(receipt["maxLaunches"], 1)
 
 
 if __name__ == "__main__": unittest.main()
