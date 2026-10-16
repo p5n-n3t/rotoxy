@@ -536,9 +536,9 @@ export function renderCodexProfilesPage(profiles: CodexProfile[], snapshots: Cod
   const byId = new Map(snapshots.map((s) => [s.profileId, s]));
   const rows = profiles.map((p) => {
     const snapshot = byId.get(p.id);
-    const status = snapshot?.authMode === "chatgpt" ? `Connected${snapshot.planType ? ` · ${htmlEscape(snapshot.planType)}` : ""}` : "Not verified";
-    const models = snapshot?.models.map((m) => htmlEscape(m.id)).join(", ") || "No model snapshot";
+    const status = !snapshot ? "Not checked" : snapshot.authMode === "chatgpt" ? `ChatGPT sign-in reported · plan ${snapshot.planType ? htmlEscape(snapshot.planType) : "unknown"}` : snapshot.authMode === "other" ? "Other sign-in mode reported" : "Sign-in mode unknown";
+    const models = !snapshot ? "Not refreshed" : snapshot.models.map((m) => htmlEscape(m.id)).join(", ") || "No models reported";
     return `<tr><th scope="row">${htmlEscape(p.label)}</th><td>${status}</td><td>${models}</td><td><form method="post" action="${htmlEscape(action)}"><input type="hidden" name="id" value="${htmlEscape(p.id)}"><label>Rename profile<input name="label" value="${htmlEscape(p.label)}" required maxlength="80"></label><button name="action" value="rename">Save name</button> <button class="secondary" name="action" value="remove">Remove profile</button></form></td></tr>`;
   }).join("");
-  return `<section class="card"><h1>Codex profiles</h1><p>Each profile uses a separate CODEX_HOME. Sign-in requires the user to complete Codex device verification. Removing a profile removes its registry entry and leaves its private CODEX_HOME on disk.</p><table><thead><tr><th>Profile</th><th>Account</th><th>Available models</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No profiles registered</td></tr>'}</tbody></table></section>`;
+  return `<section class="card"><h2>Local Codex profiles</h2><p>Each profile uses a separate CODEX_HOME. Sign-in status, plan type, models, and quota are shown only when reported by the local Codex App Server and are not a live balance. Removing a profile removes its registry entry and leaves its private CODEX_HOME on disk.</p><table><thead><tr><th>Profile</th><th>Sign-in &amp; reported plan</th><th>Reported models</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No profiles yet. Create a profile below to start sign-in.</td></tr>'}</tbody></table></section>`;
 }

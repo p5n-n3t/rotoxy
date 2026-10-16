@@ -37,6 +37,7 @@ test("profile admin controls enforce session and CSRF, scope removals, and keep 
 
     const app = express();
     app.use(createControlPlaneAdminRouter(store, sessions, models, root, codex));
+    app.use("/without-adapter", createControlPlaneAdminRouter(store, sessions, models, root));
     server = app.listen(0, "127.0.0.1");
     await new Promise((resolve) => server.once("listening", resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -66,9 +67,21 @@ test("profile admin controls enforce session and CSRF, scope removals, and keep 
     assert.equal((await models.credentialForRequest(survivor.id)).apiKey, "synthetic-ollama-secret-survive");
 
     const codexHtml = await (await fetch(base + "/admin/codex", { headers: { cookie } })).text();
+    assert.match(codexHtml, /<title>ChatGPT &amp; Codex accounts · ROTOXY<\/title>/);
+    assert.match(codexHtml, /<h1>ChatGPT &amp; Codex accounts<\/h1>/);
+    assert.match(codexHtml, /ChatGPT &amp; Codex accounts<\/a>/);
+    assert.match(codexHtml, /Start ChatGPT device-code sign-in/);
+    assert.match(codexHtml, /learn\.chatgpt\.com\/docs\/app-server#auth-endpoints/);
+    assert.match(codexHtml, /developers\.openai\.com\/siwc/);
+    assert.match(codexHtml, /does not start work, select an account, or promise available plan capacity/);
+    assert.match(codexHtml, /No Claude account provider is implemented/);
     assert.match(codexHtml, /action="\/t2o\/admin\/codex\/action"/);
     assert.match(codexHtml, /name="action" value="rename"/);
     assert.match(codexHtml, /name="action" value="remove"/);
+    const emptyCodexHtml = await (await fetch(base + "/without-adapter/admin/codex", { headers: { cookie } })).text();
+    assert.match(emptyCodexHtml, /Local Codex adapter unavailable/);
+    assert.match(emptyCodexHtml, /ROTOXY_CODEX_BINARY/);
+    assert.match(emptyCodexHtml, /https:\/\/developers\.openai\.com\/siwc/);
     assert.equal((await post("/admin/codex/action", { _csrf: csrf, action: "rename", id: profile.id, label: "Renamed profile" })).status, 303);
     assert.equal((await codex.listProfiles()).find((entry) => entry.id === profile.id).label, "Renamed profile");
     assert.equal((await post("/admin/codex/action", { _csrf: csrf, action: "remove", id: "not-a-profile" })).status, 400);
