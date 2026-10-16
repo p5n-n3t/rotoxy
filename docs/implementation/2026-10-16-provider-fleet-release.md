@@ -22,9 +22,9 @@ Three bounded Oracle advisory jobs completed on ora1, ora3, and ora5 with report
 
 ## Verification and limits
 
-The Python suite passes 356 tests on ora5. The built-in browser verified provider, inference setup, and fleet pages at 1280×720 and 390×844 with no page-level horizontal overflow. These were read-only local fixtures using existing metadata; real configuration writes are covered by isolated tests.
+The TypeScript build and all 429 Node tests pass on ora5, alongside all 356 Python tests. The built-in browser verified provider, inference setup, and fleet pages at 1280×720 and 390×844 with no page-level horizontal overflow. These were read-only local fixtures using existing metadata; real configuration writes are covered by isolated tests.
 
-A desktop Node run exposed a background-test timing failure while RAM/swap were constrained. The test now observes the actual scheduled sync completing instead of repeatedly spawning snapshot commands. The interrupted run remains recorded; final build/Node/package results must be read from the final verification receipt before claiming a clean release. A task-local official Node 26.3.1 ARM64 binary was installed on ora5 after checking its published SHA-256, to run the remaining checks away from the desktop; the global Node/PATH and VM services were not replaced.
+A desktop Node run exposed a background-test timing failure while RAM/swap were constrained. The test now observes the actual scheduled sync completing instead of repeatedly spawning snapshot commands. The interrupted run remains recorded. A fresh isolated build and complete Node run on ora5 passed; package/deployment receipts record their separate checks. A task-local official Node 26.3.1 ARM64 binary was installed on ora5 after checking its published SHA-256, to run the checks away from the memory-constrained desktop; the global Node/PATH and VM services were not replaced.
 
 Remaining work is explicit:
 

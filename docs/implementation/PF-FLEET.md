@@ -15,9 +15,9 @@ Implemented on 2026-10-16 from the `d2e354c3dd11002286b824c3a6733e859815ee29` ba
   "inference_timeout_seconds": 240,
   "hosts": [
     {
-      "id": "ora1",
-      "ip": "100.65.151.42",
-      "ssh_host": "shh-ora1.ziopsyop.tech",
+      "id": "ora-example",
+      "ip": "100.64.0.10",
+      "ssh_host": "ora-example",
       "enabled": true,
       "allowedModels": ["qwen3.5:9b", "tev1:0.8b", "gpt-oss:20b"]
     }
