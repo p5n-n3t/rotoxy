@@ -102,3 +102,29 @@ test("adapter applies provider-specific default and clamped output caps and reje
     error => error instanceof InferenceProviderError && error.code === "invalid_request");
   assert.equal(calls.length, 4, "invalid duplicate cap parameters must not call the provider");
 });
+
+test("custom credentials require origin-bound replacement and never expose origin binding", async t => {
+  const { accounts } = await fixture(t);
+  const provider = await accounts.addCustomProvider("Vendor", "https://api.vendor.example/v1");
+  const account = await accounts.addAccount({ provider: provider.id, label: "Vendor key", token: "synthetic-vendor-token", allowedModels: ["chat-model"] });
+  assert.equal(Object.hasOwn(account, "tokenOrigin"), false);
+  assert.equal(Object.hasOwn((await accounts.listAccounts())[0], "tokenOrigin"), false);
+  assert.equal((await accounts.credentialForRequest(account.id)).origin, "https://api.vendor.example/v1");
+  await accounts.updateCustomProvider(provider.id, "Vendor", "https://new.vendor.example/v1");
+  assert.equal(await accounts.credentialForRequest(account.id), undefined, "an endpoint change cannot move its old bearer token");
+  await accounts.updateAccount(account.id, { token: "synthetic-vendor-token-replaced" });
+  assert.equal((await accounts.credentialForRequest(account.id)).origin, "https://new.vendor.example/v1");
+});
+
+test("custom adapter uses pinned-public transport and rejects redirect without replay", async t => {
+  const { accounts } = await fixture(t);
+  const provider = await accounts.addCustomProvider("Vendor", "https://api.vendor.example/v1");
+  await accounts.addAccount({ provider: provider.id, label: "Vendor account", token: "synthetic-vendor-token", allowedModels: ["chat-model"] });
+  const calls = [];
+  const adapter = new OpenAICompatibleInferenceAdapter(accounts, { publicFetch: async (url, init) => {
+    calls.push([String(url), init.redirect, init.headers.authorization]);
+    return new Response("", { status: 302, headers: { location: "https://evil.example/steal" } });
+  } });
+  await assert.rejects(adapter.complete({ provider: provider.id, model: "chat-model", body: { messages: [{ role: "user", content: "hi" }] } }), error => error.code === "upstream_rejected");
+  assert.deepEqual(calls, [["https://api.vendor.example/v1/chat/completions", "error", "Bearer synthetic-vendor-token"]]);
+});
