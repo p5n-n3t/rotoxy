@@ -29,10 +29,11 @@ test("renders AW records in the shared page shell with real workflow columns and
   assert.match(html, /<title>Agent workspace · ROTOXY<\/title>/);
   assert.match(html, /Agent workspace/);
   assert.match(html, /href="\/token2oauth\/admin\/workspace"/);
-  for (const column of ["Queued", "Working", "Review", "Done"]) assert.match(html, new RegExp(`>${column}<`));
+  for (const column of ["Queued", "Working / blocked", "Review"]) assert.match(html, new RegExp(`>${column}<`));
+  assert.match(html, /Completed &amp; cancelled/);
   assert.match(html, /Runner A/);
   assert.match(html, /gpt-reported \(reported\)/);
-  assert.match(html, /Account acct-a \(reported\)/);
+  assert.match(html, /Account acct-a/);
   assert.match(html, /Blocked task/);
   assert.match(html, /aw-blocked/);
   assert.match(html, /task_claim/);
@@ -89,7 +90,7 @@ test("project mismatch and empty snapshots show honest empty states without fore
   assert.doesNotMatch(mismatch, /Queued task|Runner A/);
   const empty = renderAgentWorkspace({ projectId: "project-a", revision: 0 }, options);
   assert.match(empty, /No participants registered yet/);
-  assert.match(empty, /No queued tasks reported/);
+  assert.match(empty, /No queued, working, blocked, or review tasks reported/);
   assert.match(empty, /No messages in this project snapshot/);
   assert.match(empty, /No artifacts submitted in this project/);
   assert.match(empty, /Participants<\/dt><dd>0/);
@@ -175,4 +176,36 @@ test("bounds optional execution and configured-resource metadata to fifty rows",
   assert.doesNotMatch(html, /bounded-job-50/);
   assert.match(html, /bounded-session-49/);
   assert.doesNotMatch(html, /bounded-session-50/);
+});
+
+test("puts actionable tasks first, archives done work, and keeps secondary records closed", () => {
+  const firstScreen = structuredClone(snapshot);
+  firstScreen.participants = Array.from({ length: 10 }, (_, index) => ({
+    id: index === 0 ? "admin:local" : `client:reviewer-${index}`,
+    label: index === 0 ? "Local orchestrator" : `Reviewer ${index}`,
+    provider: index === 0 ? "local" : "Codex",
+    ...(index === 1 ? { model: "review-model", accountId: "acct-a" } : {}),
+  }));
+  firstScreen.tasks = [
+    ...Array.from({ length: 4 }, (_, index) => ({ id: `review-${index}`, title: `Review ${index}`, description: "Needs collaboration", state: "review", assignee: "client:reviewer-1", dependsOn: [] })),
+    ...Array.from({ length: 5 }, (_, index) => ({ id: `complete-${index}`, title: `Complete ${index}`, description: "Archived", state: "complete", dependsOn: [] })),
+    { id: "cancelled-1", title: "Cancelled work", description: "Archived", state: "cancelled", dependsOn: [] },
+  ];
+  firstScreen.executions = [];
+  const html = renderAgentWorkspace(firstScreen, options);
+  const taskBoard = html.indexOf('<section class="aw-tasks">');
+  assert.ok(taskBoard > html.indexOf('class="aw-metrics"'));
+  assert.ok(taskBoard < html.indexOf('<details class="aw-archive"'));
+  assert.ok(taskBoard < html.indexOf('<details class="aw-participants"'));
+  assert.ok(taskBoard < html.indexOf('<details class="aw-resource-disclosure"'));
+  assert.ok(taskBoard < html.indexOf('<details class="aw-executions aw-executions-compact"'));
+  assert.match(html, /href="#aw-state-done">Done<span class="aw-count">6/);
+  assert.match(html, /<details class="aw-archive" id="aw-state-done"><summary>Completed &amp; cancelled · 6/);
+  assert.match(html, /<details class="aw-executions aw-executions-compact"><summary>Job executions · 0 reported/);
+  assert.match(html, /Codex · review-model \(reported\) · Account acct-a/);
+  assert.doesNotMatch(html, /Model unknown|Account unknown/);
+  assert.match(html, /\.aw-page \[data-refresh-workspace\]\[hidden\]\{display:none!important\}/);
+  assert.match(html, /data-execution-revision=/);
+  assert.match(html, /@media\(max-width:390px\)/);
+  assert.match(html, /\.aw-task-meta\{grid-template-columns:1fr\}/);
 });
