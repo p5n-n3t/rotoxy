@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import ipaddress
 import json
 import os
 import re
@@ -33,7 +34,11 @@ HOSTS = (
 )
 HOST_BY_ID = {host["id"]: host for host in HOSTS}
 APPROVED_MODELS = ("qwen3.5:9b", "tev1:0.8b", "gpt-oss:20b")
+DEFAULT_HOST_MODELS = APPROVED_MODELS
 DEFAULT_MODEL = "qwen3.5:9b"
+HOST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}\Z")
+SSH_ALIAS_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
+MODEL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+/-]{0,159}\Z")
 MAX_TEXT_CHARS = 4000
 MAX_RESULT_BYTES = 16 * 1024
 MAX_PENDING = 100
@@ -49,6 +54,65 @@ SOURCE_RE = re.compile(r"[A-Za-z0-9_.:@/-]{1,128}\Z")
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 
 
+def default_config() -> dict[str, Any]:
+    return {"version": 1, "default_model": DEFAULT_MODEL, "max_context": 4096,
+            "max_predict": 512, "max_total_running": 3, "max_running_per_host": 1,
+            "inference_timeout_seconds": INFERENCE_TIMEOUT}
+
+
+def validate_config(config: Any) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    """Validate the trusted private v1/v2 fleet file without widening its policy."""
+    defaults = default_config()
+    if type(config) is not dict:
+        raise PoolError("unsupported_config")
+    if config == defaults:
+        hosts = tuple({**host, "enabled": True, "allowedModels": list(DEFAULT_HOST_MODELS)} for host in HOSTS)
+        return defaults, hosts
+    base_keys = set(defaults) | {"hosts"}
+    if set(config) != base_keys or config.get("version") != 2:
+        raise PoolError("unsupported_config")
+    for key, expected in defaults.items():
+        if key == "version":
+            continue
+        if type(config.get(key)) is not type(expected) or config.get(key) != expected:
+            raise PoolError("unsupported_config")
+    raw_hosts = config.get("hosts")
+    if type(raw_hosts) is not list or not 1 <= len(raw_hosts) <= 32:
+        raise PoolError("unsupported_config")
+    hosts, ids, ips, aliases = [], set(), set(), set()
+    for raw in raw_hosts:
+        if type(raw) is not dict or set(raw) != {"id", "ip", "ssh_host", "enabled", "allowedModels"}:
+            raise PoolError("unsupported_config")
+        host_id, ip, alias = raw["id"], raw["ip"], raw["ssh_host"]
+        if not isinstance(host_id, str) or not HOST_ID_RE.fullmatch(host_id):
+            raise PoolError("unsupported_config")
+        try:
+            parsed_ip = ipaddress.ip_address(ip)
+        except (ValueError, TypeError):
+            raise PoolError("unsupported_config") from None
+        if parsed_ip.version != 4 or parsed_ip not in ipaddress.ip_network("100.64.0.0/10"):
+            raise PoolError("unsupported_config")
+        if not isinstance(alias, str) or not SSH_ALIAS_RE.fullmatch(alias) or ".." in alias:
+            raise PoolError("unsupported_config")
+        if type(raw["enabled"]) is not bool:
+            raise PoolError("unsupported_config")
+        models = raw["allowedModels"]
+        if type(models) is not list or len(models) > 64 or (raw["enabled"] and not models):
+            raise PoolError("unsupported_config")
+        if any(not isinstance(model, str) or not MODEL_NAME_RE.fullmatch(model) for model in models):
+            raise PoolError("unsupported_config")
+        if len(set(models)) != len(models) or host_id in ids or str(parsed_ip) in ips or alias in aliases:
+            raise PoolError("unsupported_config")
+        ids.add(host_id); ips.add(str(parsed_ip)); aliases.add(alias)
+        hosts.append({"id": host_id, "ip": str(parsed_ip), "ssh_host": alias,
+                      "enabled": raw["enabled"], "allowedModels": list(models)})
+    enabled_models = {model for host in hosts if host["enabled"] for model in host["allowedModels"]}
+    if not enabled_models or config["default_model"] not in enabled_models:
+        raise PoolError("unsupported_config")
+    normalized = {**defaults, "version": 2, "hosts": hosts}
+    return normalized, tuple(hosts)
+
+
 class PoolError(RuntimeError):
     """An expected, safe-to-display pool error."""
 
@@ -60,6 +124,7 @@ class HostCapability:
     host_id: str
     models: frozenset[str]
     healthy: bool
+    enabled: bool = True
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -119,18 +184,21 @@ class SSHOllamaTransport:
         "\nexcept urllib.error.HTTPError as e:\n print(json.dumps({'_http_error':int(e.code)}))"
     )
 
-    def __init__(self, *, timeout: int = INFERENCE_TIMEOUT):
+    def __init__(self, *, timeout: int = INFERENCE_TIMEOUT, hosts: tuple[dict[str, Any], ...] = HOSTS):
         self.timeout = timeout
+        self.hosts = {host["id"]: host for host in hosts}
 
     @staticmethod
-    def _host(host_id: str) -> dict[str, str]:
+    def _host(host_id: str, hosts: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
         try:
-            return HOST_BY_ID[host_id]
+            return (HOST_BY_ID if hosts is None else hosts)[host_id]
         except KeyError as exc:
             raise PoolError("host_not_allowed") from exc
 
     def _ssh(self, host_id: str, remote_script: str, payload: bytes = b"", *, timeout: int):
-        host = self._host(host_id)
+        host = self._host(host_id, self.hosts)
+        if not host.get("enabled", True):
+            raise PoolError("host_disabled")
         ssh = shutil.which("ssh")
         if not ssh:
             raise PoolError("ssh_unavailable")
@@ -138,7 +206,7 @@ class SSHOllamaTransport:
         argv = [
             ssh, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
             "-o", f"HostName={host['ip']}", "-o", f"HostKeyAlias={key_alias}",
-            "-o", "ConnectTimeout=10", host_id, "python3", "-c", shlex.quote(remote_script),
+                    "-o", "ConnectTimeout=10", host_id, "python3", "-c", shlex.quote(remote_script),
         ]
         try:
             proc = subprocess.run(argv, input=payload, capture_output=True, timeout=timeout, check=False)
@@ -214,16 +282,19 @@ class OraclePool:
         self.base = self.config_path.parent if config_path else base
         _private_directory(self.base)
         _private_directory(self.db_path.parent)
-        self._ensure_config()
-        self.transport = transport or SSHOllamaTransport()
+        self.config, self.hosts = self._ensure_config()
+        self.host_by_id = {host["id"]: host for host in self.hosts}
+        self.available_models = frozenset(model for host in self.hosts
+                                          if host["enabled"] for model in host["allowedModels"])
+        self.transport = transport or SSHOllamaTransport(hosts=self.hosts)
+        if isinstance(self.transport, SSHOllamaTransport):
+            self.transport.hosts = self.host_by_id
         self._identity = _process_identity()
         self._init_db()
         self._recover_stale_claims()
 
-    def _ensure_config(self) -> None:
-        defaults = {"version": 1, "default_model": DEFAULT_MODEL, "max_context": 4096,
-                    "max_predict": 512, "max_total_running": 3, "max_running_per_host": 1,
-                    "inference_timeout_seconds": INFERENCE_TIMEOUT}
+    def _ensure_config(self) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+        defaults = default_config()
         if not self.config_path.exists():
             self.config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(self.config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -241,8 +312,8 @@ class OraclePool:
             raise
         except (OSError, json.JSONDecodeError) as exc:
             raise PoolError("config_unavailable") from exc
-        if config != defaults:
-            raise PoolError("unsupported_config")
+        normalized, hosts = validate_config(config)
+        return normalized, hosts
 
     def _connect(self):
         db = sqlite3.connect(self.db_path, timeout=20, isolation_level=None,
@@ -279,7 +350,7 @@ class OraclePool:
               at REAL NOT NULL, data TEXT NOT NULL);
             """)
             db.execute("PRAGMA journal_mode=DELETE")
-            for host in HOSTS:
+            for host in self.hosts:
                 db.execute("INSERT OR IGNORE INTO pool_hosts(id) VALUES(?)", (host["id"],))
         os.chmod(self.db_path, 0o600)
 
@@ -313,8 +384,8 @@ class OraclePool:
             raise ValueError(f"Task text must contain 1 to {MAX_TEXT_CHARS} characters")
         if any(ord(char) == 0 for char in text):
             raise ValueError("Task text contains an invalid character")
-        if model not in APPROVED_MODELS:
-            raise ValueError("Model is not in the approved catalog")
+        if model not in self.available_models:
+            raise ValueError("Model is not available on an enabled host")
         if job_id is not None and (not isinstance(job_id, str) or not TASK_ID_RE.fullmatch(job_id)):
             raise ValueError("Invalid task ID")
         if source is not None and (not isinstance(source, str) or not SOURCE_RE.fullmatch(source)):
@@ -439,8 +510,10 @@ class OraclePool:
 
     def catalog(self, *, refresh: bool = False) -> dict[str, Any]:
         if refresh:
-            for host in HOSTS:
+            for host in self.hosts:
                 host_id = host["id"]
+                if not host["enabled"]:
+                    continue
                 try:
                     names = self.transport.catalog(host_id)
                     error = None
@@ -460,9 +533,13 @@ class OraclePool:
                     db.commit()
         with self._connect() as db:
             rows = db.execute("SELECT id,models,updated,error_code,assigned FROM pool_hosts ORDER BY id").fetchall()
-        return {"hosts": [{"id": r["id"], "ip": HOST_BY_ID[r["id"]]["ip"], "models": json.loads(r["models"]),
+        return {"hosts": [{"id": r["id"], "ip": self.host_by_id[r["id"]]["ip"],
+                            "enabled": self.host_by_id[r["id"]]["enabled"],
+                            "allowedModels": self.host_by_id[r["id"]]["allowedModels"],
+                            "models": [m for m in json.loads(r["models"])
+                                       if m in self.host_by_id[r["id"]]["allowedModels"]],
                             "updated": r["updated"], "error_code": r["error_code"], "assigned": r["assigned"]}
-                           for r in rows]}
+                           for r in rows if r["id"] in self.host_by_id]}
 
     def _claim(self, limit: int = 3) -> list[dict[str, Any]]:
         pid, boot, start = self._identity
@@ -471,29 +548,33 @@ class OraclePool:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             running = db.execute("SELECT COUNT(*) FROM pool_tasks WHERE status='running'").fetchone()[0]
-            capacity = min(3, limit, 3 - running)
+            enabled_hosts = [host for host in self.hosts if host["enabled"]]
+            maximum = min(self.config["max_total_running"], len(enabled_hosts))
+            capacity = min(maximum, limit, maximum - running)
             if capacity <= 0:
                 db.commit()
                 return []
             host_rows = db.execute("SELECT id,models,assigned,error_code FROM pool_hosts").fetchall()
             host_map = {row["id"]: HostCapability(row["id"], frozenset(json.loads(row["models"])),
-                         row["error_code"] is None) for row in host_rows}
+                         row["error_code"] is None, self.host_by_id.get(row["id"], {}).get("enabled", False))
+                        for row in host_rows if row["id"] in self.host_by_id}
             assigned_map = {row["id"]: row["assigned"] for row in host_rows}
             candidates = db.execute("SELECT id,text,model,source FROM pool_tasks WHERE status='queued' ORDER BY created,id LIMIT ?", (MAX_PENDING,)).fetchall()
             cursor_row = db.execute("SELECT value FROM pool_meta WHERE key='round_robin_cursor'").fetchone()
-            cursor = cursor_row[0] if cursor_row else HOSTS[-1]["id"]
+            cursor = cursor_row[0] if cursor_row else (enabled_hosts[-1]["id"] if enabled_hosts else "")
             for task in candidates:
                 if len(claimed) >= capacity:
                     break
                 busy = {row[0] for row in db.execute("SELECT DISTINCT assigned_host FROM pool_tasks WHERE status='running'")}
-                order = [h["id"] for h in HOSTS]
+                order = [h["id"] for h in enabled_hosts]
                 try:
                     pivot = order.index(cursor)
                     order = order[pivot + 1:] + order[:pivot + 1]
                 except ValueError:
                     pass
-                eligible = [h for h in order if h not in busy and host_map[h].healthy
-                            and task["model"] in host_map[h].models]
+                eligible = [h for h in order if h in host_map and h not in busy and host_map[h].enabled
+                            and host_map[h].healthy and task["model"] in host_map[h].models
+                            and task["model"] in self.host_by_id[h]["allowedModels"]]
                 if not eligible:
                     continue
                 # Assigned count is the durable fair-share score; round-robin order
@@ -602,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
     source_group = submit.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--file", help="read task text from file; use - for stdin")
     source_group.add_argument("--stdin", action="store_true", help="read task text from stdin")
-    submit.add_argument("--model", choices=APPROVED_MODELS, default=DEFAULT_MODEL)
+    submit.add_argument("--model", default=DEFAULT_MODEL)
     submit.add_argument("--id")
     submit.add_argument("--source")
     batch = sub.add_parser("submit-batch", help="atomically queue independent tasks; never runs inference")

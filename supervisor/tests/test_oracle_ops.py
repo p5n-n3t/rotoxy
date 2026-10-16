@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from snooze.oracle_ops import HOST_IDS, load_snapshot
-from snooze.oracle_pool import APPROVED_MODELS, DEFAULT_MODEL, OraclePool
+from snooze.oracle_pool import APPROVED_MODELS, DEFAULT_MODEL, HOSTS, OraclePool
 
 
 class FakeTransport:
@@ -60,6 +60,14 @@ class OracleOpsTests(unittest.TestCase):
             self.pool._event(db, row["id"], status, {"status": status, "model": model, "host": host,
                             "source": "owner-secret-source", "error_code": None}, now)
 
+    def _write_v2(self, path, hosts):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": 2, "default_model": DEFAULT_MODEL, "max_context": 4096,
+                                    "max_predict": 512, "max_total_running": 3,
+                                    "max_running_per_host": 1, "inference_timeout_seconds": 240,
+                                    "hosts": hosts}), encoding="utf-8")
+        path.chmod(0o600)
+
     def test_snapshot_uses_only_fixed_hosts_cached_catalog_and_observed_rows(self):
         self.pool.catalog(refresh=True)
         task = self.pool.submit("sensitive prompt text", job_id="caller-hash:private-task")
@@ -98,6 +106,32 @@ class OracleOpsTests(unittest.TestCase):
         self.assertFalse(missing["available"])
         self.assertIsNone(missing["summary"]["totalTasks"])
         self.assertFalse(missing_db.exists())
+
+    def test_snapshot_reads_fourth_configured_host_without_fixed_sql_slots(self):
+        hosts = [{**host, "enabled": True, "allowedModels": list(APPROVED_MODELS)} for host in HOSTS]
+        hosts.append({"id": "ora7", "ip": "100.68.1.7", "ssh_host": "shh-ora7.ziopsyop.tech",
+                      "enabled": True, "allowedModels": [DEFAULT_MODEL]})
+        config_path = self.root / "four-host" / "config.json"
+        db_path = config_path.parent / "queue.sqlite3"
+        self._write_v2(config_path, hosts)
+        pool = OraclePool(config_path, db_path, self.transport)
+        pool.catalog(refresh=True)
+        snapshot = load_snapshot(config_path, db_path)
+        self.assertEqual([row["host"] for row in snapshot["hosts"]][:4], ["ora1", "ora3", "ora5", "ora7"])
+        self.assertTrue(next(row for row in snapshot["hosts"] if row["host"] == "ora7")["configured"])
+
+    def test_removed_host_history_remains_visible_and_is_marked_unconfigured(self):
+        self._insert_task("removed-host-task", "complete", "ora3", model="gpt-oss:20b", eval_tokens=5)
+        only_ora1 = [{"id": "ora1", "ip": "100.65.151.42", "ssh_host": "shh-ora1.ziopsyop.tech",
+                      "enabled": True, "allowedModels": list(APPROVED_MODELS)}]
+        self._write_v2(self.config_path, only_ora1)
+        snapshot = load_snapshot(self.config_path, self.db_path)
+        historical = next(row for row in snapshot["hosts"] if row["host"] == "ora3")
+        self.assertFalse(historical["configured"])
+        self.assertEqual(historical["assignedTasks"], 1)
+        task = next(row for row in snapshot["tasks"]["items"] if row["model"] == "gpt-oss:20b")
+        self.assertEqual(task["assignedHost"], "ora3")
+        self.assertIn("ora3", {row["host"] for row in snapshot["summary"]["assignmentDistribution"]})
 
     def test_task_and_event_pages_are_bounded_and_paged(self):
         for index in range(3):

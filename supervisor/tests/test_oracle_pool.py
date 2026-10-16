@@ -115,6 +115,68 @@ class OraclePoolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.pool.submit("bounded task", model="unapproved-model")
 
+    def _fleet_config(self, hosts):
+        return {"version": 2, "default_model": DEFAULT_MODEL, "max_context": 4096,
+                "max_predict": 512, "max_total_running": 3, "max_running_per_host": 1,
+                "inference_timeout_seconds": 240, "hosts": hosts}
+
+    def _new_fleet(self, hosts, name="fleet"):
+        root = self.root / name
+        root.mkdir(parents=True, exist_ok=True)
+        config = root / "config.json"
+        config.write_text(json.dumps(self._fleet_config(hosts)), encoding="utf-8")
+        config.chmod(0o600)
+        return OraclePool(config, root / "queue.sqlite3", FakeTransport())
+
+    def test_v2_fourth_host_joins_catalog_and_fair_dispatch(self):
+        hosts = [{**host, "enabled": True, "allowedModels": list(APPROVED_MODELS)} for host in HOSTS]
+        hosts.append({"id": "ora7", "ip": "100.68.1.7", "ssh_host": "shh-ora7.ziopsyop.tech",
+                      "enabled": True, "allowedModels": [DEFAULT_MODEL]})
+        pool = self._new_fleet(hosts)
+        pool.catalog(refresh=True)
+        for i in range(4):
+            pool.submit(f"fourth host task {i}", job_id=f"fleet:{i}")
+        self.assertEqual(pool.run_once()["claimed"], 3)
+        self.assertEqual(pool.run_once()["claimed"], 1)
+        self.assertIn("ora7", {row["id"] for row in pool.catalog()["hosts"]})
+        self.assertIn(("ora7", DEFAULT_MODEL, "fourth host task 3"), pool.transport.calls)
+
+    def test_disabled_host_is_not_probed_or_selected_for_new_dispatch(self):
+        hosts = [{**host, "enabled": host["id"] != "ora3", "allowedModels": list(APPROVED_MODELS)} for host in HOSTS]
+        pool = self._new_fleet(hosts, "disabled")
+        pool.catalog(refresh=True)
+        for i in range(3):
+            pool.submit(f"disabled host task {i}", job_id=f"disabled:{i}")
+        outcome = pool.run_once()
+        self.assertEqual(outcome["claimed"], 2)
+        self.assertNotIn("ora3", {row["host"] for row in outcome["completed"]})
+        disabled = next(row for row in pool.catalog()["hosts"] if row["id"] == "ora3")
+        self.assertFalse(disabled["enabled"])
+
+    def test_per_host_allowed_models_are_enforced_at_claim(self):
+        hosts = [{**host, "enabled": True,
+                  "allowedModels": ["gpt-oss:20b"] if host["id"] == "ora1" else
+                                   [DEFAULT_MODEL] if host["id"] == "ora3" else ["gpt-oss:20b"]}
+                 for host in HOSTS]
+        pool = self._new_fleet(hosts, "model-policy")
+        pool.catalog(refresh=True)
+        pool.submit("route gpt model", model="gpt-oss:20b", job_id="model:gpt")
+        pool.submit("route qwen model", model=DEFAULT_MODEL, job_id="model:qwen")
+        outcome = pool.run_once()
+        assignments = {row["id"]: row["host"] for row in outcome["completed"]}
+        self.assertEqual(assignments["model:gpt"], "ora1")
+        self.assertEqual(assignments["model:qwen"], "ora3")
+
+    def test_v2_rejects_invalid_tailnet_ip_alias_host_and_model(self):
+        host = {"id": "ora9", "ip": "100.68.1.9", "ssh_host": "shh-ora9.ziopsyop.tech",
+                "enabled": True, "allowedModels": [DEFAULT_MODEL]}
+        for field, invalid in (("ip", "127.0.0.1"), ("ssh_host", "ora9;touch /tmp/pwned"),
+                               ("id", "ora9;bad"), ("allowedModels", ["qwen ;bad"])):
+            bad = dict(host)
+            bad[field] = invalid
+            with self.subTest(field=field), self.assertRaises(PoolError):
+                self._new_fleet([bad], f"invalid-{field}")
+
     def test_ssh_transport_uses_only_pinned_strict_host_and_payload_stdin(self):
         transport = SSHOllamaTransport()
         with patch("snooze.oracle_pool.shutil.which", return_value="/usr/bin/ssh"), patch(
