@@ -51,13 +51,19 @@ def _connect(path):
         state TEXT NOT NULL, remote_state TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         PRIMARY KEY(project_id,client_id,job_id), UNIQUE(project_id,client_id,idempotency_key),
         UNIQUE(project_id,remote_job_id))""")
-    columns = {row["name"] for row in db.execute("PRAGMA table_info(workspace_execution_bindings)")}
-    if "settled" not in columns:
-        db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN settled INTEGER NOT NULL DEFAULT 0")
-    if "last_polled_at" not in columns:
-        db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN last_polled_at INTEGER")
-    if "lease_until" not in columns:
-        db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0")
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(workspace_execution_bindings)")}
+        if "settled" not in columns:
+            db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN settled INTEGER NOT NULL DEFAULT 0")
+        if "last_polled_at" not in columns:
+            db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN last_polled_at INTEGER")
+        if "lease_until" not in columns:
+            db.execute("ALTER TABLE workspace_execution_bindings ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0")
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
     db.execute("CREATE INDEX IF NOT EXISTS workspace_execution_bindings_project ON workspace_execution_bindings(project_id,updated_at DESC)")
     db.execute("CREATE INDEX IF NOT EXISTS workspace_execution_reconciliation ON workspace_execution_bindings(settled,lease_until,last_polled_at,created_at)")
     # Older checkpoint bindings remain read-only sync targets under their
