@@ -1,0 +1,9 @@
+# Private gateway inventory implementation
+
+Implemented on `codex/rotoxy-private-services-20261016` from `origin/main` at `37741f1ad7161f4ff22681f215fc3d3f8fa67d9b`.
+
+`createPrivateServiceAdminRouter(store, sessions, options)` provides the owner-authenticated `/admin/services` page and POST actions. The root server should mount the returned router under its configured base path and add the Private services navigation link. Default inventory entries are LiteLLM on the approved `ora3` fleet ID and the desktop loopback listener; both start with probe status `unknown`. Opening the page only reads inventory.
+
+The Python bridge keeps the registry under the local state directory by default, with owner-only directory/file modes, an exclusive lock, opaque revision checks, pre-change backups, and atomic replacement. LiteLLM host IDs must exist in the validated Oracle fleet configuration; the HTTP request cannot supply an address, URL, SSH alias, or command. The explicit Probe action uses the fleet's validated IP/SSH alias and fixed remote Python that performs bounded GETs to `127.0.0.1:4000/health/liveliness` and `/v1/models`. Reported model IDs are displayed as aliases only. The desktop entry performs a bounded local TCP reachability check to `127.0.0.1:2026`.
+
+There are no service restarts, edits to fleet configuration, model installs, inference requests, or MCP tool invocations. `supervisor/tests/test_private_services.py` covers registry revisions/backups, approved-host enforcement, fixed probe behavior, alias bounds, and arbitrary probe-field rejection. `test/private-service-admin.test.mjs` covers login/CSRF gates, no probe-on-open, route input rejection, and explicit probe bridge arguments. Python tests pass locally. Node/TypeScript checks could not run in this checkout because `node_modules` and `tsc` are absent; the router HTTP test remains unexecuted here. Root integration and browser verification remain pending.
