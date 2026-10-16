@@ -5,7 +5,8 @@ import { decryptSecret, encryptSecret, ensureMasterKey, randomToken } from "./cr
 import type { EncryptedSecret } from "./types.js";
 import type { StateStore } from "./store.js";
 
-export type InferenceProvider = "openai" | "openrouter";
+export type InferenceProvider = "openai" | "openrouter" | `custom-${string}`;
+export type FixedInferenceProvider = "openai" | "openrouter";
 export const INFERENCE_PROVIDER_PRESETS: Readonly<Record<InferenceProvider, { origin: string; label: string }>> = Object.freeze({
   openai: { origin: "https://api.openai.com/v1", label: "OpenAI" },
   openrouter: { origin: "https://openrouter.ai/api/v1", label: "OpenRouter" },
@@ -20,8 +21,9 @@ export interface InferenceAccountView {
   createdAt: number;
   cooldownUntil?: number;
 }
-interface InferenceAccount extends InferenceAccountView { secret: EncryptedSecret }
-interface InferenceDocument { version: 1; accounts: InferenceAccount[] }
+interface InferenceAccount extends InferenceAccountView { secret: EncryptedSecret; tokenOrigin?: string }
+export interface CustomInferenceProvider { id: `custom-${string}`; label: string; origin: string }
+interface InferenceDocument { version: 1; accounts: InferenceAccount[]; customProviders?: CustomInferenceProvider[] }
 export interface AddInferenceAccount {
   provider: InferenceProvider;
   label: string;
@@ -40,7 +42,7 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
 const LABEL = /^[^\u0000-\u001f\u007f]{1,80}$/;
 
-function isProvider(value: unknown): value is InferenceProvider { return value === "openai" || value === "openrouter"; }
+function isProvider(value: unknown): value is InferenceProvider { return value === "openai" || value === "openrouter" || typeof value === "string" && /^custom-[A-Za-z0-9_-]{24}$/.test(value); }
 function validToken(value: unknown): value is string {
   return typeof value === "string" && Buffer.byteLength(value, "utf8") >= 8 && Buffer.byteLength(value, "utf8") <= MAX_TOKEN_BYTES && !/[\r\n\0]/.test(value);
 }
@@ -51,6 +53,15 @@ function validateModels(value: unknown): string[] {
 }
 function viewOf({ secret: _secret, ...view }: InferenceAccount): InferenceAccountView { return { ...view, allowedModels: [...view.allowedModels] }; }
 
+const BLOCKED_HOST = /^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.test)$/i;
+export function validateCustomOrigin(value: unknown): string {
+  if (typeof value !== "string" || value.length > 300) throw new TypeError("provider origin is invalid");
+  let url: URL;
+  try { url = new URL(value); } catch { throw new TypeError("provider origin is invalid"); }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.port && url.port !== "443" || BLOCKED_HOST.test(url.hostname) || url.hostname.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}$/.test(url.hostname) || /[\\\0]/.test(url.pathname)) throw new TypeError("provider origin is invalid");
+  return `${url.origin}${url.pathname.replace(/\/$/, "")}`;
+}
+
 /** Encrypted credentials for the two fixed external OpenAI-compatible presets. */
 export class InferenceProviderStore {
   private readonly file: string;
@@ -59,7 +70,7 @@ export class InferenceProviderStore {
   private async read(): Promise<InferenceDocument> {
     try {
       const doc = JSON.parse(await readFile(this.file, "utf8")) as InferenceDocument;
-      if (doc.version !== 1 || !Array.isArray(doc.accounts) || doc.accounts.length > MAX_ACCOUNTS) throw new Error("inference provider store is invalid");
+      if (doc.version !== 1 || !Array.isArray(doc.accounts) || doc.accounts.length > MAX_ACCOUNTS || doc.customProviders !== undefined && (!Array.isArray(doc.customProviders) || doc.customProviders.length > 50)) throw new Error("inference provider store is invalid");
       return doc;
     } catch (caught: any) {
       if (caught?.code === "ENOENT") return structuredClone(EMPTY);
@@ -87,16 +98,33 @@ export class InferenceProviderStore {
   }
 
   async listAccounts(): Promise<InferenceAccountView[]> { return (await this.read()).accounts.map(viewOf); }
+  async listCustomProviders(): Promise<CustomInferenceProvider[]> { return structuredClone((await this.read()).customProviders ?? []); }
+  async addCustomProvider(label: string, origin: string): Promise<CustomInferenceProvider> {
+    if (!validLabel(label)) throw new TypeError("provider label is invalid");
+    const safeOrigin = validateCustomOrigin(origin);
+    return this.mutate(doc => { doc.customProviders ??= []; if (doc.customProviders.length >= 50) throw new Error("provider limit reached"); const p = { id: `custom-${randomBytes(12).toString("hex")}` as `custom-${string}`, label, origin: safeOrigin }; doc.customProviders.push(p); return p; });
+  }
+  async updateCustomProvider(id: string, label: string, origin: string): Promise<CustomInferenceProvider> {
+    if (!/^custom-[A-Za-z0-9_-]{24}$/.test(id) || !validLabel(label)) throw new TypeError("provider update is invalid");
+    const safeOrigin = validateCustomOrigin(origin);
+    return this.mutate(doc => { const p = (doc.customProviders ?? []).find(x => x.id === id); if (!p) throw new Error("provider not found"); p.label = label; p.origin = safeOrigin; return p; });
+  }
+  async removeCustomProvider(id: string): Promise<boolean> {
+    return this.mutate(doc => { if (doc.accounts.some(a => a.provider === id)) throw new Error("remove provider accounts first"); const i = (doc.customProviders ?? []).findIndex(x => x.id === id); if (i < 0) return false; doc.customProviders!.splice(i, 1); return true; });
+  }
+  async providerOrigin(id: InferenceProvider): Promise<string | undefined> { if (id === "openai" || id === "openrouter") return INFERENCE_PROVIDER_PRESETS[id].origin; return (await this.read()).customProviders?.find(p => p.id === id)?.origin; }
 
   async addAccount(input: AddInferenceAccount): Promise<InferenceAccountView> {
     if (!input || !isProvider(input.provider) || !validLabel(input.label) || !validToken(input.token) ||
         input.enabled !== undefined && typeof input.enabled !== "boolean") throw new TypeError("inference provider account is invalid");
     const allowedModels = validateModels(input.allowedModels ?? []);
     return this.mutate(async doc => {
+      if (input.provider.startsWith("custom-") && !(doc.customProviders ?? []).some(p => p.id === input.provider)) throw new TypeError("provider is invalid");
       if (doc.accounts.length >= MAX_ACCOUNTS) throw new Error("inference provider account limit reached");
       const account: InferenceAccount = {
         id: randomToken(12), provider: input.provider, label: input.label, enabled: input.enabled ?? true,
         allowedModels, createdAt: Date.now(), secret: encryptSecret(input.token, await ensureMasterKey(this.store.keyPath)),
+        tokenOrigin: input.provider.startsWith("custom-") ? doc.customProviders!.find(p => p.id === input.provider)!.origin : INFERENCE_PROVIDER_PRESETS[input.provider as FixedInferenceProvider].origin,
       };
       doc.accounts.push(account);
       return viewOf(account);
@@ -115,7 +143,10 @@ export class InferenceProviderStore {
       if (patch.label !== undefined) account.label = patch.label;
       if (allowedModels !== undefined) account.allowedModels = allowedModels;
       if (patch.enabled !== undefined) account.enabled = patch.enabled;
-      if (patch.token !== undefined) account.secret = encryptSecret(patch.token, await ensureMasterKey(this.store.keyPath));
+      if (patch.token !== undefined) {
+        account.secret = encryptSecret(patch.token, await ensureMasterKey(this.store.keyPath));
+        account.tokenOrigin = account.provider.startsWith("custom-") ? doc.customProviders?.find(p => p.id === account.provider)?.origin : INFERENCE_PROVIDER_PRESETS[account.provider as FixedInferenceProvider].origin;
+      }
       return viewOf(account);
     });
   }
@@ -130,8 +161,15 @@ export class InferenceProviderStore {
   }
 
   async credentialForRequest(id: string): Promise<{ view: InferenceAccountView; token: string } | undefined> {
-    const account = (await this.read()).accounts.find(item => item.id === id);
+    const doc = await this.read();
+    const account = doc.accounts.find(item => item.id === id);
     if (!account) return undefined;
+    if (account.provider.startsWith("custom-") && !(doc.customProviders ?? []).some(p => p.id === account.provider)) return undefined;
+    // Existing account ciphertext is bound to the origin when created; changing an endpoint
+    // deliberately makes old credentials unusable until the operator replaces the token.
+    const bound = (account as InferenceAccount & { tokenOrigin?: string }).tokenOrigin;
+    const currentOrigin = account.provider.startsWith("custom-") ? (doc.customProviders ?? []).find(p => p.id === account.provider)?.origin : INFERENCE_PROVIDER_PRESETS[account.provider as FixedInferenceProvider].origin;
+    if (bound && bound !== currentOrigin) return undefined;
     return { view: viewOf(account), token: decryptSecret(account.secret, await ensureMasterKey(this.store.keyPath)) };
   }
 
@@ -234,8 +272,9 @@ export class OpenAICompatibleInferenceAdapter {
       try {
         let response: globalThis.Response;
         try {
-          const origin = INFERENCE_PROVIDER_PRESETS[request.provider].origin;
-          response = await this.fetchImpl(`${origin}/chat/completions`, {
+          const origin = await this.accounts.providerOrigin(request.provider);
+          if (!origin) throw new InferenceProviderError("no_eligible_account");
+          response = await this.fetchImpl(`${origin.replace(/\/$/, "")}/chat/completions`, {
             method: "POST", signal: controller.signal, redirect: "error",
             headers: { authorization: `Bearer ${credential.token}`, "content-type": "application/json", accept: "application/json" }, body: encoded,
           });
