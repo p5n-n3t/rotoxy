@@ -228,8 +228,8 @@ def load_snapshot(config_path: str | Path, db_path: str | Path, *, limit: int = 
                                "at": _number(row["at"]), "status": data.get("status") if data.get("status") in STATUSES else None,
                                "host": host, "model": model, "actualModel": actual,
                                "errorCode": _safe_error(data.get("error_code"))})
-            available_models = {model for host in configured_hosts if host["enabled"]
-                                for model in host["allowedModels"]}
+            available_models = {model for host in hosts if host["configured"] and host["enabled"]
+                                for model in host["models"]}
             return {
                 "available": True,
                 "hosts": hosts,
