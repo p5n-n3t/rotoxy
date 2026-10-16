@@ -1,4 +1,5 @@
-import { AgentWorkspaceError, AW_TOOL_DEFINITIONS, isAgentWorkspaceToolName, awRequiredScope, type AgentWorkspaceService } from "./agent-workspace.js";
+import { AgentWorkspaceError, ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS, isAgentWorkspaceToolName, awRequiredScope, type AgentWorkspaceService } from "./agent-workspace.js";
+import { isWorkspaceExecutionToolName, WorkspaceExecutionError } from "./workspace-execution.js";
 import type { SupervisorBackend } from "./supervisor-api.js";
 import { OracleTools, OracleToolError, ORACLE_TOOL_DEFINITIONS, isOracleToolName, oracleToolRequiredScope } from "./oracle-tools.js";
 import { Readable, Transform, pipeline } from "node:stream";
@@ -562,6 +563,16 @@ export class McpProxy {
     if (!this.workspace?.backend?.authorizeWorkspace) throw new SupervisorUnavailable();
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new JobInputError("invalid workspace arguments");
     const args = raw as Record<string, unknown>;
+    if (isWorkspaceExecutionToolName(name)) {
+      const allowed = name === "workspace_dispatch"
+        ? ["schemaVersion", "jobId", "idempotencyKey", "projectId", "eligibleAccountIds", "scheduling", "tasks"]
+        : ["projectId", "jobId"];
+      if (Object.keys(args).some(key => !allowed.includes(key)) || typeof args.projectId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(args.projectId)) throw new JobInputError("invalid workspace execution arguments");
+      await this.workspace.backend.authorizeWorkspace(args.projectId, clientId);
+      return name === "workspace_dispatch"
+        ? this.workspace.service.dispatch(args, clientId)
+        : this.workspace.service.sync(args.projectId, String(args.jobId ?? ""), clientId);
+    }
     const allowed = name === "workspace_snapshot" ? ["projectId", "after"] : ["projectId", "input"];
     if (Object.keys(args).some(key => !allowed.includes(key)) || typeof args.projectId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(args.projectId)) throw new JobInputError("invalid workspace arguments");
     await this.workspace.backend.authorizeWorkspace(args.projectId, clientId);
@@ -577,7 +588,7 @@ export class McpProxy {
   private async availableJobTools(claims: AccessClaims | undefined): Promise<Record<string, unknown>[]> {
     if ((!this.supervisor.enabled && !this.oracle && !this.webTools && !this.workspace?.backend?.authorizeWorkspace) || !claims) return [];
     const scopes = new Set(claims.scope.split(/\s+/));
-    return [...(this.workspace?.backend?.authorizeWorkspace ? AW_TOOL_DEFINITIONS.filter((d) => scopes.has(awRequiredScope(d.name))) : []), ...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : []), ...(this.webTools ? await this.webTools.definitionsFor(claims.client_id, scopes) : [])].map((definition) => ({ ...definition }));
+    return [...(this.workspace?.backend?.authorizeWorkspace ? ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS.filter((d) => scopes.has(awRequiredScope(d.name as any))) : []), ...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : []), ...(this.webTools ? await this.webTools.definitionsFor(claims.client_id, scopes) : [])].map((definition) => ({ ...definition }));
   }
 
   /** Serve only OAuth-authorized local job tools when no general upstream exists. */
@@ -669,6 +680,9 @@ export class McpProxy {
       } catch (error) {
         if (error instanceof AgentWorkspaceError) {
           status = ["revision_conflict", "idempotency_conflict", "task_not_claimable", "dependencies_incomplete"].includes(error.code) ? 409 : ["assignee_required", "independent_reviewer_required"].includes(error.code) ? 403 : 400;
+          if (message.id !== undefined) responses.push(rpcError(message.id, -32000, error.code));
+        } else if (error instanceof WorkspaceExecutionError) {
+          status = error.code === "execution_not_found" || error.code === "idempotency_conflict" ? 409 : error.code === "supervisor_unavailable" ? 503 : 400;
           if (message.id !== undefined) responses.push(rpcError(message.id, -32000, error.code));
         } else if (error instanceof OracleToolError) {
           if (message.id !== undefined) responses.push(rpcError(message.id, -32000, error.code));
