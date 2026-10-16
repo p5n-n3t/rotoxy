@@ -20,6 +20,8 @@ const snapshot = {
   artifacts: [{ id: "artifact-1", taskId: "task-r", kind: "branch", reference: "codex/agent-work", title: "Implementation", submittedBy: "client:worker-a", submittedAt: "2026-10-16T10:04:00Z" }],
   reviews: [],
   events: [{ type: "task_claimed", actor: "client:worker-a", taskId: "task-w", createdAt: "2026-10-16T10:01:00Z" }],
+  executions: [{ jobId: "job-exec-1", state: "running", provider: "Codex", taskCount: 4, updatedAt: "2026-10-16T10:05:00Z" }],
+  executionResources: [{ provider: "lightsprint", sessionId: "session-1", workspaceId: "workspace-1", accountId: "acct-a", accountLabel: "Primary account", model: "gpt-reported", modelSource: "registered configuration", executionAvailability: "not checked by this snapshot" }],
 };
 
 test("renders AW records in the shared page shell with real workflow columns and participant attribution", () => {
@@ -40,7 +42,16 @@ test("renders AW records in the shared page shell with real workflow columns and
   assert.match(html, /message_send/);
   assert.match(html, /task_create/);
   assert.match(html, /participant_upsert/);
-  assert.match(html, /Pending review/);
+  assert.match(html, /Pending workspace review/);
+  assert.match(html, /Job executions/);
+  assert.match(html, /job-exec-1/);
+  assert.match(html, /href="\/token2oauth\/admin\/supervisor"/);
+  assert.match(html, /href="\/token2oauth\/admin\/jobs"/);
+  assert.match(html, /Configured LightSprint resources · 1/);
+  assert.match(html, /<details class="aw-resource-disclosure"><summary>/);
+  assert.match(html, /do not indicate an active worker/);
+  assert.match(html, /Primary account/);
+  assert.match(html, /not checked by this snapshot/);
 });
 
 test("posts native bounded forms to the project update route with CSRF, revision, and idempotency", () => {
@@ -59,11 +70,17 @@ test("escapes and redacts user content and never renders arbitrary record fields
   dirty.messages[0].text = '<img src=x onerror="bad"> access_token=private-value';
   dirty.messages[0].unexpectedSecret = "do-not-render";
   dirty.artifacts[0].reference = "Bearer hidden-token";
+  dirty.executions[0].jobId = '<img src=x onerror="run">';
+  dirty.executionResources[0].accountLabel = '<svg onload="run">';
+  dirty.executionResources[0].executionAvailability = "access_token=private-resource";
   const html = renderAgentWorkspace(dirty, options);
   assert.match(html, /&lt;img src=x onerror=&quot;bad&quot;&gt;/);
   assert.match(html, /access_token=\[redacted\]/);
   assert.match(html, /Bearer \[redacted\]/);
-  assert.doesNotMatch(html, /private-value|hidden-token|do-not-render|onerror="bad"/);
+  assert.match(html, /&lt;img src=x onerror=&quot;run&quot;&gt;/);
+  assert.match(html, /&lt;svg onload=&quot;run&quot;&gt;/);
+  assert.match(html, /access_token=\[redacted\]/);
+  assert.doesNotMatch(html, /private-value|hidden-token|private-resource|do-not-render|onerror="bad"|onload="run"/);
 });
 
 test("project mismatch and empty snapshots show honest empty states without foreign records", () => {
@@ -76,6 +93,8 @@ test("project mismatch and empty snapshots show honest empty states without fore
   assert.match(empty, /No messages in this project snapshot/);
   assert.match(empty, /No artifacts submitted in this project/);
   assert.match(empty, /Participants<\/dt><dd>0/);
+  assert.match(empty, /Execution rows were not included in this snapshot/);
+  assert.match(empty, /Resource configuration was not included in this snapshot/);
 });
 
 test("caps rendered collections and includes responsive, reduced-motion, and keyboard affordances", () => {
@@ -106,7 +125,7 @@ test("sparse review-only boards use a compact four-state bar and a two-column ta
   assert.match(html, /grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.equal((html.match(/class="aw-task"/g) ?? []).length, 4);
   assert.doesNotMatch(html, /class="aw-column"/);
-  assert.match(html, /<details class="aw-task-description"><summary>Description<\/summary>/);
+  assert.match(html, /<details class="aw-task-description"><summary>Task description<\/summary>/);
   assert.match(html, /<details class="aw-work-disclosure"><summary>Inbox/);
   assert.match(html, /<details class="aw-work-disclosure"><summary>Activity/);
   assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
@@ -115,11 +134,19 @@ test("sparse review-only boards use a compact four-state bar and a two-column ta
 
 test("review and artifact controls remain available but closed until selected", () => {
   const reviewOnly = structuredClone(snapshot);
-  reviewOnly.tasks = [{ id: "task-r", title: "Review this", description: "Details", state: "review", assignee: "client:worker-a", dependsOn: [] }];
-  reviewOnly.artifacts = [{ id: "artifact-r", taskId: "task-r", kind: "text", reference: "artifact ref", title: "Reviewable artifact" }];
+  reviewOnly.tasks = [
+    { id: "task-r", title: "Review this", description: "Details", state: "review", assignee: "client:worker-a", dependsOn: [] },
+    { id: "task-d", title: "Already complete", description: "Done", state: "complete", dependsOn: [] },
+  ];
+  reviewOnly.artifacts = [
+    { id: "artifact-old", taskId: "task-d", kind: "text", reference: "done ref", title: "Completed artifact" },
+    { id: "artifact-r", taskId: "task-r", kind: "text", reference: "artifact ref", title: "Reviewable artifact" },
+  ];
   const html = renderAgentWorkspace(reviewOnly, options);
+  assert.ok(html.indexOf("artifact-r") < html.indexOf("artifact-old"), "actionable reviews should lead the artifact list");
   assert.match(html, /<details class="aw-work-disclosure"><summary>Artifacts &amp; reviews/);
-  assert.match(html, /<details class="aw-review-actions"><summary>Review artifact<\/summary>/);
+  assert.match(html, /<details class="aw-review-actions"><summary>Workspace review<\/summary>/);
+  assert.match(html, /does not approve a provider request or merge a pull request/);
   for (const action of ["review_decide", "artifact_submit", "task_update", "task_create", "participant_upsert", "message_send"]) assert.match(html, new RegExp(`name="action" value="${action}"`));
   assert.match(html, /name="expectedRevision" value="7"/);
   assert.match(html, /name="idempotencyKey" value="[0-9a-f-]{36}"/);
@@ -127,4 +154,25 @@ test("review and artifact controls remain available but closed until selected", 
   assert.match(html, /\.aw-description\{[^}]*font-size:12px/);
   assert.match(html, /\.aw-note\{[^}]*font-size:12px/);
   assert.match(html, /\.aw-review-list li,.aw-events li\{[^}]*font-size:12px/);
+});
+
+test("keeps the nonce-protected refresh poll and explicit unknown execution fields", () => {
+  const html = renderAgentWorkspace({ ...snapshot, executions: [{}] }, { ...options, nonce: "0123456789abcdef" });
+  assert.match(html, /<script nonce="0123456789abcdef">/);
+  assert.match(html, /Execution ID unknown/);
+  assert.match(html, /State unknown/);
+  assert.match(html, /Provider unknown/);
+  assert.match(html, /<dt>Tasks<\/dt><dd>Unknown<\/dd>/);
+  assert.match(html, /location\.reload\(\)/);
+  assert.match(html, /\.closest\("form"\)/);
+});
+
+test("bounds optional execution and configured-resource metadata to fifty rows", () => {
+  const executions = Array.from({ length: 55 }, (_, index) => ({ jobId: `bounded-job-${index}`, state: "queued", provider: "bridge" }));
+  const resources = Array.from({ length: 55 }, (_, index) => ({ sessionId: `bounded-session-${index}`, accountLabel: `Account ${index}` }));
+  const html = renderAgentWorkspace({ ...snapshot, executions, executionResources: resources }, options);
+  assert.match(html, /bounded-job-49/);
+  assert.doesNotMatch(html, /bounded-job-50/);
+  assert.match(html, /bounded-session-49/);
+  assert.doesNotMatch(html, /bounded-session-50/);
 });
