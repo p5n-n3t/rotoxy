@@ -1,0 +1,179 @@
+import { randomUUID } from "node:crypto";
+import { adminNav, esc, NAV_GROUPS, withCsrf, type NavGroup } from "./html.js";
+import { page } from "./ui.js";
+
+export type AgentWorkspaceRenderOptions = { base: string; csrfToken: string; projects: string[]; projectId: string };
+
+type Participant = { id: string; label: string; provider: string; model?: string; accountId?: string; updatedAt?: string };
+type TaskState = "queued" | "running" | "blocked" | "review" | "complete" | "cancelled" | "unknown";
+type Task = { id: string; title: string; description: string; state: TaskState; assignee?: string; jobId?: string; externalTaskId?: string; dependsOn: string[]; revision?: number; updatedAt?: string };
+type Message = { id: string; from?: string; to: string; taskId?: string; text: string; createdAt?: string };
+type Artifact = { id: string; taskId?: string; kind: "text" | "branch" | "pull_request" | "unknown"; reference: string; title: string; submittedBy?: string; submittedAt?: string; state?: string };
+type Review = { artifactId: string; reviewer?: string; decision: string; note?: string; createdAt?: string };
+type Event = { type: string; actor?: string; taskId?: string; artifactId?: string; createdAt?: string };
+type Workspace = { projectId: string; revision: number; participants: Participant[]; tasks: Task[]; messages: Message[]; artifacts: Artifact[]; reviews: Review[]; events: Event[] };
+
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const TASK_STATES = new Set<TaskState>(["queued", "running", "blocked", "review", "complete", "cancelled"]);
+
+function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function safeId(value: unknown): string | undefined { return typeof value === "string" && SAFE_ID.test(value) ? value : undefined; }
+function cleanText(value: unknown, max = 2000): string {
+  if (typeof value !== "string") return "";
+  return value.slice(0, max)
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|credential)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[redacted]");
+}
+function safeDate(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 40 || !/^\d{4}-\d\d-\d\d(?:T[\d:.+-]+Z?)?$/.test(value)) return undefined;
+  return value;
+}
+function safeArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.slice(0, 100).filter(record) : [];
+}
+function normalizeWorkspace(raw: unknown, projectId: string): Workspace | undefined {
+  if (!record(raw) || raw.projectId !== projectId || !Number.isSafeInteger(raw.revision) || Number(raw.revision) < 0) return undefined;
+  const participants: Participant[] = safeArray(raw.participants).flatMap((row) => {
+    const id = safeId(row.id), label = cleanText(row.label, 120), provider = cleanText(row.provider, 80);
+    if (!id || !label || !provider) return [];
+    const model = cleanText(row.model, 100), accountId = safeId(row.accountId), updatedAt = safeDate(row.updatedAt);
+    return [{ id, label, provider, ...(model ? { model } : {}), ...(accountId ? { accountId } : {}), ...(updatedAt ? { updatedAt } : {}) }];
+  });
+  const tasks: Task[] = safeArray(raw.tasks).flatMap((row) => {
+    const id = safeId(row.id), title = cleanText(row.title, 200);
+    if (!id || !title) return [];
+    const rawState = typeof row.state === "string" ? row.state as TaskState : "unknown";
+    const state = TASK_STATES.has(rawState) ? rawState : "unknown";
+    const assignee = safeId(row.assignee), jobId = safeId(row.jobId), externalTaskId = safeId(row.externalTaskId);
+    const dependsOn = Array.isArray(row.dependsOn) ? row.dependsOn.slice(0, 16).flatMap((item) => safeId(item) ?? []) : [];
+    const revision = Number.isSafeInteger(row.revision) && Number(row.revision) >= 0 ? Number(row.revision) : undefined;
+    const updatedAt = safeDate(row.updatedAt);
+    return [{ id, title, description: cleanText(row.description, 8000), state, ...(assignee ? { assignee } : {}), ...(jobId ? { jobId } : {}), ...(externalTaskId ? { externalTaskId } : {}), dependsOn, ...(revision !== undefined ? { revision } : {}), ...(updatedAt ? { updatedAt } : {}) }];
+  });
+  const messages: Message[] = safeArray(raw.messages).flatMap((row) => {
+    const id = safeId(row.id), to = row.to === "all" ? "all" : safeId(row.to), text = cleanText(row.text, 2000);
+    if (!id || !to || !text) return [];
+    const from = safeId(row.from), taskId = safeId(row.taskId), createdAt = safeDate(row.createdAt);
+    return [{ id, to, text, ...(from ? { from } : {}), ...(taskId ? { taskId } : {}), ...(createdAt ? { createdAt } : {}) }];
+  });
+  const artifacts: Artifact[] = safeArray(raw.artifacts).flatMap((row) => {
+    const id = safeId(row.id), reference = cleanText(row.reference, 500), title = cleanText(row.title, 200);
+    if (!id || !reference || !title) return [];
+    const kind = row.kind === "text" || row.kind === "branch" || row.kind === "pull_request" ? row.kind : "unknown";
+    const taskId = safeId(row.taskId), submittedBy = safeId(row.submittedBy), submittedAt = safeDate(row.submittedAt);
+    const state = typeof row.state === "string" && /^[a-z_]{1,32}$/.test(row.state) ? row.state : undefined;
+    return [{ id, reference, title, kind, ...(taskId ? { taskId } : {}), ...(submittedBy ? { submittedBy } : {}), ...(submittedAt ? { submittedAt } : {}), ...(state ? { state } : {}) }];
+  });
+  const reviews: Review[] = safeArray(raw.reviews).flatMap((row) => {
+    const artifactId = safeId(row.artifactId);
+    if (!artifactId) return [];
+    const reviewer = safeId(row.reviewer), decision = typeof row.decision === "string" && /^[a-z_]{1,32}$/.test(row.decision) ? row.decision : "unknown";
+    const note = cleanText(row.note, 2000), createdAt = safeDate(row.createdAt);
+    return [{ artifactId, decision, ...(reviewer ? { reviewer } : {}), ...(note ? { note } : {}), ...(createdAt ? { createdAt } : {}) }];
+  });
+  const events: Event[] = safeArray(raw.events).flatMap((row) => {
+    const type = typeof row.type === "string" && /^[a-z_]{1,48}$/.test(row.type) ? row.type : undefined;
+    if (!type) return [];
+    const actor = safeId(row.actor), taskId = safeId(row.taskId), artifactId = safeId(row.artifactId), createdAt = safeDate(row.createdAt);
+    return [{ type, ...(actor ? { actor } : {}), ...(taskId ? { taskId } : {}), ...(artifactId ? { artifactId } : {}), ...(createdAt ? { createdAt } : {}) }];
+  });
+  return { projectId, revision: Number(raw.revision), participants, tasks, messages, artifacts, reviews, events };
+}
+
+function workspaceNavigation(): readonly NavGroup[] {
+  return NAV_GROUPS.map((group) => {
+    if (group.label === "Command") return { ...group, items: group.items.map((item) => item.key === "workspace" ? { key: "agents", label: "Agent workspace", href: "/admin/agents" } : item) };
+    if (group.label === "Resources") return { ...group, items: [...group.items, { key: "resource-workspace", label: "Resources", href: "/admin/workspace" }] };
+    return group;
+  });
+}
+
+function actionForm(action: string, endpoint: string, revision: number, contents: string, label: string, secondary = true): string {
+  return `<form class="aw-form" method="post" action="${esc(endpoint)}"><input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="expectedRevision" value="${revision}"><input type="hidden" name="idempotencyKey" value="${randomUUID()}">${contents}<button type="submit"${secondary ? " class=\"secondary\"" : ""}>${esc(label)}</button></form>`;
+}
+function labelFor(id: string | undefined, byId: Map<string, Participant>): string { return id ? byId.get(id)?.label ?? id : "Unassigned"; }
+function field(label: string, name: string, options: { type?: string; value?: string; max?: number; required?: boolean; placeholder?: string } = {}): string {
+  const id = `aw-${name}-${randomUUID()}`;
+  const common = `id="${id}" name="${esc(name)}" maxlength="${options.max ?? 200}"${options.required ? " required" : ""}${options.placeholder ? ` placeholder="${esc(options.placeholder)}"` : ""}`;
+  return `<label for="${id}">${esc(label)}</label>${options.type === "textarea" ? `<textarea ${common} rows="3">${esc(options.value ?? "")}</textarea>` : `<input ${common} type="${esc(options.type ?? "text")}" value="${esc(options.value ?? "")}">`}`;
+}
+function taskCard(task: Task, endpoint: string, workspace: Workspace, byId: Map<string, Participant>): string {
+  const state = task.state === "unknown" ? "unknown" : task.state;
+  const claim = task.state === "queued" ? actionForm("task_claim", endpoint, workspace.revision, `<input type="hidden" name="taskId" value="${esc(task.id)}">`, "Claim task") : "";
+  const update = actionForm("task_update", endpoint, workspace.revision, `<input type="hidden" name="taskId" value="${esc(task.id)}"><label for="state-${esc(task.id)}">Set state</label><select id="state-${esc(task.id)}" name="state"><option value="running">Working</option><option value="blocked">Blocked</option><option value="cancelled">Cancel</option></select>${field("Note (optional)", "note", { max: 2000 })}`, "Update");
+  const deliver = actionForm("artifact_submit", endpoint, workspace.revision, `<input type="hidden" name="taskId" value="${esc(task.id)}">${field("Artifact ID", "artifactId", { value: randomUUID(), max: 128, required: true })}${field("Title", "title", { max: 200, required: true })}<label for="kind-${esc(task.id)}">Type</label><select id="kind-${esc(task.id)}" name="kind"><option value="text">Text</option><option value="branch">Branch</option><option value="pull_request">Pull request reference</option></select>${field("Reference", "reference", { max: 500, required: true })}`, "Submit artifact");
+  const deps = task.dependsOn.length ? `<div class="aw-detail"><dt>Depends on</dt><dd>${task.dependsOn.map((id) => `<code>${esc(id)}</code>`).join(", ")}</dd></div>` : "";
+  return `<article class="aw-task"><div class="aw-task-head"><code>${esc(task.id)}</code><span class="aw-state aw-${esc(state)}">${esc(state.replaceAll("_", " "))}</span></div><h3>${esc(task.title)}</h3>${task.description ? `<p class="aw-description">${esc(task.description)}</p>` : ""}<dl class="aw-task-meta"><div class="aw-detail"><dt>Assignee</dt><dd>${esc(labelFor(task.assignee, byId))}</dd></div>${task.jobId ? `<div class="aw-detail"><dt>Job</dt><dd><code>${esc(task.jobId)}</code></dd></div>` : ""}${task.externalTaskId ? `<div class="aw-detail"><dt>External task</dt><dd><code>${esc(task.externalTaskId)}</code></dd></div>` : ""}${deps}</dl><details class="aw-task-actions"><summary>Task actions</summary><div class="aw-actions">${claim}${update}${deliver}</div></details></article>`;
+}
+
+function renderBoard(workspace: Workspace, endpoint: string, byId: Map<string, Participant>): string {
+  const columns: { id: string; title: string; states: TaskState[] }[] = [
+    { id: "queued", title: "Queued", states: ["queued"] },
+    { id: "working", title: "Working", states: ["running", "blocked"] },
+    { id: "review", title: "Review", states: ["review"] },
+    { id: "done", title: "Done", states: ["complete", "cancelled"] },
+  ];
+  const known = new Set(columns.flatMap((column) => column.states));
+  const columnsHtml = columns.map((column) => {
+    const tasks = workspace.tasks.filter((task) => column.states.includes(task.state));
+    return `<section class="aw-column" aria-labelledby="aw-column-${column.id}"><header><h2 id="aw-column-${column.id}">${column.title}</h2><span class="aw-count">${tasks.length}</span></header><div class="aw-column-body">${tasks.length ? tasks.map((task) => taskCard(task, endpoint, workspace, byId)).join("") : `<p class="aw-empty">No ${column.title.toLowerCase()} tasks reported.</p>`}</div></section>`;
+  }).join("");
+  const unknown = workspace.tasks.filter((task) => !known.has(task.state));
+  return `<section class="aw-board" aria-label="Tasks by workflow state">${columnsHtml}</section>${unknown.length ? `<section class="aw-unclassified"><h2>Unclassified state</h2>${unknown.map((task) => taskCard(task, endpoint, workspace, byId)).join("")}</section>` : ""}`;
+}
+
+function participantRoster(workspace: Workspace, endpoint: string, byId: Map<string, Participant>): string {
+  const rows = workspace.participants.map((person) => `<li><div><strong>${esc(person.label)}</strong><small>${esc(person.id)} · ${esc(person.provider)}${person.model ? ` · ${esc(person.model)} (reported)` : " · Model unknown"}${person.accountId ? ` · Account ${esc(person.accountId)} (reported)` : " · Account unknown"}</small></div>${person.updatedAt ? `<time datetime="${esc(person.updatedAt)}">${esc(person.updatedAt)}</time>` : ""}</li>`).join("");
+  const register = actionForm("participant_upsert", endpoint, workspace.revision, `${field("Display label", "label", { max: 120, required: true })}<div class="aw-form-row">${field("Provider", "provider", { max: 80, required: true, placeholder: "codex, claude, or other" })}${field("Model (reported, optional)", "model", { max: 100 })}</div>${field("Account ID (reported, optional)", "accountId", { max: 128 })}`, "Register participant");
+  return `<section class="aw-participants" aria-labelledby="aw-participants-title"><header class="aw-section-head"><div><p class="eyebrow">Project collaborators</p><h2 id="aw-participants-title">Participants <span class="aw-count">${workspace.participants.length}</span></h2></div><details class="aw-add-person"><summary>Register participant</summary>${register}</details></header>${rows ? `<ul class="aw-roster">${rows}</ul>` : `<p class="aw-empty">No participants registered yet.</p>`}</section>`;
+}
+
+function taskCreate(workspace: Workspace, endpoint: string): string {
+  return `<details class="aw-create"><summary>Create task</summary>${actionForm("task_create", endpoint, workspace.revision, `${field("Task ID", "taskId", { value: randomUUID(), max: 128, required: true })}${field("Title", "title", { max: 200, required: true })}${field("Description", "description", { type: "textarea", max: 8000 })}${field("Depends on task IDs (comma separated, up to 16)", "dependsOn", { max: 2200, placeholder: "task-a, task-b" })}${field("Job ID (optional)", "jobId", { max: 128 })}${field("External task ID (optional)", "externalTaskId", { max: 128 })}`, "Create task", false)}</details>`;
+}
+
+function inbox(workspace: Workspace, endpoint: string, byId: Map<string, Participant>): string {
+  const messages = workspace.messages.map((message) => `<article class="aw-message"><div class="aw-message-head"><strong>${esc(labelFor(message.from, byId))}</strong><span>to ${esc(message.to === "all" ? "all participants" : labelFor(message.to, byId))}</span>${message.taskId ? `<code>${esc(message.taskId)}</code>` : ""}</div><p>${esc(message.text)}</p>${message.createdAt ? `<time datetime="${esc(message.createdAt)}">${esc(message.createdAt)}</time>` : ""}</article>`).join("");
+  const recipients = `<label for="aw-message-to">Recipient</label><select id="aw-message-to" name="to"><option value="all">All participants</option>${workspace.participants.map((person) => `<option value="${esc(person.id)}">${esc(person.label)}</option>`).join("")}</select>`;
+  const tasks = `<label for="aw-message-task">Task (optional)</label><select id="aw-message-task" name="taskId"><option value="">No task</option>${workspace.tasks.map((task) => `<option value="${esc(task.id)}">${esc(task.title)} · ${esc(task.id)}</option>`).join("")}</select>`;
+  const compose = actionForm("message_send", endpoint, workspace.revision, `${field("Message ID", "messageId", { value: randomUUID(), max: 128, required: true })}${recipients}${tasks}${field("Message", "text", { type: "textarea", max: 2000, required: true })}`, "Send message", false);
+  return `<section class="aw-panel-grid"><section class="aw-panel-block"><header class="aw-section-head"><div><p class="eyebrow">Project coordination</p><h2>Inbox <span class="aw-count">${workspace.messages.length}</span></h2></div></header>${messages || `<p class="aw-empty">No messages in this project snapshot.</p>`}</section><section class="aw-panel-block"><h2>Send a message</h2><p class="aw-note">Messages are attributed to the authenticated workspace participant.</p>${compose}</section></section>`;
+}
+
+function deliverables(workspace: Workspace, endpoint: string, byId: Map<string, Participant>): string {
+  const taskById = new Map(workspace.tasks.map((task) => [task.id, task]));
+  const reviewByArtifact = new Map(workspace.reviews.map((review) => [review.artifactId, review]));
+  const pending = workspace.artifacts.filter((artifact) => taskById.get(artifact.taskId ?? "")?.state === "review" && !reviewByArtifact.has(artifact.id));
+  const cards = workspace.artifacts.map((artifact) => {
+    const task = taskById.get(artifact.taskId ?? ""), review = reviewByArtifact.get(artifact.id);
+    const decision = review ? `<p class="aw-review-state">${esc(review.decision.replaceAll("_", " "))}${review.reviewer ? ` · ${esc(labelFor(review.reviewer, byId))}` : ""}</p>${review.note ? `<p>${esc(review.note)}</p>` : ""}` : task?.state === "review" ? "<p class=\"aw-review-state\">Pending review</p>" : "";
+    const controls = task?.state === "review" && !review ? actionForm("review_decide", endpoint, workspace.revision, `<input type="hidden" name="artifactId" value="${esc(artifact.id)}"><label for="decision-${esc(artifact.id)}">Decision</label><select id="decision-${esc(artifact.id)}" name="decision"><option value="approved">Approve</option><option value="changes_requested">Request changes</option></select>${field("Review note (optional)", "note", { max: 2000 })}`, "Submit review") : "";
+    return `<article class="aw-artifact"><div class="aw-artifact-head"><span class="aw-state">${esc(artifact.kind.replaceAll("_", " "))}</span><code>${esc(artifact.id)}</code></div><h3>${esc(artifact.title)}</h3><p class="aw-artifact-ref">${esc(artifact.reference)}</p><small>Task ${esc(artifact.taskId ?? "unknown")} · submitted by ${esc(labelFor(artifact.submittedBy, byId))}</small>${decision}${controls}</article>`;
+  }).join("");
+  const reviews = workspace.reviews.map((review) => `<li><strong>${esc(review.decision.replaceAll("_", " "))}</strong> · artifact ${esc(review.artifactId)}${review.reviewer ? ` · ${esc(labelFor(review.reviewer, byId))}` : ""}${review.note ? `<p>${esc(review.note)}</p>` : ""}</li>`).join("");
+  return `<section class="aw-panel-grid"><section class="aw-panel-block"><header class="aw-section-head"><div><p class="eyebrow">Deliverables</p><h2>Artifacts <span class="aw-count">${workspace.artifacts.length}</span></h2></div></header>${cards || `<p class="aw-empty">No artifacts submitted in this project.</p>`}</section><section class="aw-panel-block"><header class="aw-section-head"><div><p class="eyebrow">Review queue</p><h2>Reviews <span class="aw-count">${pending.length}</span></h2></div></header>${pending.length ? `<p class="aw-note">Review actions are checked by the server against task ownership.</p>` : `<p class="aw-empty">No pending reviews reported.</p>`}${reviews ? `<ul class="aw-review-list">${reviews}</ul>` : ""}</section></section>`;
+}
+
+function activity(workspace: Workspace, byId: Map<string, Participant>): string {
+  const rows = workspace.events.map((event) => `<li><span class="aw-state">${esc(event.type.replaceAll("_", " "))}</span><span>${event.actor ? esc(labelFor(event.actor, byId)) : "Actor unknown"}${event.taskId ? ` · task ${esc(event.taskId)}` : ""}${event.artifactId ? ` · artifact ${esc(event.artifactId)}` : ""}</span>${event.createdAt ? `<time datetime="${esc(event.createdAt)}">${esc(event.createdAt)}</time>` : ""}</li>`).join("");
+  return `<section class="aw-panel-block"><header class="aw-section-head"><div><p class="eyebrow">Audit trail</p><h2>Recent activity <span class="aw-count">${workspace.events.length}</span></h2></div></header>${rows ? `<ul class="aw-events">${rows}</ul>` : `<p class="aw-empty">No activity events in this snapshot.</p>`}</section>`;
+}
+
+export function renderAgentWorkspace(snapshot: unknown, options: AgentWorkspaceRenderOptions): string {
+  const projects = [...new Set(options.projects.filter((project) => typeof project === "string" && SAFE_ID.test(project)))].slice(0, 50);
+  const projectId = SAFE_ID.test(options.projectId) && projects.includes(options.projectId) ? options.projectId : "";
+  const workspace = projectId ? normalizeWorkspace(snapshot, projectId) : undefined;
+  const base = options.base.replace(/\/$/, "");
+  const endpoint = projectId ? `${base}/admin/api/v1/agent-workspace/${encodeURIComponent(projectId)}/update` : "";
+  const selectedProject = projectId ? `<option value="${esc(projectId)}" selected>${esc(projectId)}</option>` : "<option value=\"\" selected>Select a project</option>";
+  const projectSelect = `<form class="aw-project-select" method="get" action="${esc(base)}/admin/agents"><label for="aw-project">Project</label><select id="aw-project" name="project">${selectedProject}${projects.filter((id) => id !== projectId).map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("")}</select><button type="submit" class="secondary">Open</button></form>`;
+  const bodyContent = workspace ? (() => {
+    const byId = new Map(workspace.participants.map((person) => [person.id, person]));
+    const counts = `<dl class="aw-metrics"><div><dt>Participants</dt><dd>${workspace.participants.length}</dd></div><div><dt>Tasks</dt><dd>${workspace.tasks.length}</dd></div><div><dt>Messages</dt><dd>${workspace.messages.length}</dd></div><div><dt>Artifacts</dt><dd>${workspace.artifacts.length}</dd></div><div><dt>Revision</dt><dd>${workspace.revision}</dd></div></dl>`;
+    const tabs = `<nav class="aw-tabs" aria-label="Workspace panels"><a href="#aw-inbox">Inbox <span>${workspace.messages.length}</span></a><a href="#aw-deliverables">Artifacts &amp; reviews <span>${workspace.artifacts.length}</span></a><a href="#aw-activity">Activity <span>${workspace.events.length}</span></a></nav>`;
+    return `${counts}${participantRoster(workspace, endpoint, byId)}<section class="aw-tasks"><header class="aw-board-head"><div><p class="eyebrow">Project delivery</p><h2>Tasks <span class="aw-count">${workspace.tasks.length}</span></h2><p class="aw-note">Claims and updates are attributed to the signed-in participant. Dependencies and permissions are enforced by the workspace service.</p></div>${taskCreate(workspace, endpoint)}</header>${renderBoard(workspace, endpoint, byId)}</section><section class="aw-workarea">${tabs}<section id="aw-inbox" class="aw-anchor">${inbox(workspace, endpoint, byId)}</section><section id="aw-deliverables" class="aw-anchor">${deliverables(workspace, endpoint, byId)}</section><section id="aw-activity" class="aw-anchor">${activity(workspace, byId)}</section></section>`;
+  })() : `<section class="aw-empty-project"><p class="eyebrow">Agent workspace</p><h2>${projectId ? "Workspace snapshot unavailable" : "Choose a project"}</h2><p>${projectId ? "The requested project snapshot did not match this page, so no records are shown." : projects.length ? "Select a registered project to open its participants, tasks, messages, and deliverables." : "No supervised projects are registered."}</p></section>`;
+  const body = `<main class="wrap aw-page">${adminNav(base, "agents", workspaceNavigation())}<header class="aw-heading"><div><p class="eyebrow">Collaborative operations</p><h1>Agent workspace</h1><p>Coordinate registered agents through attributed tasks, messages, artifacts, and reviews.</p></div>${projectSelect}</header>${bodyContent}</main><style>.aw-page{max-width:1500px}.aw-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;padding:16px 0 18px;border-bottom:1px solid var(--line)}.aw-heading h1{margin:3px 0;font-size:clamp(27px,3vw,36px)}.aw-heading p:not(.eyebrow){margin:4px 0 0;color:var(--muted);font-size:13px}.aw-project-select{display:grid;grid-template-columns:minmax(160px,260px) auto;gap:6px 9px;align-items:end;min-width:min(360px,100%)}.aw-project-select label{grid-column:1/-1;margin:0}.aw-project-select button{min-height:40px}.aw-page h2{font-size:18px;margin:0}.aw-count{display:inline-grid;min-width:24px;height:24px;place-items:center;border:1px solid var(--line);border-radius:4px;font:600 11px var(--mono);color:var(--muted);vertical-align:middle}.aw-section-head,.aw-board-head{display:flex;align-items:center;justify-content:space-between;gap:14px}.aw-participants{padding:15px 0;border-bottom:1px solid var(--line)}.aw-roster{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:0 14px;padding:0;margin:10px 0 0;list-style:none}.aw-roster li{display:flex;justify-content:space-between;align-items:center;gap:10px;min-width:0;padding:9px 0;border-top:1px solid var(--rule)}.aw-roster li>div{display:grid;min-width:0}.aw-roster strong{font-size:13px}.aw-roster small,.aw-roster time{color:var(--muted);font-size:11px;overflow-wrap:anywhere}.aw-add-person>summary,.aw-create>summary,.aw-task-actions>summary{cursor:pointer;color:var(--signal);font-size:12px;font-weight:650;list-style:none}.aw-add-person>summary::-webkit-details-marker,.aw-create>summary::-webkit-details-marker,.aw-task-actions>summary::-webkit-details-marker{display:none}.aw-add-person[open],.aw-create[open]{width:min(440px,100%)}.aw-form{display:grid;gap:4px;margin-top:9px;padding:11px;background:var(--sunk);border:1px solid var(--line);border-radius:5px}.aw-form label{margin:5px 0 0;font-size:11.5px}.aw-form input,.aw-form select,.aw-form textarea{font-size:12.5px;min-height:36px;padding:6px 8px}.aw-form textarea{resize:vertical}.aw-form button{justify-self:start;min-height:34px;margin-top:5px;font-size:12px}.aw-form-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.aw-tasks{padding:16px 0;border-bottom:1px solid var(--line)}.aw-board-head{margin-bottom:12px}.aw-board-head .aw-note{max-width:74ch;margin:5px 0 0}.aw-create{flex:0 0 auto}.aw-create[open]{width:min(430px,100%)}.aw-board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:start}.aw-column{min-width:0;border:1px solid var(--line);border-radius:5px;background:var(--surface)}.aw-column>header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 9px;border-bottom:1px solid var(--line);background:var(--sunk)}.aw-column>header h2{font-size:12px;text-transform:uppercase;letter-spacing:.04em}.aw-column-body{display:grid;align-content:start;gap:8px;max-height:640px;overflow:auto;padding:8px}.aw-task{min-width:0;padding:9px;border:1px solid var(--rule);border-radius:4px;background:var(--paper)}.aw-task-head,.aw-artifact-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.aw-task-head code,.aw-artifact-head code{font-size:10.5px;overflow-wrap:anywhere}.aw-task h3,.aw-artifact h3{margin:7px 0 4px;font-size:13px;line-height:1.35;overflow-wrap:anywhere}.aw-description{margin:4px 0 8px;color:var(--muted);font-size:11.5px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere}.aw-state{display:inline-flex;align-items:center;padding:2px 6px;border:1px solid var(--line);border-radius:3px;color:var(--muted);font:600 9px/1.4 var(--mono);text-transform:uppercase;letter-spacing:.03em}.aw-blocked,.aw-cancelled,.aw-unknown{border-color:var(--amber);color:var(--amber);background:var(--amber-soft)}.aw-review,.aw-complete{border-color:var(--signal);color:var(--signal);background:var(--signal-soft)}.aw-task-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:7px 0}.aw-detail{min-width:0}.aw-detail dt{color:var(--muted);font:600 9px var(--mono);text-transform:uppercase}.aw-detail dd{margin:2px 0 0;font-size:10.5px;overflow-wrap:anywhere}.aw-task-actions{border-top:1px solid var(--rule);padding-top:6px;margin-top:7px}.aw-task-actions[open] .aw-actions{display:grid;gap:6px}.aw-actions .aw-form{padding:7px}.aw-empty{margin:0;padding:10px 6px;color:var(--muted);font-size:12px}.aw-unclassified{padding-top:12px}.aw-workarea{padding:16px 0}.aw-tabs{position:sticky;top:64px;z-index:2;display:flex;gap:5px;padding:6px 0;background:var(--paper);border-bottom:1px solid var(--line)}.aw-tabs a{display:inline-flex;align-items:center;gap:7px;padding:6px 9px;border:1px solid var(--line);border-radius:4px;background:var(--surface);font-size:12px;font-weight:620;text-decoration:none}.aw-tabs a span{font:600 10px var(--mono);color:var(--muted)}.aw-anchor{scroll-margin-top:112px;padding-top:13px}.aw-panel-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr);gap:14px;align-items:start}.aw-panel-block{min-width:0;padding:12px;border:1px solid var(--line);border-radius:5px;background:var(--surface)}.aw-panel-block h2{margin-bottom:7px}.aw-message,.aw-artifact{padding:9px 0;border-top:1px solid var(--rule);overflow-wrap:anywhere}.aw-message-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11px}.aw-message-head span,.aw-message time,.aw-artifact small{color:var(--muted);font-size:10.5px}.aw-message p,.aw-artifact p{margin:5px 0;font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere}.aw-message time{display:block}.aw-note{margin:4px 0 8px;color:var(--muted);font-size:11.5px}.aw-artifact-ref{padding:6px;background:var(--sunk);border-radius:3px;font:11px var(--mono);overflow-wrap:anywhere}.aw-artifact .aw-form{margin-top:8px}.aw-review-state{color:var(--amber);font-weight:650}.aw-review-list,.aw-events{margin:8px 0 0;padding:0;list-style:none}.aw-review-list li,.aw-events li{padding:7px 0;border-top:1px solid var(--rule);font-size:11.5px;overflow-wrap:anywhere}.aw-review-list p{margin:4px 0;color:var(--muted)}.aw-events li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:9px;align-items:center}.aw-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0;padding:0;border-top:1px solid var(--line)}.aw-metrics div{padding:8px 5px;border-right:1px solid var(--rule)}.aw-metrics dt{color:var(--muted);font:600 9px var(--mono);text-transform:uppercase}.aw-metrics dd{margin:3px 0 0;font:650 16px var(--mono)}.aw-empty-project{padding:32px 0;color:var(--muted)}.aw-empty-project h2{margin:6px 0;color:var(--ink)}.aw-empty-project p:not(.eyebrow){max-width:60ch;font-size:13px}@media(max-width:1020px){.aw-board{grid-template-columns:repeat(2,minmax(0,1fr))}.aw-column-body{max-height:500px}}@media(max-width:720px){.aw-heading{align-items:stretch;flex-direction:column}.aw-project-select{min-width:0}.aw-board-head{align-items:flex-start;flex-direction:column}.aw-create{width:100%}.aw-create[open]{width:100%}.aw-board{grid-template-columns:1fr}.aw-column-body{max-height:none}.aw-panel-grid{grid-template-columns:1fr}.aw-tabs{top:62px;overflow-x:auto}.aw-tabs a{flex:0 0 auto}.aw-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.aw-events li{grid-template-columns:auto minmax(0,1fr)}.aw-events time{grid-column:2}.aw-form-row{grid-template-columns:1fr}}@media(max-width:390px){.aw-page{padding-inline:12px}.aw-roster{grid-template-columns:1fr}.aw-tabs a{font-size:11px;padding-inline:7px}.aw-task-meta{grid-template-columns:1fr}}@media(prefers-reduced-motion:reduce){.aw-page *, .aw-page *::before,.aw-page *::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}</style>`;
+  return withCsrf(page("Agent workspace", body), options.csrfToken);
+}
