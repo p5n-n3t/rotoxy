@@ -8,6 +8,9 @@ import type { SupervisorBackend } from "./supervisor-api.js";
 import type { StateStore } from "./store.js";
 import { page } from "./ui.js";
 import { esc } from "./html.js";
+import { createHash } from "node:crypto";
+import { WorkspaceExecutionError, WorkspaceExecutionService, WORKSPACE_EXECUTION_TOOLS, isWorkspaceExecutionToolName, workspaceExecutionRequiredScope, type WorkspaceExecutionToolName } from "./workspace-execution.js";
+import { validateJobSubmission, type JobSubmission } from "./job-submit.js";
 
 const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -20,7 +23,7 @@ const ACTIONS = new Set([
   "participant_upsert", "task_create", "task_claim", "task_update", "message_send", "message_ack", "artifact_submit", "review_decide",
 ]);
 
-export type AgentWorkspaceToolName = "workspace_snapshot" | "workspace_update";
+export type AgentWorkspaceToolName = "workspace_snapshot" | "workspace_update" | WorkspaceExecutionToolName;
 export interface AgentWorkspaceSnapshot {
   projectId: string;
   revision: number;
@@ -31,6 +34,7 @@ export interface AgentWorkspaceSnapshot {
   reviews: unknown[];
   events: unknown[];
   nextCursor: number;
+  executionSummaries?: unknown[];
 }
 export interface AgentWorkspaceRenderOptions { projectId: string; base: string; csrf: string; csrfToken: string; projects: string[]; nonce?: string }
 export type AgentWorkspaceRenderer = (snapshot: AgentWorkspaceSnapshot, options: AgentWorkspaceRenderOptions) => string;
@@ -64,7 +68,7 @@ function validateProjectId(projectId: string): void {
 
 function validateActor(actor: string): void {
   if (actor === "admin:local") return;
-  if (typeof actor !== "string" || !actor.startsWith("client:") || !SAFE_ID.test(actor.slice("client:".length))) {
+  if (typeof actor !== "string" || !actor.startsWith("client:") || !/^[A-Za-z0-9._:-]{1,128}$/.test(actor.slice("client:".length))) {
     throw new AgentWorkspaceError("invalid_actor");
   }
 }
@@ -121,9 +125,11 @@ async function runPython(executable: string, args: string[], stdin: string, opti
 
 export class AgentWorkspaceService {
   private readonly runner: AgentWorkspaceCommandRunner;
+  private readonly execution: WorkspaceExecutionService;
 
   constructor(private readonly store: StateStore, private readonly backend?: SupervisorBackend, options: AgentWorkspaceServiceOptions = {}) {
     this.runner = options.runner ?? runPython;
+    this.execution = new WorkspaceExecutionService(store, backend);
   }
 
   /** Project discovery comes only from the already-configured supervisor backend. */
@@ -166,7 +172,8 @@ export class AgentWorkspaceService {
         !Number.isSafeInteger(result.nextCursor) || !["participants", "tasks", "messages", "artifacts", "reviews", "events"].every((key) => Array.isArray(result[key]))) {
       throw new AgentWorkspaceError("bridge_output_invalid");
     }
-    return { ...result, executionResources: await this.backend?.workspaceResources?.(projectId) ?? [] } as unknown as AgentWorkspaceSnapshot;
+    const executionSummaries = await this.execution.summaries(projectId);
+    return { ...result, executionResources: await this.backend?.workspaceResources?.(projectId) ?? [], ...(executionSummaries.length ? { executionSummaries } : {}) } as unknown as AgentWorkspaceSnapshot;
   }
 
   async update(projectId: string, actor: string, input: Record<string, unknown>): Promise<unknown> {
@@ -174,6 +181,64 @@ export class AgentWorkspaceService {
     validateActor(actor);
     validateUpdateInput(input);
     return this.callPython({ command: "update", projectId, actor, input });
+  }
+
+  async dispatch(raw: unknown, clientId: string): Promise<unknown> {
+    if (!this.backend?.authorizeWorkspace) throw new WorkspaceExecutionError("supervisor_unavailable");
+    const submission = validateJobSubmission(raw);
+    const result = await this.execution.dispatch(submission, { projectId: submission.projectId, clientId });
+    if (result.accepted) await this.projectSubmission(submission, `client:${clientId}`, [], []);
+    return { dispatch: result.dispatch, accepted: result.accepted, replayed: result.replayed, ...(result.providerError ? { providerError: result.providerError } : {}) };
+  }
+
+  async sync(projectId: string, jobId: string, clientId: string): Promise<unknown> {
+    if (!this.backend?.authorizeWorkspace) throw new WorkspaceExecutionError("supervisor_unavailable");
+    const result = await this.execution.sync(projectId, jobId, { projectId, clientId });
+    const stored = await this.execution.getOwned(projectId, jobId, clientId);
+    await this.projectSubmission(stored.submission, `client:${clientId}`, result.results, result.status.tasks);
+    return { dispatch: result.dispatch, status: result.status, results: result.results, resultsUnavailable: result.resultsUnavailable, resultsTruncated: result.resultsTruncated, ...(result.resultError ? { resultError: result.resultError } : {}) };
+  }
+
+  private async projectSubmission(submission: JobSubmission, actor: string, results: { taskId: string; text: string }[], taskStatuses: { taskId: string; state?: string }[]): Promise<void> {
+    let snapshot = await this.snapshot(submission.projectId, actor);
+    const apply = async (input: Record<string, unknown>) => {
+      await this.update(submission.projectId, actor, { ...input, idempotencyKey: `exec-${createHash("sha256").update(`${submission.jobId}:${String(input.action)}:${String(input.taskId ?? input.artifactId ?? "")}`).digest("hex").slice(0, 48)}`, expectedRevision: snapshot.revision });
+      snapshot = await this.snapshot(submission.projectId, actor);
+    };
+    if (!(snapshot.participants as any[]).some(row => row.id === actor)) await apply({ action: "participant_upsert", label: "ROTOXY execution owner", provider: "lightsprint" });
+    const taskById = new Map(submission.tasks.map(task => [task.taskId, task]));
+    const ordered: typeof submission.tasks = [];
+    const visited = new Set<string>();
+    const visit = (taskId: string) => { if (visited.has(taskId)) return; visited.add(taskId); for (const dep of taskById.get(taskId)?.dependsOn ?? []) visit(dep); const item = taskById.get(taskId); if (item) ordered.push(item); };
+    for (const task of submission.tasks) visit(task.taskId);
+    for (const task of ordered) {
+      const workspaceTaskId = "exec-" + createHash("sha256").update(`${submission.jobId}\0${task.taskId}`).digest("hex").slice(0, 32);
+      let projected = (snapshot.tasks as any[]).find(row => row.id === workspaceTaskId);
+      if (!projected) {
+        await apply({ action: "task_create", taskId: workspaceTaskId, title: `Published execution · ${task.taskId}`,
+          description: `Published task ${task.taskId} from execution ${submission.jobId}. Instructions remain private to the execution owner.`,
+          jobId: submission.jobId, externalTaskId: task.taskId,
+          dependsOn: task.dependsOn.map(dep => "exec-" + createHash("sha256").update(`${submission.jobId}\0${dep}`).digest("hex").slice(0, 32)) });
+        projected = (snapshot.tasks as any[]).find(row => row.id === workspaceTaskId);
+      }
+      const reportedState = taskStatuses.find(row => row.taskId === task.taskId)?.state?.toLowerCase();
+      const result = results.find(row => row.taskId === task.taskId);
+      if (projected?.state === "queued" && (result || ["reserved", "starting", "running", "awaiting_output", "blocked", "failed", "completed", "complete", "succeeded", "done"].includes(reportedState ?? ""))) {
+        await apply({ action: "task_claim", taskId: workspaceTaskId });
+        projected = (snapshot.tasks as any[]).find(row => row.id === workspaceTaskId);
+      }
+      if (projected?.state === "running" && ["blocked", "failed"].includes(reportedState ?? "")) {
+        await apply({ action: "task_update", taskId: workspaceTaskId, state: "blocked" });
+        projected = (snapshot.tasks as any[]).find(row => row.id === workspaceTaskId);
+      }
+      if (result && projected?.assignee === actor && ["running", "blocked"].includes(projected.state) &&
+          !(snapshot.artifacts as any[]).some(row => row.id === `result-${workspaceTaskId}`)) {
+        const suffix = "\n[truncated; full output is available only through owner-scoped workspace_sync]";
+        const reference = result.text.length > 1000 ? result.text.slice(0, 1000 - suffix.length) + suffix : result.text;
+        await apply({ action: "artifact_submit", artifactId: `result-${workspaceTaskId}`, taskId: workspaceTaskId,
+          kind: "text", reference: reference || "(empty result)", title: `Execution result · ${task.taskId}` });
+      }
+    }
   }
 }
 
@@ -210,13 +275,14 @@ export const AW_TOOL_DEFINITIONS: readonly AgentWorkspaceToolDefinition[] = Obje
     inputSchema: { type: "object", properties: { projectId: { type: "string", minLength: 1, maxLength: 128 }, input: workspaceUpdateSchema }, required: ["projectId", "input"], additionalProperties: false },
   },
 ]);
+export const ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS = Object.freeze([...AW_TOOL_DEFINITIONS, ...WORKSPACE_EXECUTION_TOOLS]);
 
 export function isAgentWorkspaceToolName(name: unknown): name is AgentWorkspaceToolName {
-  return name === "workspace_snapshot" || name === "workspace_update";
+  return name === "workspace_snapshot" || name === "workspace_update" || isWorkspaceExecutionToolName(name);
 }
 
 export function awRequiredScope(name: AgentWorkspaceToolName): "jobs:read" | "jobs:write" {
-  return name === "workspace_update" ? "jobs:write" : "jobs:read";
+  return name === "workspace_update" || isWorkspaceExecutionToolName(name) && workspaceExecutionRequiredScope(name) === "jobs:write" ? "jobs:write" : "jobs:read";
 }
 
 export function validateAgentWorkspaceToolArguments(name: AgentWorkspaceToolName, raw: unknown): Record<string, unknown> {

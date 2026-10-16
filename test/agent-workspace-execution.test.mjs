@@ -1,0 +1,118 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createServer as createHttpServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { pkceS256 } from "../dist/crypto.js";
+import { StateStore } from "../dist/store.js";
+import { buildApp } from "../dist/server.js";
+
+const ADMIN = "workspace-execution-test-password";
+const listen = server => new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => resolve(server.address())); });
+const close = server => new Promise(resolve => server.close(resolve));
+
+async function oauthToken(base, scope = "mcp jobs:read jobs:write") {
+  const registration = await (await fetch(base + "/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "workspace-execution", redirect_uris: [base + "/callback"] }) })).json();
+  const verifier = "v".repeat(64);
+  const consent = await fetch(base + "/oauth/authorize", { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: registration.client_id, redirect_uri: base + "/callback", response_type: "code", code_challenge: pkceS256(verifier), code_challenge_method: "S256", resource: base + "/mcp", scope, admin_password: ADMIN }) });
+  const location = consent.headers.get("location"); assert.ok(location, `OAuth consent failed ${consent.status}`);
+  const code = new URL(location).searchParams.get("code");
+  const token = await (await fetch(base + "/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", client_id: registration.client_id, redirect_uri: base + "/callback", code, code_verifier: verifier, resource: base + "/mcp" }) })).json();
+  return { token: token.access_token, clientId: registration.client_id };
+}
+const submission = (jobId, instructions = "Published instruction") => ({ schemaVersion: 1, jobId, idempotencyKey: "idem-" + jobId, projectId: "project-a", eligibleAccountIds: ["acct-a"], tasks: [{ taskId: "task-a", dependsOn: [], scopeKeys: ["path:src"], instructions, execution: { mode: "existing-session" }, output: { kind: "text", maxBytes: 2048, format: "text", expectedMarker: "DONE" } }] });
+
+test("workspace execution persists before submit, replays once, reconciles owner-scoped results and publishes only bounded projections", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rotoxy-aw-execution-"));
+  const priorHome = process.env.HOME, priorConfig = process.env.ROTOXY_CONFIG_DIR;
+  process.env.HOME = dir; process.env.ROTOXY_CONFIG_DIR = join(dir, "config");
+  const allowed = new Set(); const calls = []; let ambiguous = true;
+  const backend = {
+    listProjects: () => ["project-a"],
+    authorizeWorkspace: (projectId, clientId) => { if (projectId !== "project-a" || !allowed.has(clientId)) throw new Error("workspace_forbidden"); },
+    callTool: async (name, args, caller) => {
+      calls.push({ name, args, caller });
+      if (name === "job_submit") {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        if (args.jobId === "job-ambiguous" && ambiguous) { ambiguous = false; throw new Error("timeout after send"); }
+        return { assignmentId: args.jobId, state: "queued" };
+      }
+      if (name === "job_status") return { projectId: args.projectId, assignmentId: args.jobId, state: "completed", revision: 7, tasks: [{ taskId: "task-a", state: "completed" }] };
+      if (name === "job_results") return { assignmentId: args.jobId, results: [{ taskId: "task-a", text: "safe shared result", reportedModel: "reported-model" }] };
+      throw new Error("unexpected tool " + name);
+    },
+  };
+  let server;
+  try {
+    const store = new StateStore(); await store.init({ adminPassword: ADMIN });
+    const app = await buildApp(store, { supervisorBackend: backend }); server = createHttpServer(app.app);
+    const address = await listen(server), base = `http://127.0.0.1:${address.port}`;
+    await store.update(s => { s.config.publicBaseUrl = base; s.config.basePath = ""; s.config.upstreamUrl = ""; });
+    const owner = await oauthToken(base), collaborator = await oauthToken(base), readOnly = await oauthToken(base, "mcp jobs:read");
+    allowed.add(owner.clientId); allowed.add(collaborator.clientId); allowed.add(readOnly.clientId);
+    const mcp = async (client, name, args) => {
+      const response = await fetch(base + "/mcp", { method: "POST", headers: { authorization: `Bearer ${client.token}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: randomUUID(), method: "tools/call", params: { name, arguments: args } }) });
+      const body = await response.json();
+      const text = body.result?.content?.[0]?.text;
+      return { status: response.status, body, value: text ? JSON.parse(text) : undefined };
+    };
+    const listed = await fetch(base + "/mcp", { method: "POST", headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    assert.ok((await listed.json()).result.tools.some(tool => tool.name === "workspace_dispatch"));
+    const readOnlyList = await fetch(base + "/mcp", { method: "POST", headers: { authorization: `Bearer ${readOnly.token}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
+    assert.equal((await readOnlyList.json()).result.tools.some(tool => tool.name === "workspace_dispatch"), false, "write tools are not silently granted to read-only OAuth clients");
+    const readOnlyDispatch = await mcp(readOnly, "workspace_dispatch", submission("job-readonly"));
+    assert.equal(readOnlyDispatch.status, 403);
+    const spoofed = await mcp(owner, "workspace_dispatch", { ...submission("job-spoof"), clientId: collaborator.clientId, actor: "admin:local" });
+    assert.ok(spoofed.body.error, "caller identity fields are rejected");
+    assert.equal(calls.some(call => call.name === "job_submit" && call.args.jobId === "job-spoof"), false);
+
+    const job = submission("job-published");
+    const [first, concurrentReplay] = await Promise.all([mcp(owner, "workspace_dispatch", job), mcp(owner, "workspace_dispatch", job)]);
+    assert.ok(first.value?.dispatch || concurrentReplay.value?.dispatch, JSON.stringify([first.body, concurrentReplay.body]));
+    assert.equal(calls.filter(call => call.name === "job_submit" && call.args.jobId === job.jobId).length, 1);
+    await close(server);
+    const restartedApp = await buildApp(store, { supervisorBackend: backend }); server = createHttpServer(restartedApp.app);
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(address.port, "127.0.0.1", resolve); });
+    const replay = await mcp(owner, "workspace_dispatch", job);
+    assert.equal(replay.value.replayed, true);
+    assert.equal(calls.filter(call => call.name === "job_submit" && call.args.jobId === job.jobId).length, 1);
+    const conflict = await mcp(owner, "workspace_dispatch", submission("job-published", "different request"));
+    assert.ok(conflict.body.error, "conflicting request hash must be rejected");
+    assert.equal(calls.filter(call => call.name === "job_submit" && call.args.jobId === job.jobId).length, 1);
+
+    const otherProject = await mcp(owner, "workspace_dispatch", { ...submission("job-other"), projectId: "project-b" });
+    assert.ok(otherProject.body.error);
+    const unauthorizedSync = await mcp(collaborator, "workspace_sync", { projectId: "project-a", jobId: "job-published" });
+    assert.ok(unauthorizedSync.body.error, "another owner cannot sync this job");
+    assert.equal(calls.filter(call => call.name === "job_status" && call.caller.clientId === collaborator.clientId).length, 0);
+
+    const synced = await mcp(owner, "workspace_sync", { projectId: "project-a", jobId: "job-published" });
+    assert.equal(synced.value.status.state, "completed");
+    assert.equal(synced.value.results[0].text, "safe shared result");
+    assert.ok(calls.some(call => call.name === "job_results" && call.caller.clientId === owner.clientId));
+    const snapshotResponse = await mcp(collaborator, "workspace_snapshot", { projectId: "project-a" });
+    assert.equal(snapshotResponse.value.executionSummaries[0].provider, "lightsprint");
+    assert.equal(snapshotResponse.value.executionSummaries[0].taskCount, 1);
+    assert.equal(snapshotResponse.value.tasks[0].description.includes("Published instruction"), false);
+    assert.ok(snapshotResponse.value.artifacts.some(artifact => artifact.reference === "safe shared result"));
+    assert.equal(snapshotResponse.value.artifacts.find(artifact => artifact.reference === "safe shared result").state, "pending");
+    assert.equal(snapshotResponse.value.tasks[0].state, "review", "artifact import leaves approval to an independent reviewer");
+
+    const uncertain = submission("job-ambiguous");
+    const firstAttempt = await mcp(owner, "workspace_dispatch", uncertain);
+    assert.equal(firstAttempt.value.accepted, false);
+    assert.equal(firstAttempt.value.dispatch.state, "needs_reconciliation");
+    const retry = await mcp(owner, "workspace_dispatch", uncertain);
+    assert.equal(retry.value.replayed, true);
+    assert.equal(calls.filter(call => call.name === "job_submit" && call.args.jobId === uncertain.jobId).length, 1, "uncertain submit must never be replayed");
+    const reconciled = await mcp(owner, "workspace_sync", { projectId: "project-a", jobId: uncertain.jobId });
+    assert.equal(reconciled.value.status.state, "completed");
+  } finally {
+    if (server) await close(server);
+    if (priorHome === undefined) delete process.env.HOME; else process.env.HOME = priorHome;
+    if (priorConfig === undefined) delete process.env.ROTOXY_CONFIG_DIR; else process.env.ROTOXY_CONFIG_DIR = priorConfig;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
