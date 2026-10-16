@@ -144,7 +144,7 @@ test("task/session operations use documented account-scoped routes and bound tra
   const adapter = new LightSprintJobsAdapter(store(), ACCOUNT_ID, {
     clientFactory: clientFactory(async (_method, params) => {
       calls.push(params.arguments);
-      if (params.arguments.path.endsWith("/transcript")) return ok({ transcript: "x".repeat(260_000) });
+      if (params.arguments.path.includes("/transcript?")) return ok({ transcript: "x".repeat(260_000) });
       return ok({ id: TASK_ID });
     }),
   });
@@ -162,7 +162,7 @@ test("task/session operations use documented account-scoped routes and bound tra
     ["GET", `/api/tasks/${TASK_ID}`],
     ["GET", `/api/tasks/${TASK_ID}/lightsprint-agents`],
     ["GET", `/api/agent-sessions/${SESSION_ID}/status`],
-    ["GET", `/api/agent-sessions/${SESSION_ID}/transcript`],
+    ["GET", `/api/agent-sessions/${SESSION_ID}/transcript?limit=100&include=text&maxBytes=131072`],
     ["POST", `/api/agent-sessions/${SESSION_ID}/cancel`],
     ["POST", `/api/agent-sessions/${SESSION_ID}/stop`],
   ]);
@@ -429,4 +429,21 @@ test("a trusted operation permit remains single-use when the raw policy independ
   assert.equal((await adapter.sendMessage(SESSION_ID, "approved work", "attempt:1")).classification, "accepted");
   assert.equal((await adapter.sendMessage(SESSION_ID, "approved work", "attempt:1")).reason, "policy_denied");
   assert.equal(sends, 1);
+});
+
+
+test("live token shape associates independently identified reply with the newest ordered user instruction", async () => {
+  const adapter = new LightSprintJobsAdapter(store(), ACCOUNT_ID, {
+    clientFactory: clientFactory(async (_method, request) => {
+      assert.equal(request.arguments.path, `/api/agent-sessions/${SESSION_ID}/transcript?limit=100&include=text&maxBytes=131072`);
+      return ok({items: [
+        {seq:1903,turnId:'user-item',type:'user_message',time:'2026-10-16T12:40:25.985Z',payload:{content:'exact instruction'}},
+        {seq:1904,turnId:'assistant-item',type:'assistant_snapshot',time:'2026-10-16T12:40:29.640Z',payload:{content:'ROTOXY_ADMITTED_OK'}},
+      ],hasMore:true});
+    }),
+  });
+  const value=(await adapter.sessionTranscript(SESSION_ID)).value;
+  assert.equal(value.latestAssistantComplete,true);
+  assert.equal(value.messages[0].content,'ROTOXY_ADMITTED_OK');
+  assert.equal(value.lastUserTextSha256,(await import('node:crypto')).createHash('sha256').update('exact instruction').digest('hex'));
 });

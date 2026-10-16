@@ -371,7 +371,7 @@ function projectTokenTranscript(value: Record<string, unknown>): unknown {
     shape: "items", sourceItemCount: items.length, truncated: more,
     hasMore: value.hasMore === true, nextCursor: cursor("nextCursor"), prevCursor: cursor("prevCursor"),
   };
-  if (!valid) return { ...base, messages: [], incomplete: true, latestAssistantIndex: null,
+  if (!valid || bounded.some((item, index) => index > 0 && Number(record(item)?.seq) <= Number(record(bounded[index - 1])?.seq))) return { ...base, messages: [], incomplete: true, latestAssistantIndex: null,
     latestAssistantComplete: false, reason: "invalid_items" };
   // The current page must contain the most recent user turn for exact turn
   // association; a snapshot from an earlier turn cannot finish a newer job.
@@ -385,7 +385,10 @@ function projectTokenTranscript(value: Record<string, unknown>): unknown {
     ? createHash("sha256").update(userContent).digest("hex") : null;
   const later = bounded.slice(lastUserIndex + 1).map(record);
   const lastItem = later.at(-1);
-  const candidate = lastItem && lastItem.turnId === turn && lastItem.type === "assistant_snapshot" ? lastItem : undefined;
+  // Live token transcripts give user and assistant items different turnId values.
+  // Sequence ordering and the exact newest user-text hash establish the boundary.
+  const candidate = lastItem && lastItem.type === "assistant_snapshot" &&
+    Number(lastItem.seq) > Number(user.seq) && Date.parse(String(lastItem.time)) >= Date.parse(String(user.time)) ? lastItem : undefined;
   if (!candidate) return { ...base, messages: [], incomplete: true,
     latestAssistantIndex: null, latestAssistantComplete: false, reason: "no_terminal_snapshot" };
   const payload = record(candidate.payload);
@@ -626,7 +629,7 @@ export class LightSprintJobsAdapter {
 
   sessionTranscript(sessionId: string): Promise<JobResult> {
     validateId(sessionId, "sessionId");
-    return this.api("GET", `/api/agent-sessions/${sessionId}/transcript`, undefined, true);
+    return this.api("GET", `/api/agent-sessions/${sessionId}/transcript?limit=100&include=text&maxBytes=131072`, undefined, true);
   }
 
   sendMessage(sessionId: string, message: string, clientMessageId: string): Promise<JobResult> {
