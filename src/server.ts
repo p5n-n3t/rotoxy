@@ -1,3 +1,5 @@
+import { createControlledBatchAdminRouter } from "./controlled-batch-admin.js";
+import { createPrivateServiceAdminRouter } from "./private-service-admin.js";
 import { AgentWorkspaceService, createAgentWorkspaceRouter } from "./agent-workspace.js";
 import { renderAgentWorkspace } from "./agent-workspace-ui.js";
 import { createJobsAdminRouter } from "./jobs-admin.js";
@@ -72,6 +74,8 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(cloudflare.router);
   router.use(createInferenceProviderAdminRouter(store, sessions).router);
   router.use(createProviderHubRouter(store, sessions));
+  router.use(createControlledBatchAdminRouter(store, sessions).router);
+  router.use(createPrivateServiceAdminRouter(store, sessions).router);
   router.use(createOracleFleetAdminRouter(store, sessions).router);
   router.use(createResourceRoutingAdminRouter(store, sessions).router);
   router.use(createAgentWorkspaceAccessRouter(store, sessions, options.supervisorBackend));

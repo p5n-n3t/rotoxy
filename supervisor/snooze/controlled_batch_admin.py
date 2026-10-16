@@ -70,14 +70,9 @@ def approve_request(registry, value, now=None):
     expected = value["expectedBindings"]
     if type(expected) is not dict or set(expected) != set(value["operationIds"]) or any(not isinstance(v, str) or len(v) != 64 for v in expected.values()):
         raise ValueError("invalid_request")
-    from .controlled_batches import _canonical_binding
-    with registry.connection() as db:
-        for operation_id in value["operationIds"]:
-            current, _ = _canonical_binding(db, value["assignmentId"], [operation_id])
-            if current != expected[operation_id]: raise ValueError("operation binding changed")
     if type(value['maxLaunches']) is not int or type(value['ttlSeconds']) is not int or value['ackUnknownCreditCost'] is not True:
         raise ValueError("invalid_request")
-    return approve(registry, value['assignmentId'], value['operationIds'], value['accountIds'], value['maxLaunches'], value['ttlSeconds'], True, now=now)
+    return approve(registry, value['assignmentId'], value['operationIds'], value['accountIds'], value['maxLaunches'], value['ttlSeconds'], True, now=now, expected_bindings=expected)
 
 
 def main(argv=None):

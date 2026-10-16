@@ -26,8 +26,12 @@ ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+@-]{0,119}\Z")
 SSH_ALIAS = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
 
 _LITELLM_PROBE_SCRIPT = """import json, urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 def get(path, limit):
-    with urllib.request.urlopen('http://127.0.0.1:4000' + path, timeout=3) as response:
+    with opener.open('http://127.0.0.1:4000' + path, timeout=3) as response:
         body = response.read(limit + 1)
         if len(body) > limit:
             raise ValueError('response_too_large')

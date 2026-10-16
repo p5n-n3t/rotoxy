@@ -35,11 +35,12 @@ test("approval admin uses trusted bridge paths, admin session, origin, CSRF and 
   assert.equal((await fetch(`${base}/admin/dispatch-approvals`,{redirect:"manual"})).status,302);
   const view=await fetch(`${base}/admin/dispatch-approvals`,{headers:{cookie}}); assert.equal(view.status,200); const html=await view.text();
   assert.match(html,/Expired/); assert.match(html,/no hard monetary ceiling/i); assert.match(html,/does not resume a paused project/i); assert.doesNotMatch(html,/PRIVATE prompt|instructions|synthetic-token/i);
-  const fields={assignmentId:"batch-a",operationId:"operation-a",maxLaunches:"1",ttlSeconds:"120",ackUnknownCreditCost:"1",_csrf:csrf};
+  const fields={assignmentId:"batch-a",operationId:"operation-a",maxLaunches:"1",ttlSeconds:"120",ackUnknownCreditCost:"1","binding.operation-a":"a".repeat(64),_csrf:csrf};
   assert.equal((await post(fields,"https://attacker.example")).status,403);
   assert.equal((await post({...fields,_csrf:"bad"})).status,403);
   assert.equal((await post({...fields,ackUnknownCreditCost:undefined})).status,400);
   assert.equal((await post({...fields,maxLaunches:"2"})).status,400);
+  assert.equal((await post({...fields,"binding.operation-a":"b".repeat(64)})).status,409);
   stale=true; assert.equal((await post(fields)).status,409); stale=false;
   const approved=await post(fields); assert.equal(approved.status,303);
   const approveCall=calls.find(c=>c.input.action==="approve"); assert.deepEqual(approveCall.input.approval.expectedBindings,{"operation-a":"a".repeat(64)});

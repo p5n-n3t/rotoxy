@@ -56,6 +56,8 @@ const pythonImports = [
   "snooze.credit_ledger",
   "snooze.credit_admission",
   "snooze.controlled_batches",
+  "snooze.controlled_batch_admin",
+  "snooze.private_services",
   "snooze.recovery",
   "snooze.recovery_service",
   "snooze.headless",

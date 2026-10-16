@@ -95,7 +95,7 @@ def _private_db(path):
     return p
 
 
-def approve(registry, assignment_id, operation_ids, account_ids, max_launches, ttl_seconds, acknowledged, now=None):
+def approve(registry, assignment_id, operation_ids, account_ids, max_launches, ttl_seconds, acknowledged, now=None, expected_bindings=None):
     if not isinstance(assignment_id, str) or not assignment_id or len(assignment_id) > 128:
         raise ValueError("invalid assignment id")
     if len(set(operation_ids)) != len(operation_ids) or len(set(account_ids)) != len(account_ids):
@@ -140,6 +140,13 @@ def approve(registry, assignment_id, operation_ids, account_ids, max_launches, t
         actual_accounts = sorted({op["account"] for op in rows})
         if actual_accounts != account_ids:
             raise ValueError("account IDs must exactly match the selected accounts of these operations")
+        if expected_bindings is not None:
+            if type(expected_bindings) is not dict or set(expected_bindings) != set(operation_ids):
+                raise ValueError("operation binding changed")
+            for operation_id in operation_ids:
+                observed_hash, _ = _canonical_binding(db, assignment_id, [operation_id])
+                if observed_hash != expected_bindings[operation_id]:
+                    raise ValueError("operation binding changed")
         binding_hash, _ = _canonical_binding(db, assignment_id, operation_ids)
         denied = [op for op in rows if op["state"] == "rejected"]
         if denied:
