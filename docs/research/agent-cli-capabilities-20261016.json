@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "researched_at": "2026-10-16",
+  "scope": "Public official documentation only; no CLI/API execution, provider calls, local configuration, or secrets accessed.",
+  "evidence_grades": {
+    "A": "Official vendor documentation page, retrieved on the research date.",
+    "B": "Official project documentation from mutable GitHub main/master, retrieved on the research date; version is not pinned."
+  },
+  "roles": {
+    "agent_client": "A human-facing client consumes MCP tools and may run its own agent loop.",
+    "agent_runner": "A runtime starts agent turns, owns tools and sessions, and reports lifecycle state.",
+    "model_inference_endpoint": "A model-only API/proxy forwards inference; it does not necessarily expose an agent session or MCP tools.",
+    "distinction": "OpenCode and Hermes have client and runner surfaces. Hermes separately documents an agent API server and a model-only subscription proxy. MCPO exposes MCP tools as OpenAPI/REST and is not an inference gateway. MCPO use_loopback is a local OAuth callback option, not an inference product."
+  },
+  "components": {
+    "opencode": {
+      "roles": ["agent_client", "agent_runner"],
+      "model_inventory": {
+        "documented": true,
+        "surfaces": ["CLI: opencode models [provider] [--verbose]", "HTTP: GET /config/providers", "HTTP: GET /provider", "HTTP: GET /provider/auth"],
+        "notes": "CLI lists models from configured providers; verbose output includes model metadata such as cost. HTTP inventory returns provider/default-model or connected-provider metadata. No read-secret endpoint established; PUT /auth/:id is a credential-write route.",
+        "sources": ["opencode-cli", "opencode-providers", "opencode-server"],
+        "grade": "A"
+      },
+      "execution": {
+        "documented": true,
+        "commands": ["opencode run <prompt>", "opencode serve", "opencode run --session <id>", "opencode run --continue"],
+        "session_endpoints": ["POST /session", "GET /session/status", "POST /session/{id}/message", "POST /session/{id}/prompt_async", "GET /session/{id}/message", "POST /session/{id}/abort"],
+        "events": ["GET /event (SSE)", "GET /global/event (SSE)"],
+        "permission_response": "POST /session/{id}/permissions/{permissionID}; agent/tool permission response, not provider-native approval.",
+        "server_auth": "OPENCODE_SERVER_PASSWORD enables HTTP Basic authentication; username may be configured with OPENCODE_SERVER_USERNAME.",
+        "sources": ["opencode-cli", "opencode-server"],
+        "grade": "A"
+      },
+      "mcp": {
+        "documented": true,
+        "commands": ["opencode mcp list", "opencode mcp auth <server>"],
+        "notes": "Local stdio and remote HTTP MCP servers are configured in OpenCode config. Remote OAuth can use discovery/DCR and stores client credentials locally; do not copy its auth file.",
+        "sources": ["opencode-cli", "opencode-mcp"],
+        "grade": "A"
+      },
+      "auth_billing_usage": {
+        "notes": "opencode auth login/list/logout manages local provider auth; baseURL is configurable. Docs list specific subscription integrations (including ChatGPT Plus and GitHub Copilot), while explicitly saying Anthropic prohibits former Claude Pro/Max plugin use and that plugin is no longer bundled since 1.3.0. opencode stats reports session token/cost statistics. No universal provider-quota API documented.",
+        "sources": ["opencode-cli", "opencode-providers"],
+        "grade": "A"
+      }
+    },
+    "hermes_agent": {
+      "roles": ["agent_client", "agent_runner"],
+      "headless": {
+        "commands": ["hermes -z <prompt>", "hermes --resume <session>", "hermes --continue [name]", "hermes serve"],
+        "notes": "-z is a scripted one-shot with machine-distinguishable exit codes and optional --usage-file JSON. serve is a headless JSON-RPC/WebSocket backend, separate from the OpenAI-compatible API server.",
+        "sources": ["hermes-cli"],
+        "grade": "B"
+      },
+      "agent_api": {
+        "auth": "API_SERVER_KEY bearer token required; docs warn the server exposes the full agent toolset including terminal commands. Multi-profile routes use profile-specific keys.",
+        "inventory": ["GET /v1/capabilities", "GET /api/model/options", "GET /v1/models"],
+        "execution": ["POST /v1/runs", "GET /v1/runs/{run_id}", "GET /v1/runs/{run_id}/events (SSE)", "GET /api/sessions", "GET /api/sessions/{id}/messages", "POST /api/sessions/{id}/chat", "POST /api/sessions/{id}/chat/stream"],
+        "controls": ["POST /v1/runs/{run_id}/stop", "POST /v1/runs/{run_id}/approval", "POST /v1/runs/{run_id}/clarify"],
+        "notes": "Run status exposes lifecycle state, usage and requested/actual runtime provider-model. Stop is cooperative and remains tracked until executor exit. Approval and clarify bind to the current pending control identity/generation. /v1/models is only the agent alias; /api/model/options is the richer provider/model catalog. refresh=1 probes custom provider endpoints; do not use for passive inventory.",
+        "sources": ["hermes-api"],
+        "grade": "B"
+      },
+      "mcp": {
+        "documented": true,
+        "commands": ["hermes mcp", "hermes mcp catalog", "hermes mcp install <name>"],
+        "notes": "Hermes consumes local stdio and remote HTTP MCP servers, and docs also list running Hermes as an MCP server. hermes import-agent can copy MCP configuration but explicitly does not import provider keys/credentials.",
+        "sources": ["hermes-cli", "hermes-mcp"],
+        "grade": "B"
+      },
+      "auth_subscription_usage": {
+        "notes": "hermes auth manages provider credentials/OAuth, but technical login is not a general provider subscription permission. Nous Portal is an explicit subscription. hermes proxy is model-only inference for documented OAuth upstreams, not an agent runner; its client bearer is replaced by the stored upstream credential. hermes usage --json documents account windows for OpenAI Codex, Anthropic OAuth, and OpenRouter. -z --usage-file reports estimated cost/tokens/API calls and auxiliary work; not a hard budget guarantee.",
+        "sources": ["hermes-cli", "hermes-subscription-proxy", "hermes-api"],
+        "grade": "B"
+      }
+    },
+    "litellm": {
+      "roles": ["model_inference_endpoint", "model_catalog_and_management"],
+      "management": {
+        "prerequisite": "STORE_MODEL_IN_DB enabled for API model creation/update/deletion.",
+        "routes": ["POST /model/new", "GET /model/info", "POST /model/update", "POST /model/delete"],
+        "auth": "Official add example uses LITELLM_MASTER_KEY; delete is documented admin-only. GET /model/info masks API keys.",
+        "notes": "config.yaml models remain file-owned and cannot be managed/deleted through the database API/UI; choose a single source of truth.",
+        "sources": ["litellm-management"],
+        "grade": "A"
+      },
+      "health": {
+        "routes": ["GET /health/liveness", "GET /health/readiness", "GET /health"],
+        "notes": "Liveness/readiness check process/dependencies. /health sends real test requests to configured models, costs a few tokens per model, and accepts any valid key; it is active inference, not passive health metadata. Authenticated details can reveal URLs/errors.",
+        "sources": ["litellm-health"],
+        "grade": "A"
+      }
+    },
+    "mcpo": {
+      "roles": ["mcp_to_openapi_tool_bridge"],
+      "documented": true,
+      "command_shape": "mcpo --port <port> --api-key <secret> -- <mcp-server-command>",
+      "notes": "Wraps stdio or supported HTTP MCP transport and exposes OpenAPI/REST tool handlers and /docs. OAuth can use DCR. use_loopback defaults true for local browser OAuth callback (callback_port defaults 3030); it does not denote model inference or an inference gateway.",
+      "sources": ["mcpo-readme"],
+      "grade": "B"
+    }
+  },
+  "unknowns": [
+    "No universal OpenCode provider quota endpoint or provider-native approval API was established in the reviewed docs.",
+    "Provider subscription permission and API-vs-consumer terms remain specific to each vendor; OAuth support alone is not evidence of entitlement.",
+    "Installed versions, user profiles, actual provider health, quota, and real costs were not inspected or executed.",
+    "Hermes custom-provider refresh performs endpoint probes; exact model visibility depends on the selected provider, profile, cache, and runtime version."
+  ],
+  "minimum_viable_integration": [
+    "Treat agent launch, model inference, and MCP tool access as separate adapters and permissions.",
+    "Use explicit local profile registration and documented non-secret metadata; never scrape credential files or accept executable/session/provider choices from event input.",
+    "Make new runs, stop, agent permission approvals, provider OAuth, and model refresh explicit operator actions; track unknown usage/quota as unknown.",
+    "Protect headless APIs as privileged control planes, especially Hermes API_SERVER_KEY and OpenCode server credentials."
+  ],
+  "sources": [
+    {"id":"opencode-cli","url":"https://opencode.ai/docs/cli/","accessed":"2026-10-16","grade":"A","supports":["run/continue/session commands","models and stats","auth commands","serve"]},
+    {"id":"opencode-server","url":"https://opencode.ai/docs/server/","accessed":"2026-10-16","grade":"A","supports":["HTTP APIs","SSE events","session state/abort/permission routes","server auth"]},
+    {"id":"opencode-providers","url":"https://opencode.ai/docs/providers/","accessed":"2026-10-16","grade":"A","supports":["provider config/baseURL","model credentials","subscriptions and Anthropic restriction"]},
+    {"id":"opencode-mcp","url":"https://opencode.ai/docs/mcp-servers/","accessed":"2026-10-16","grade":"A","supports":["local/remote MCP and OAuth"]},
+    {"id":"hermes-cli","url":"https://github.com/NousResearch/hermes-agent/blob/main/website/docs/reference/cli-commands.md","accessed":"2026-10-16","grade":"B","supports":["headless CLI/resume","auth and usage","profile and MCP management"]},
+    {"id":"hermes-api","url":"https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/api-server.md","accessed":"2026-10-16","grade":"B","supports":["agent API","models/options","runs/events/status/stop/approval/clarify","usage","bearer auth"]},
+    {"id":"hermes-mcp","url":"https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/mcp.md","accessed":"2026-10-16","grade":"B","supports":["MCP client configuration and catalog","credential import limits"]},
+    {"id":"hermes-subscription-proxy","url":"https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/subscription-proxy.md","accessed":"2026-10-16","grade":"B","supports":["inference-only subscription proxy distinction","bind/auth risks","supported proxy paths"]},
+    {"id":"litellm-management","url":"https://docs.litellm.ai/docs/proxy/model_management","accessed":"2026-10-16","grade":"A","supports":["database model CRUD endpoints","master-key example","config ownership"]},
+    {"id":"litellm-health","url":"https://docs.litellm.ai/docs/proxy/health","accessed":"2026-10-16","grade":"A","supports":["liveness/readiness versus active model probes","health auth and cost"]},
+    {"id":"mcpo-readme","url":"https://github.com/open-webui/mcpo/blob/main/README.md","accessed":"2026-10-16","grade":"B","supports":["MCP to OpenAPI bridge","API-key protection","OAuth DCR and loopback callback"]}
+  ]
+}
