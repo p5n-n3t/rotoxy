@@ -28,7 +28,7 @@ test("workspace execution persists before submit, replays once, reconciles owner
   const dir = await mkdtemp(join(tmpdir(), "rotoxy-aw-execution-"));
   const priorHome = process.env.HOME, priorConfig = process.env.ROTOXY_CONFIG_DIR;
   process.env.HOME = dir; process.env.ROTOXY_CONFIG_DIR = join(dir, "config");
-  const allowed = new Set(); const calls = []; let ambiguous = true;
+  const allowed = new Set(); const calls = []; let ambiguous = true; let revokeAfterResults = false;
   const backend = {
     listProjects: () => ["project-a"],
     authorizeWorkspace: (projectId, clientId) => { if (projectId !== "project-a" || !allowed.has(clientId)) throw new Error("workspace_forbidden"); },
@@ -36,11 +36,14 @@ test("workspace execution persists before submit, replays once, reconciles owner
       calls.push({ name, args, caller });
       if (name === "job_submit") {
         await new Promise(resolve => setTimeout(resolve, 50));
-        if (args.jobId === "job-ambiguous" && ambiguous) { ambiguous = false; throw new Error("timeout after send"); }
+        if (args.tasks?.[0]?.instructions === "ambiguous" && ambiguous) { ambiguous = false; throw new Error("timeout after send"); }
         return { assignmentId: args.jobId, state: "queued" };
       }
-      if (name === "job_status") return { projectId: args.projectId, assignmentId: args.jobId, state: "completed", revision: 7, tasks: [{ taskId: "task-a", state: "completed" }] };
-      if (name === "job_results") return { assignmentId: args.jobId, results: [{ taskId: "task-a", text: "safe shared result", reportedModel: "reported-model" }] };
+      if (name === "job_status") return { projectId: args.projectId, assignmentId: args.jobId, state: "completed", revision: 7, tasks: [{ taskId: "task-a", state: "completed" }, { taskId: "unrelated-task", state: "completed" }] };
+      if (name === "job_results") {
+        if (revokeAfterResults) allowed.delete(caller.clientId);
+        return { assignmentId: args.jobId, results: [{ taskId: "task-a", text: "safe shared result", reportedModel: "reported-model" }, { taskId: "unrelated-task", text: "must not leak" }] };
+      }
       throw new Error("unexpected tool " + name);
     },
   };
@@ -71,42 +74,63 @@ test("workspace execution persists before submit, replays once, reconciles owner
     const job = submission("job-published");
     const [first, concurrentReplay] = await Promise.all([mcp(owner, "workspace_dispatch", job), mcp(owner, "workspace_dispatch", job)]);
     assert.ok(first.value?.dispatch || concurrentReplay.value?.dispatch, JSON.stringify([first.body, concurrentReplay.body]));
-    assert.equal(calls.filter(call => call.name === "job_submit" && call.args.jobId === job.jobId).length, 1);
+    const ownerSubmit = calls.find(call => call.name === "job_submit" && call.caller.clientId === owner.clientId);
+    assert.ok(ownerSubmit.args.jobId.startsWith("ws-") && ownerSubmit.args.jobId !== job.jobId, "provider job id is namespaced away from a preexisting private job id");
+    assert.equal(calls.filter(call => call.name === "job_submit" && call.caller.clientId === owner.clientId).length, 1);
+    const samePublicId = await mcp(collaborator, "workspace_dispatch", job);
+    assert.ok(samePublicId.value?.accepted, JSON.stringify(samePublicId.body));
+    const collaboratorSubmit = calls.find(call => call.name === "job_submit" && call.caller.clientId === collaborator.clientId);
+    assert.notEqual(collaboratorSubmit.args.jobId, ownerSubmit.args.jobId, "same project/job label gets an owner-specific provider binding");
     await close(server);
     const restartedApp = await buildApp(store, { supervisorBackend: backend }); server = createHttpServer(restartedApp.app);
     await new Promise((resolve, reject) => { server.once("error", reject); server.listen(address.port, "127.0.0.1", resolve); });
     const replay = await mcp(owner, "workspace_dispatch", job);
     assert.equal(replay.value.replayed, true);
-    assert.equal(calls.filter(call => call.name === "job_submit" && call.args.jobId === job.jobId).length, 1);
+    assert.equal(calls.filter(call => call.name === "job_submit" && call.caller.clientId === owner.clientId).length, 1);
     const conflict = await mcp(owner, "workspace_dispatch", submission("job-published", "different request"));
     assert.ok(conflict.body.error, "conflicting request hash must be rejected");
-    assert.equal(calls.filter(call => call.name === "job_submit" && call.args.jobId === job.jobId).length, 1);
+    assert.equal(calls.filter(call => call.name === "job_submit" && call.caller.clientId === owner.clientId).length, 1);
 
     const otherProject = await mcp(owner, "workspace_dispatch", { ...submission("job-other"), projectId: "project-b" });
     assert.ok(otherProject.body.error);
-    const unauthorizedSync = await mcp(collaborator, "workspace_sync", { projectId: "project-a", jobId: "job-published" });
+    const unauthorizedSync = await mcp(readOnly, "workspace_sync", { projectId: "project-a", jobId: "job-published" });
     assert.ok(unauthorizedSync.body.error, "another owner cannot sync this job");
-    assert.equal(calls.filter(call => call.name === "job_status" && call.caller.clientId === collaborator.clientId).length, 0);
+    assert.equal(calls.filter(call => call.name === "job_status" && call.caller.clientId === readOnly.clientId).length, 0);
 
     const synced = await mcp(owner, "workspace_sync", { projectId: "project-a", jobId: "job-published" });
     assert.equal(synced.value.status.state, "completed");
     assert.equal(synced.value.results[0].text, "safe shared result");
     assert.ok(calls.some(call => call.name === "job_results" && call.caller.clientId === owner.clientId));
     const snapshotResponse = await mcp(collaborator, "workspace_snapshot", { projectId: "project-a" });
-    assert.equal(snapshotResponse.value.executionSummaries[0].provider, "lightsprint");
-    assert.equal(snapshotResponse.value.executionSummaries[0].taskCount, 1);
-    assert.equal(snapshotResponse.value.tasks[0].description.includes("Published instruction"), false);
+    assert.ok(snapshotResponse.value.executionSummaries.some(row => row.provider === "lightsprint" && row.taskCount === 1));
+    assert.ok(snapshotResponse.value.tasks.every(task => !task.description.includes("Published instruction")));
+    assert.equal(new Set(snapshotResponse.value.tasks.filter(task => task.externalTaskId === "task-a").map(task => task.id)).size, 2, "shared task identifiers are owner-specific");
     assert.ok(snapshotResponse.value.artifacts.some(artifact => artifact.reference === "safe shared result"));
     assert.equal(snapshotResponse.value.artifacts.find(artifact => artifact.reference === "safe shared result").state, "pending");
     assert.equal(snapshotResponse.value.tasks[0].state, "review", "artifact import leaves approval to an independent reviewer");
+    assert.equal(synced.value.status.tasks.some(task => task.taskId === "unrelated-task"), false, "status projection is limited to submitted task ids");
+    assert.equal(synced.value.results.some(result => result.taskId === "unrelated-task"), false, "result projection is limited to submitted task ids");
+    const ownArtifact = snapshotResponse.value.artifacts.find(artifact => artifact.reference === "safe shared result");
+    const selfReview = await mcp(owner, "workspace_update", { projectId: "project-a", input: { action: "review_decide", idempotencyKey: "owner-self-review", expectedRevision: snapshotResponse.value.revision, artifactId: ownArtifact.id, decision: "approved" } });
+    assert.ok(selfReview.body.error, "the original dispatch author cannot approve their own execution artifact");
 
-    const uncertain = submission("job-ambiguous");
+    const beforeRevocation = snapshotResponse.value.artifacts.length;
+    revokeAfterResults = true;
+    const revoked = await mcp(owner, "workspace_sync", { projectId: "project-a", jobId: job.jobId });
+    assert.ok(revoked.body.error, "membership is checked again after remote reads and before projection");
+    revokeAfterResults = false;
+    allowed.add(owner.clientId);
+    const afterRevocation = await mcp(collaborator, "workspace_snapshot", { projectId: "project-a" });
+    assert.equal(afterRevocation.value.artifacts.length, beforeRevocation, "membership loss prevents shared result projection");
+
+    const uncertain = submission("job-ambiguous", "ambiguous");
+    const ambiguousCallsBefore = calls.filter(call => call.name === "job_submit" && call.caller.clientId === owner.clientId).length;
     const firstAttempt = await mcp(owner, "workspace_dispatch", uncertain);
     assert.equal(firstAttempt.value.accepted, false);
     assert.equal(firstAttempt.value.dispatch.state, "needs_reconciliation");
     const retry = await mcp(owner, "workspace_dispatch", uncertain);
     assert.equal(retry.value.replayed, true);
-    assert.equal(calls.filter(call => call.name === "job_submit" && call.args.jobId === uncertain.jobId).length, 1, "uncertain submit must never be replayed");
+    assert.equal(calls.filter(call => call.name === "job_submit" && call.caller.clientId === owner.clientId).length, ambiguousCallsBefore + 1, "ambiguous submit is not resent");
     const reconciled = await mcp(owner, "workspace_sync", { projectId: "project-a", jobId: uncertain.jobId });
     assert.equal(reconciled.value.status.state, "completed");
   } finally {
