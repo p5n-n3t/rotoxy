@@ -125,6 +125,24 @@ function accountSignal(account: UpstreamAccount | undefined, nativeTarget: boole
   return { providerOk, enabled, authorized: !!providerOk && !authFailed, health, quota };
 }
 
+type CreditReadiness = { kind: "strict"; accounts: Map<string, { available: number | null; operationUpperBound: number | null; boundVerified: boolean }> } | { kind: "legacy" | "malformed" | "unavailable" };
+function creditReadinessShape(value: unknown, projectAccounts: ReadonlySet<string>): CreditReadiness {
+  if (!object(value)) return { kind: "malformed" };
+  if (value.mode === "legacy") return { kind: "legacy" };
+  if (value.mode !== "strict" || !Array.isArray(value.accounts)) return { kind: "malformed" };
+  const accounts = new Map<string, { available: number | null; operationUpperBound: number | null; boundVerified: boolean }>();
+  for (const item of value.accounts) {
+    if (!object(item) || !safeId(item.accountId)) return { kind: "malformed" };
+    if (!projectAccounts.has(item.accountId)) continue;
+    if (typeof item.unit !== "string" || item.unit.length > 64 ||
+        !(item.available === null || Number.isSafeInteger(item.available) && Number(item.available) >= 0) ||
+        !(item.operationUpperBound === null || Number.isSafeInteger(item.operationUpperBound) && Number(item.operationUpperBound) > 0) ||
+        typeof item.boundVerified !== "boolean" || accounts.has(item.accountId)) return { kind: "malformed" };
+    accounts.set(item.accountId, { available: item.available as number | null, operationUpperBound: item.operationUpperBound as number | null, boundVerified: item.boundVerified });
+  }
+  return { kind: "strict", accounts };
+}
+
 /** Parse strict private configuration. Every usable session includes its actual workspace identifier. */
 export async function readSupervisorRuntimeConfig(path: string): Promise<SupervisorRuntimeConfig> {
   const absolute = resolve(path);
@@ -477,7 +495,31 @@ export class SupervisorRuntime implements SupervisorBackend {
     const project = this.config.projects.find(item => item.projectId === projectId);
     if (!project) throw new JobInputError("project is not configured");
     const state = await this.options.store.load();
-    return project.registeredSessions.map(session => ({ provider: "lightsprint", sessionId: session.sessionId, workspaceId: session.workspaceId, accountId: session.accountId, accountLabel: state.accounts.find(account => account.id === session.accountId)?.label ?? "Unknown", model: session.model, modelSource: "registered configuration", executionAvailability: "not checked by this snapshot" }));
+    let credit: CreditReadiness;
+    try { credit = creditReadinessShape(await this.bridge.request("GET", "/admin/api/v1/credit-admission"), new Set(project.accountIds)); }
+    catch { credit = { kind: "unavailable" }; }
+    const nativeTarget = nativeLightSprintTarget(state.config.upstreamUrl);
+    return project.registeredSessions.map((session) => {
+      const account = state.accounts.find((row) => row.id === session.accountId);
+      const signal = accountSignal(account, nativeTarget);
+      let executionAvailability: string;
+      if (!account) executionAvailability = "Account not configured";
+      else if (!signal.enabled) executionAvailability = "Account disabled";
+      else if (!signal.authorized) executionAvailability = "Account authorization unavailable";
+      else if (signal.health !== "healthy") executionAvailability = "Account health unavailable";
+      else if (signal.quota === "depleted") executionAvailability = "Account quota reported depleted";
+      else if (signal.quota === "unknown" && !this.config.allowUnknownQuota) executionAvailability = "Blocked: quota is unknown and policy disallows unknown quota";
+      else if (credit.kind !== "strict") executionAvailability = credit.kind === "unavailable" ? "Unknown: credit admission unavailable" : credit.kind === "malformed" ? "Unknown: credit admission response malformed" : "Unknown: legacy credit admission";
+      else {
+        const policy = credit.accounts.get(session.accountId);
+        if (!policy || !policy.boundVerified || policy.available === null || policy.operationUpperBound === null) executionAvailability = "Blocked: no verified credit policy";
+        else if (policy.available < policy.operationUpperBound) executionAvailability = "Blocked: available balance below verified operation upper bound";
+        else executionAvailability = "Credit check passed; live session readiness not checked";
+      }
+      return { provider: "lightsprint", sessionId: session.sessionId, workspaceId: session.workspaceId, accountId: session.accountId,
+        accountLabel: typeof account?.label === "string" ? account.label : "Unknown", model: session.model,
+        modelSource: "registered configuration", executionAvailability };
+    });
   }
 
   authorizeWorkspace(projectId: string, clientId: string): void {
