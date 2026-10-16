@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { lstat, readFile } from "node:fs/promises";
+import { chmod, lstat, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { PROVIDER_PROFILES } from "./provider-capabilities.js";
@@ -12,7 +12,7 @@ import type { StateStore } from "./store.js";
 import type { UpstreamAccount } from "./types.js";
 import { redactString } from "./telemetry.js";
 import { SupervisorBridge, type SupervisorBridgeOptions } from "./supervisor-bridge.js";
-import type { SupervisorBackend, SupervisorCaller } from "./supervisor-api.js";
+import type { SupervisorBackend, SupervisorCaller, WorkspaceAccessSnapshot, WorkspaceAccessUpdate } from "./supervisor-api.js";
 import type { SupervisorAccountUsage, SupervisorEvent, SupervisorJob, SupervisorSnapshot, SupervisorTask, SupervisorUsage, SupervisorWorker } from "./supervisor-ui.js";
 import { evaluateToolCall } from "./tool-policy.js";
 import { normalizeParkedQuestion } from "./worker-observation.js";
@@ -46,7 +46,7 @@ export interface SupervisorRuntimeConfig {
   localLimits: { maxTasks: number; maxJobBytes: number; maxOutputBytes: number };
 }
 export interface SupervisorRuntimeOptions {
-  configPath: string;
+  configPath?: string;
   configDir: string;
   supervisorCwd?: string;
   /** Private local database shared with the persistent read-only workforce monitor. */
@@ -144,7 +144,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     if (!object(candidate)) throw new Error("Invalid project policy");
     assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions"], "project");
     const projectId = candidate.projectId, rawClientIds = candidate.clientIds, rawAccountIds = candidate.accountIds, rawSessions = candidate.registeredSessions;
-    if (!safeId(projectId) || !Array.isArray(rawClientIds) || !rawClientIds.length || rawClientIds.length > 50 || !rawClientIds.every(safeId) || new Set(rawClientIds).size !== rawClientIds.length ||
+    if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeId) || new Set(rawClientIds).size !== rawClientIds.length ||
         !Array.isArray(rawAccountIds) || !rawAccountIds.length || rawAccountIds.length > 50 || !rawAccountIds.every(safeId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
     const accountIds = rawAccountIds as string[];
     const registeredSessions: RegisteredSession[] = rawSessions.map((item: unknown): RegisteredSession => {
@@ -170,6 +170,10 @@ function configuredProject(config: SupervisorRuntimeConfig, caller: SupervisorCa
   return project;
 }
 
+function workspaceAccessRevision(raw: string, clients: Array<{ clientId: string; label: string }>): string {
+  return createHash("sha256").update(raw).update("\0").update(JSON.stringify(clients)).digest("hex");
+}
+
 export class SupervisorRuntime implements SupervisorBackend {
   private readonly bridge: SupervisorBridge;
   private worker?: ReturnType<typeof createJobWorker>;
@@ -183,7 +187,7 @@ export class SupervisorRuntime implements SupervisorBackend {
   private readonly monitorRegistrationByProject = new Map<string, { expected: number; registered: number; failed: number }>();
   private readonly workerGuidance: WorkerGuidanceService;
 
-  constructor(private readonly config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
+  constructor(private config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
     this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
     this.supervisionDbPath = options.supervisionDbPath ?? runtimeStatePath("supervision", "inbox.sqlite");
     this.recoveryDbPath = options.recoveryDbPath ?? runtimeStatePath("supervision", "recovery.sqlite3");
@@ -480,6 +484,93 @@ export class SupervisorRuntime implements SupervisorBackend {
     configuredProject(this.config, { projectId, clientId });
   }
 
+  async workspaceProjects(clientId: string): Promise<Array<{ projectId: string }>> {
+    if (!safeId(clientId)) return [];
+    return this.config.projects.filter((project) => project.clientIds.includes(clientId)).map(({ projectId }) => ({ projectId }));
+  }
+
+  private async accessSnapshot(rawConfig?: string, editable = false): Promise<WorkspaceAccessSnapshot> {
+    const state = await this.options.store.load();
+    const clients = state.oauthClients.filter((client) => safeId(client.clientId)).slice(0, 100).map((client) => ({
+      clientId: client.clientId,
+      label: redactString(typeof client.clientName === "string" ? client.clientName : "Unnamed client", 120) || "Unnamed client",
+    }));
+    return {
+      projects: this.config.projects.map((project) => ({ projectId: project.projectId, clientIds: [...project.clientIds] })),
+      clients,
+      revision: workspaceAccessRevision(rawConfig ?? JSON.stringify(this.config), clients),
+      editable,
+    };
+  }
+
+  async workspaceAccessAdmin(): Promise<WorkspaceAccessSnapshot> {
+    const configPath = this.options.configPath;
+    if (!configPath) return this.accessSnapshot(undefined, false);
+    try {
+      const raw = await readFile(configPath, "utf8");
+      const parsed = await readSupervisorRuntimeConfig(configPath);
+      this.config = parsed;
+      return this.accessSnapshot(raw, true);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return this.accessSnapshot(undefined, false);
+      throw new Error("workspace access configuration unavailable");
+    }
+  }
+
+  async updateWorkspaceAccessAdmin(input: WorkspaceAccessUpdate): Promise<WorkspaceAccessSnapshot> {
+    const configPath = this.options.configPath;
+    if (!configPath) throw new Error("workspace_access_not_persisted");
+    if (!safeId(input.projectId) || !Array.isArray(input.clientIds) || input.clientIds.length > 50 ||
+        !input.clientIds.every(safeId) || new Set(input.clientIds).size !== input.clientIds.length ||
+        typeof input.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(input.expectedRevision)) {
+      throw new Error("workspace_access_invalid");
+    }
+    const lockPath = `${configPath}.access.lock`;
+    let lock;
+    try { lock = await open(lockPath, "wx", 0o600); }
+    catch { throw new Error("workspace_access_conflict"); }
+    const tempPath = `${configPath}.access.tmp.${process.pid}.${Date.now()}`;
+    const backupPath = `${configPath}.bak`;
+    const backupTemp = `${backupPath}.tmp.${process.pid}.${Date.now()}`;
+    try {
+      const rawText = await readFile(configPath, "utf8");
+      const parsed = await readSupervisorRuntimeConfig(configPath);
+      const state = await this.options.store.load();
+      const clients = state.oauthClients.filter((client) => safeId(client.clientId)).slice(0, 100).map((client) => ({
+        clientId: client.clientId,
+        label: redactString(typeof client.clientName === "string" ? client.clientName : "Unnamed client", 120) || "Unnamed client",
+      }));
+      if (workspaceAccessRevision(rawText, clients) !== input.expectedRevision) throw new Error("workspace_access_conflict");
+      const known = new Set(clients.map((client) => client.clientId));
+      if (input.clientIds.some((clientId) => !known.has(clientId))) throw new Error("workspace_access_unknown_client");
+      const raw = JSON.parse(rawText) as Record<string, unknown>;
+      if (!Array.isArray(raw.projects)) throw new Error("workspace_access_invalid");
+      const project = raw.projects.find((row) => object(row) && row.projectId === input.projectId);
+      if (!object(project)) throw new Error("workspace_access_unknown_project");
+      project.clientIds = [...input.clientIds];
+      const nextText = JSON.stringify(raw, null, 2) + "\n";
+      await writeFile(tempPath, nextText, { flag: "wx", mode: 0o600 });
+      await chmod(tempPath, 0o600);
+      const nextConfig = await readSupervisorRuntimeConfig(tempPath);
+      await writeFile(backupTemp, rawText, { flag: "wx", mode: 0o600 });
+      await chmod(backupTemp, 0o600);
+      await rename(backupTemp, backupPath);
+      await chmod(backupPath, 0o600);
+      await rename(tempPath, configPath);
+      await chmod(configPath, 0o600);
+      this.config = nextConfig;
+      return this.accessSnapshot(nextText, true);
+    } catch (error) {
+      if (error instanceof Error && ["workspace_access_conflict", "workspace_access_unknown_client", "workspace_access_unknown_project", "workspace_access_invalid"].includes(error.message)) throw error;
+      throw new Error("workspace access update unavailable");
+    } finally {
+      await unlink(tempPath).catch(() => undefined);
+      await unlink(backupTemp).catch(() => undefined);
+      await lock.close().catch(() => undefined);
+      await unlink(lockPath).catch(() => undefined);
+    }
+  }
+
   async readAdmin(projectId: string): Promise<unknown> {
     const project = this.config.projects.find((item) => item.projectId === projectId);
     if (!project) throw new Error("project unavailable");
@@ -674,6 +765,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 }
 
 export async function createSupervisorRuntime(options: SupervisorRuntimeOptions): Promise<SupervisorRuntime> {
+  if (!options.configPath) throw new Error("Supervisor config path is required");
   const config = await readSupervisorRuntimeConfig(options.configPath);
   const runtime = new SupervisorRuntime(config, options);
   await runtime.start();

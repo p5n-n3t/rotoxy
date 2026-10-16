@@ -1,0 +1,9 @@
+# Agent Workspace access editor
+
+OAuth clients do not receive Agent Workspace membership when they register. `SupervisorRuntime.workspaceProjects(clientId)` exposes only project IDs already present in that client's explicit `clientIds` bindings, and normal `authorizeWorkspace` checks the live in-memory config on each call.
+
+The authenticated `/admin/agents/access` router lets an administrator select a configured project and registered, non-revoked OAuth clients. Updates change only that project's `clientIds`, validate the candidate with the existing strict runtime-config parser, and atomically replace the owner-only config after writing a mode-0600 `.bak`. An exclusive sidecar lock plus an opaque SHA-256 revision rejects stale/concurrent edits. New client IDs, unknown projects, caller-provided paths, and arbitrary config fields are not accepted. A runtime without a persisted config path exposes read-only membership and rejects writes. An empty client list is valid and revokes access for every client on that project.
+
+Integration seam for the server owner: mount `createAgentWorkspaceAccessRouter(store, sessions, supervisorBackend)` before the admin UI, add an admin navigation link, and expose an authenticated MCP `workspace_projects` tool that calls `workspaceProjects` with the verified OAuth client ID. Do not infer membership from client registration or user-supplied project IDs. The router uses the shared admin session and CSRF token, requires a matching `Origin`, and sets `Referrer-Policy: same-origin` so form submissions retain a same-origin Origin header.
+
+Validation used isolated temporary configs and stores; no OAuth credentials, provider calls, or live runtime config were used. TypeScript build and focused tests pass. The app server mount, navigation link, and MCP tool remain for the integrator because those files are outside this assignment's ownership.
