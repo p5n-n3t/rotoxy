@@ -887,7 +887,7 @@ class JobRegistry:
                     # verified credit admission always runs first. Approval
                     # consumption and the claim below share this transaction.
                     from .controlled_batches import consume_on_credit_denied
-                    admitted = consume_on_credit_denied(db, op, task_spec, assignment, when, self._event)
+                    admitted = consume_on_credit_denied(db, op, when, self._event)
                     if not admitted:
                         db.execute("UPDATE operations SET state='rejected',error_class='CreditAdmissionDenied' WHERE id=? AND state='queued'", (op["id"],))
                         db.execute("UPDATE job_tasks SET state='blocked',released_at=? WHERE assignment=? AND task_id=? AND generation=?",

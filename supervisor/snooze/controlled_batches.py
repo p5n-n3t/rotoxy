@@ -49,7 +49,7 @@ def _canonical_binding(db, assignment_id, operation_ids):
     return hashlib.sha256(encoded.encode()).hexdigest(), rows
 
 
-def consume_on_credit_denied(db, op, task_spec, assignment, now, event_writer):
+def consume_on_credit_denied(db, op, now, event_writer):
     """Called only after strict credit reserve raised CreditDenied, inside claim BEGIN IMMEDIATE."""
     ensure_schema(db)
     grants = db.execute("SELECT * FROM controlled_batch_approvals WHERE assignment=? ORDER BY created_at DESC", (op["assignment"],)).fetchall()
@@ -123,13 +123,17 @@ def approve(registry, assignment_id, operation_ids, account_ids, max_launches, t
             if task is None or task["generation"] != op["generation"] or task["attempt_id"] != op["attempt_id"] or task["selected_account"] != op["account"]:
                 raise ValueError("operation binding changed")
             if (op["state"] == "queued" and op["worker"] is None and op["lease_until"] is None
-                    and task["state"] in {"reserved", "starting", "running", "awaiting_output"}):
+                    and task["state"] == "reserved"):
                 pass
             elif (op["state"] == "rejected" and op["error_class"] == "CreditAdmissionDenied" and op["worker"] is None and op["lease_until"] is None
                   and task["state"] == "blocked" and task["released_at"] is not None and assignment["state"] == "held"):
                 project_control = db.execute("SELECT paused FROM project_controls WHERE project=?", (assignment["project"],)).fetchone()
                 if not project_control or not project_control["paused"]:
                     raise ValueError("pause the project before requeuing a known credit-denied operation")
+                if registry.repository is not None:
+                    attempt = db.execute("SELECT state,released_at FROM attempts WHERE id=?", (op["attempt_id"],)).fetchone()
+                    if not attempt or attempt["state"] != "blocked" or attempt["released_at"] is None:
+                        raise ValueError("credit-denied attempt is not a safe pre-dispatch requeue")
             else:
                 raise ValueError("operation state is not safely grantable")
             rows.append(op)
@@ -145,7 +149,9 @@ def approve(registry, assignment_id, operation_ids, account_ids, max_launches, t
                 db.execute("UPDATE job_tasks SET state='reserved',released_at=NULL WHERE assignment=? AND task_id=? AND generation=? AND attempt_id=? AND state='blocked'",
                            (assignment_id, op["task_id"], op["generation"], op["attempt_id"]))
                 if registry.repository is not None:
-                    db.execute("UPDATE attempts SET state='reserved',released_at=NULL WHERE id=? AND state='blocked' AND released_at IS NOT NULL", (op["attempt_id"],))
+                    restored = db.execute("UPDATE attempts SET state='reserved',released_at=NULL WHERE id=? AND state='blocked' AND released_at IS NOT NULL", (op["attempt_id"],)).rowcount
+                    if restored != 1:
+                        raise ValueError("credit-denied attempt changed before safe requeue")
             db.execute("UPDATE assignments SET state='queued',revision=revision+1 WHERE id=? AND state='held'", (assignment_id,))
         grant_id = uuid.uuid4().hex
         db.execute("INSERT INTO controlled_batch_approvals(id,assignment,operation_ids,account_ids,binding_hash,max_launches,expires_at,acknowledged_unknown_cost,created_at,last_wall_clock) VALUES(?,?,?,?,?,?,?,?,?,?)",

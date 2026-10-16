@@ -1,6 +1,6 @@
 # Controlled unknown-credit dispatch
 
-> Checkpoint status: incomplete; focused tests and review are still in progress.
+> Status: complete within the assigned backend scope. Focused controlled-batch and JobRegistry suites pass; no provider calls were made.
 
 This is an explicit local-admin exception to strict native credit admission. It does not estimate or convert a LightSprint cost, create provider credit, or change subscription state. `JobRegistry.claim_operation` always tries the existing `credit_admission.reserve` first. Only its typed `CreditDenied` result may fall through to an exact grant in the same JobRegistry SQLite write transaction; an exception, timeout, or any other failure does not.
 
