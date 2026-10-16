@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore } from "../dist/store.js";
-import { InferenceProviderError, InferenceProviderStore, INFERENCE_PROVIDER_PRESETS, OpenAICompatibleInferenceAdapter } from "../dist/inference-providers.js";
+import { InferenceProviderError, InferenceProviderStore, INFERENCE_PROVIDER_PRESETS, OpenAICompatibleInferenceAdapter, validateCustomOrigin } from "../dist/inference-providers.js";
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "t2o-inference-provider-"));
@@ -101,4 +101,22 @@ test("adapter applies provider-specific default and clamped output caps and reje
   await assert.rejects(adapter.complete({ provider: "openai", model: "gpt-4.1-mini", body: { messages, max_tokens: 100, max_completion_tokens: 100 } }),
     error => error instanceof InferenceProviderError && error.code === "invalid_request");
   assert.equal(calls.length, 4, "invalid duplicate cap parameters must not call the provider");
+});
+
+test("custom origins reject unsafe URL forms and route only their exact allowlisted pool", async t => {
+  const { accounts } = await fixture(t);
+  for (const url of ["http://api.example.com", "https://user:pass@api.example.com", "https://api.example.com/?token=x", "https://localhost", "https://127.0.0.1", "https://10.0.0.1", "https://[::1]"]) assert.throws(() => validateCustomOrigin(url));
+  const provider = await accounts.addCustomProvider("Vendor", "https://api.vendor.example/v1");
+  const account = await accounts.addAccount({ provider: provider.id, label: "vendor account", token: "synthetic-vendor-token", allowedModels: ["chat-model"] });
+  const calls = [];
+  const adapter = new OpenAICompatibleInferenceAdapter(accounts, { fetch: async (url, init) => { calls.push([String(url), init.headers.authorization]); return Response.json({ ok: true }); } });
+  await assert.rejects(adapter.complete({ provider: "openai", model: "chat-model", body: { messages: [{ role: "user", content: "x" }] } }), e => e.code === "model_not_allowed");
+  assert.equal(calls.length, 0);
+  await adapter.complete({ provider: provider.id, model: "chat-model", body: { messages: [{ role: "user", content: "x" }] } });
+  assert.deepEqual(calls, [["https://api.vendor.example/v1/chat/completions", "Bearer synthetic-vendor-token"]]);
+  await accounts.updateCustomProvider(provider.id, "Vendor", "https://new.vendor.example/v1");
+  await assert.rejects(adapter.complete({ provider: provider.id, model: "chat-model", body: { messages: [{ role: "user", content: "x" }] } }), e => e.code === "no_eligible_account");
+  await accounts.updateAccount(account.id, { token: "synthetic-vendor-token-rotated" });
+  await adapter.complete({ provider: provider.id, model: "chat-model", body: { messages: [{ role: "user", content: "x" }] } });
+  assert.match(calls.at(-1)[0], /^https:\/\/new\.vendor\.example\/v1\//);
 });

@@ -54,9 +54,21 @@ test("inference account page requires admin session and CSRF, and never returns 
   assert.match(html, /name="_csrf"/);
   assert.doesNotMatch(html, /synthetic-openrouter-token/);
 
+  const custom = await post("custom-add", { label: "Vendor API", origin: "https://api.vendor.example" });
+  assert.equal(custom.status, 303);
+  const customProvider = (await admin.accounts.listCustomProviders())[0];
+  assert.match((await (await fetch(`${base}/token2oauth/admin/inference`, { headers: { cookie } })).text()), /Vendor API/);
+  const customAccount = await post("add", { provider: customProvider.id, label: "Vendor account", token: "synthetic-vendor-secret", models: "vendor-model" });
+  assert.equal(customAccount.status, 303);
+  const customPage = await fetch(`${base}/token2oauth/admin/inference`, { headers: { cookie } });
+  assert.doesNotMatch(await customPage.text(), /synthetic-vendor-secret/);
+
   const update = await post("update", { id: account.id, label: "Primary OpenRouter", models: "", enabled: "1" });
   assert.equal(update.status, 303);
   assert.deepEqual((await admin.accounts.listAccounts())[0].allowedModels, [], "empty model allowlist is persisted and denies inference");
+  const customEntry = (await admin.accounts.listAccounts()).find(x => x.provider === customProvider.id);
+  await post("remove", { id: customEntry.id });
+  await post("custom-remove", { id: customProvider.id });
   const removed = await post("remove", { id: account.id });
   assert.equal(removed.status, 303);
   assert.equal((await admin.accounts.listAccounts()).length, 0);

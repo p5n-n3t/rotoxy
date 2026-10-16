@@ -169,6 +169,28 @@ test("OpenAI and OpenRouter configured allowlist edits invalidate the merged cat
   assert.match(refreshed.headers.get("x-model-catalog-provenance"), /cache-miss/);
 });
 
+test("custom provider namespaced catalog dispatches only to saved origin", async t => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith("https://api.vendor.example/")) { calls.push([String(url), init.headers.authorization]); return Response.json({ id: "ok" }); }
+    return originalFetch(url, init);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const { store, api, base } = await fixture(t);
+  const providers = new InferenceProviderStore(store);
+  const p = await providers.addCustomProvider("Vendor", "https://api.vendor.example/v1");
+  await providers.addAccount({ provider: p.id, label: "Vendor account", token: "synthetic-vendor-token", allowedModels: ["chat-model"] });
+  const read = await api.modelCredentials.issueToken({ scopes: ["model:read"], expiresInSeconds: 3600 });
+  const invoke = await api.modelCredentials.issueToken({ scopes: ["model:invoke"], expiresInSeconds: 3600 });
+  const models = await fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${read.token}` } });
+  assert.equal(models.status, 200, await models.clone().text());
+  assert.deepEqual((await models.json()).data.map(x => x.id), [`${p.id}/chat-model`]);
+  const response = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${invoke.token}`, "content-type": "application/json" }, body: JSON.stringify({ model: `${p.id}/chat-model`, messages: [{ role: "user", content: "hello" }] }) });
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [["https://api.vendor.example/v1/chat/completions", "Bearer synthetic-vendor-token"]]);
+});
+
 test("Cloudflare chat maps a bounded nonstream response, enforces scopes and rejects oversized output without replay", async t => {
   const calls = [];
   const cloudflareAdapter = { run: async input => {

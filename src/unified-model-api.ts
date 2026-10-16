@@ -1,4 +1,4 @@
-import { InferenceProviderStore, OpenAICompatibleInferenceAdapter, InferenceProviderError } from "./inference-providers.js";
+import { InferenceProviderStore, OpenAICompatibleInferenceAdapter, InferenceProviderError, type InferenceProvider } from "./inference-providers.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
@@ -15,7 +15,7 @@ const MAX_CATALOG_ACCOUNTS = 100;
 const MAX_CATALOG_MODELS = 1000;
 const CATALOG_CACHE_MS = 60_000;
 
-interface CatalogBody { object: "list"; data: Array<{ id: string; object: "model"; owned_by: "cloudflare" | "ollama" | "openai" | "openrouter" }> }
+interface CatalogBody { object: "list"; data: Array<{ id: string; object: "model"; owned_by: string }> }
 interface CatalogVersion {
   digest: string;
   cloudflareModels: string[];
@@ -215,7 +215,7 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
     if (version.ollamaAccounts.length > 0 && successfulCatalogs === 0 && version.cloudflareModels.length === 0) throw new Error("ollama_catalog_unavailable");
     const names = [...new Set([...version.cloudflareModels, ...ollamaModels])].slice(0, MAX_CATALOG_MODELS * 2);
     return {
-      body: { object: "list", data: names.map(id => ({ id, object: "model", owned_by: id.startsWith("cloudflare/") ? "cloudflare" : id.startsWith("openai/") ? "openai" : id.startsWith("openrouter/") ? "openrouter" : "ollama" })) },
+      body: { object: "list", data: names.map(id => ({ id, object: "model", owned_by: id.startsWith("cloudflare/") ? "cloudflare" : /^(openai|openrouter|custom-[A-Za-z0-9_-]{24})\//.exec(id)?.[1] ?? "ollama" })) },
       ollamaSource: version.ollamaAccounts.length === 0 ? version.ollamaConfigured ? "not-eligible" : "not-configured" : successfulCatalogs ? "live" : "unavailable",
     };
   };
@@ -289,7 +289,8 @@ export function createUnifiedModelApi(store: StateStore, options: UnifiedModelAp
           body = parsed as Record<string, unknown>;
         } catch { return error(res, 400, "invalid_request"); }
         if (typeof body.model !== "string" || !body.model || body.model.length > 240) return error(res, 400, "invalid_model");
-        const externalProvider = body.model.startsWith("openai/") ? "openai" : body.model.startsWith("openrouter/") ? "openrouter" : undefined;
+        const customPrefix = /^(custom-[A-Za-z0-9_-]{24})\//.exec(body.model)?.[1];
+        const externalProvider: InferenceProvider | undefined = body.model.startsWith("openai/") ? "openai" : body.model.startsWith("openrouter/") ? "openrouter" : customPrefix as `custom-${string}` | undefined;
         if (externalProvider) {
           if (body.stream === true) return error(res, 400, "streaming_not_supported");
           const model = body.model.slice(externalProvider.length + 1);
