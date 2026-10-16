@@ -437,6 +437,7 @@ test("live token shape associates independently identified reply with the newest
     clientFactory: clientFactory(async (_method, request) => {
       assert.equal(request.arguments.path, `/api/agent-sessions/${SESSION_ID}/transcript?limit=100&include=text&maxBytes=131072`);
       return ok({items: [
+        {seq:1,type:'historical_compaction',time:'2026-10-15T00:00:00Z'},
         {seq:1903,turnId:'user-item',type:'user_message',time:'2026-10-16T12:40:25.985Z',payload:{content:'exact instruction'}},
         {seq:1904,turnId:'assistant-item',type:'assistant_snapshot',time:'2026-10-16T12:40:29.640Z',payload:{content:'ROTOXY_ADMITTED_OK'}},
       ],hasMore:true});

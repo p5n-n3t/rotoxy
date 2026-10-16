@@ -355,7 +355,11 @@ function projectMessage(source: unknown): { message: Record<string, unknown>; co
 function projectTokenTranscript(value: Record<string, unknown>): unknown {
   const items = value.items;
   if (!Array.isArray(items)) return undefined;
-  const bounded = items.slice(-MAX_RECENT_TRANSCRIPT_MESSAGES);
+  const recent = items.slice(-MAX_RECENT_TRANSCRIPT_MESSAGES);
+  // Historical compaction/metadata records need not have message identifiers.
+  // Only the suffix beginning at the newest user instruction can complete work.
+  const boundary = recent.findLastIndex(x => record(x)?.type === "user_message");
+  const bounded = boundary < 0 ? recent : recent.slice(boundary);
   const valid = bounded.every((x) => {
     const item = record(x);
     return item && Number.isSafeInteger(item.seq) && Number(item.seq) >= 0 &&
