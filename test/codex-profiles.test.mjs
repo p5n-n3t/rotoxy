@@ -42,6 +42,8 @@ test("registers isolated private CODEX_HOME profiles and persists only non-secre
   assert.deepEqual(Object.keys(JSON.parse(raw).profiles[0]).sort(), ["createdAt", "id", "label", "profileDir", "updatedAt"]);
   assert.doesNotMatch(raw, /auth\.json|accessToken|refreshToken|secret/i);
   assert.match(renderCodexProfilesPage([a]), /Work &lt;one&gt;/);
+  assert.match(renderCodexProfilesPage([a]), /Not checked/);
+  assert.match(renderCodexProfilesPage([a]), /Sign-in &amp; reported plan/);
   assert.doesNotMatch(renderCodexProfilesPage([a]), /Work <one>/);
 });
 
