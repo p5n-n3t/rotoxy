@@ -96,13 +96,13 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
     res.status(404).json({ error: "not_found" });
   });
 
-  app.use((error: any, _req: any, res: any, _next: any) => {
+  app.use((_error: any, _req: any, res: any, _next: any) => {
     console.error("[rotoxy] request failed");
     if (res.headersSent) return;
-    res.status(500).json({ error: "internal_error", message: String(error?.message || error) });
+    res.status(500).json({ error: "internal_error" });
   });
 
-  return { app, store, pool, telemetry, sessions, supervisor, webTools, modelGateway, codexProfiles };
+  return { app, store, pool, telemetry, sessions, supervisor, webTools, modelGateway, codexProfiles, agentWorkspace };
 }
 
 export async function startServer(options: ServerOptions = {}) {
@@ -114,7 +114,7 @@ export async function startServer(options: ServerOptions = {}) {
     supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)),
     store,
   }) : undefined;
-  const { app, codexProfiles } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath });
+  const { app, codexProfiles, agentWorkspace } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath });
   const host = options.host || process.env.TOKEN2OAUTH_HOST || "127.0.0.1";
   const port = options.port || Number(process.env.TOKEN2OAUTH_PORT || 2030);
 
@@ -138,6 +138,9 @@ export async function startServer(options: ServerOptions = {}) {
     });
   });
 
+  const workspaceReconciler = options.supervisorBackend || runtime ? agentWorkspace.createReconciler() : undefined;
+  workspaceReconciler?.start();
+  server.once("close", () => { workspaceReconciler?.stop(); });
   if (codexProfiles) server.once("close", () => { void codexProfiles.close(); });
   if (runtime) server.once("close", () => { void runtime.close(); });
 

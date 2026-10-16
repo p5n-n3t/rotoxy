@@ -72,6 +72,11 @@ test("SQLite reconciliation lease is scoped, durable, and only settles terminal 
   assert.deepEqual(syncCalls, [binding("job-terminal")]);
   assert.deepEqual(ledger({ command: "claim_reconciliation", limit: 3 }).value.bindings, []);
 
+  for (const id of ["old-one", "old-two", "old-three", "new-unobserved"]) assert.equal(reserve(id).status, 0);
+  const aged = spawnSync("/usr/bin/python3", ["-c", "import sqlite3,sys,time; d=sqlite3.connect(sys.argv[1]); d.execute(\"UPDATE workspace_execution_bindings SET created_at=1,last_polled_at=?,lease_until=0 WHERE job_id LIKE 'old-%'\",(int(time.time()*1000)-130000,)); d.commit()", db], { encoding: "utf8" });
+  assert.equal(aged.status, 0, aged.stderr);
+  assert.deepEqual(ledger({ command: "claim_reconciliation", limit: 1 }).value.bindings, [binding("new-unobserved")], "older long-running jobs cannot starve unobserved arrivals");
+
   const uncertainResults = [
     { dispatch: { state: "completed" }, projectionPending: false, resultsUnavailable: true },
     { dispatch: { state: "completed" }, projectionPending: true, resultsUnavailable: false },

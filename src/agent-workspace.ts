@@ -11,6 +11,7 @@ import { esc } from "./html.js";
 import { createHash } from "node:crypto";
 import { WorkspaceExecutionError, WorkspaceExecutionService, WORKSPACE_EXECUTION_TOOLS, isWorkspaceExecutionToolName, workspaceExecutionRequiredScope, type WorkspaceExecutionToolName } from "./workspace-execution.js";
 import { validateJobSubmission, type JobSubmission } from "./job-submit.js";
+import { WorkspaceReconciler } from "./workspace-reconciler.js";
 
 const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -147,6 +148,13 @@ export class AgentWorkspaceService {
       result.push({ projectId: row.projectId });
     }
     return result;
+  }
+
+  createReconciler(intervalMs = 30_000): WorkspaceReconciler {
+    return new WorkspaceReconciler({
+      ...this.execution.reconciliationCallbacks(({ projectId, jobId, clientId }) => this.sync(projectId, jobId, clientId)),
+      intervalMs,
+    });
   }
 
   private async assertConfiguredProject(projectId: string): Promise<void> {

@@ -161,6 +161,25 @@ test("workspace execution persists before submit, replays once, reconciles owner
     assert.ok(board.executions.some(e=>e.jobId===dag.jobId));
     assert.ok(board.executionRevision>0);
 
+    const background = submission("job-background-handoff");
+    assert.equal((await mcp(owner,"workspace_dispatch",background)).value.accepted,true);
+    const submitCount=calls.filter(c=>c.name==="job_submit").length;
+    const reconciler=restartedApp.agentWorkspace.createReconciler(200);
+    let backgroundArtifact;
+    try {
+      reconciler.start();
+      const deadline=Date.now()+30000;
+      while(Date.now()<deadline) {
+        const observed=(await mcp(collaborator,"workspace_snapshot",{projectId:"project-a"})).value;
+        const task=observed.tasks.find(t=>t.jobId===background.jobId);
+        backgroundArtifact=observed.artifacts.find(a=>a.taskId===task?.id);
+        if(backgroundArtifact) break;
+        await new Promise(resolve=>setTimeout(resolve,500));
+      }
+    } finally { reconciler.stop(); }
+    assert.ok(backgroundArtifact,"background reconciliation publishes results after the initiating HTTP request ended");
+    assert.equal(calls.filter(c=>c.name==="job_submit").length,submitCount,"background observation never launches another inference/job");
+
   } finally {
     if (server) await close(server);
     if (priorHome === undefined) delete process.env.HOME; else process.env.HOME = priorHome;

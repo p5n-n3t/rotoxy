@@ -168,7 +168,7 @@ def handle(path, request):
                 rows = db.execute("""SELECT project_id,job_id,client_id FROM workspace_execution_bindings
                     WHERE settled=0 AND COALESCE(lease_until,0)<=?
                     AND (last_polled_at IS NULL OR last_polled_at<=?)
-                    ORDER BY created_at ASC,project_id ASC,job_id ASC,client_id ASC LIMIT ?""",
+                    ORDER BY COALESCE(last_polled_at,0) ASC,created_at ASC,project_id ASC,job_id ASC,client_id ASC LIMIT ?""",
                     (now, now - 30_000, limit)).fetchall()
                 claimed = []
                 for row in rows:
