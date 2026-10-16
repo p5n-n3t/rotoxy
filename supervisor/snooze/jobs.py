@@ -883,17 +883,23 @@ class JobRegistry:
                 try:
                     self.credit_admission.reserve(operation_id=op["id"], account_id=op["account"])
                 except CreditDenied:
-                    db.execute("UPDATE operations SET state='rejected',error_class='CreditAdmissionDenied' WHERE id=? AND state='queued'", (op["id"],))
-                    db.execute("UPDATE job_tasks SET state='blocked',released_at=? WHERE assignment=? AND task_id=? AND generation=?",
-                               (when, op["assignment"], op["task_id"], op["generation"]))
-                    if self.repository is not None:
-                        db.execute("UPDATE attempts SET state='blocked',released_at=? WHERE id=? AND released_at IS NULL",
-                                   (when, op["attempt_id"]))
-                    db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
-                    self._event(db, op["assignment"], "credit_admission_denied", {
-                        "taskId": op["task_id"], "generation": op["generation"], "operationId": op["id"]
-                    }, when)
-                    return None
+                    # Optional local-admin exception remains narrow: strict
+                    # verified credit admission always runs first. Approval
+                    # consumption and the claim below share this transaction.
+                    from .controlled_batches import consume_on_credit_denied
+                    admitted = consume_on_credit_denied(db, op, task_spec, assignment, when, self._event)
+                    if not admitted:
+                        db.execute("UPDATE operations SET state='rejected',error_class='CreditAdmissionDenied' WHERE id=? AND state='queued'", (op["id"],))
+                        db.execute("UPDATE job_tasks SET state='blocked',released_at=? WHERE assignment=? AND task_id=? AND generation=?",
+                                   (when, op["assignment"], op["task_id"], op["generation"]))
+                        if self.repository is not None:
+                            db.execute("UPDATE attempts SET state='blocked',released_at=? WHERE id=? AND released_at IS NULL",
+                                       (when, op["attempt_id"]))
+                        db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
+                        self._event(db, op["assignment"], "credit_admission_denied", {
+                            "taskId": op["task_id"], "generation": op["generation"], "operationId": op["id"]
+                        }, when)
+                        return None
             db.execute("UPDATE operations SET state='claimed',worker=?,lease_until=? WHERE id=? AND state='queued'",
                        (worker_id, when + lease_seconds, op["id"]))
             return {"operationId": op["id"], "attemptId": op["attempt_id"], "generation": op["generation"],
