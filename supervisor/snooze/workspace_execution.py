@@ -17,7 +17,7 @@ import time
 
 from snooze.agent_workspace import AgentWorkspace, WorkspaceError
 
-MAX_INPUT = 1_100_000
+MAX_INPUT = 2_200_000  # Original and namespaced submissions share one private request.
 MAX_OUTPUT = 2_000_000
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 STATES = {"pending", "accepted", "needs_reconciliation", "draft", "queued", "running", "held", "paused", "emergency_stopped", "complete", "completed", "blocked", "failed", "cancelled", "unknown"}

@@ -23,7 +23,7 @@ const ACTIONS = new Set([
   "participant_upsert", "task_create", "task_claim", "task_update", "message_send", "message_ack", "artifact_submit", "review_decide",
 ]);
 
-export type AgentWorkspaceToolName = "workspace_snapshot" | "workspace_update" | WorkspaceExecutionToolName;
+export type AgentWorkspaceToolName = "workspace_projects" | "workspace_snapshot" | "workspace_update" | WorkspaceExecutionToolName;
 export interface AgentWorkspaceSnapshot {
   projectId: string;
   revision: number;
@@ -137,6 +137,18 @@ export class AgentWorkspaceService {
     return this.backend?.listProjects?.() ?? [];
   }
 
+  async authorizedProjects(clientId: string): Promise<Array<{ projectId: string }>> {
+    validateActor("client:" + clientId);
+    const rows = await this.backend?.workspaceProjects?.(clientId) ?? [];
+    const result: Array<{ projectId: string }> = [];
+    for (const row of rows.slice(0, 100)) {
+      if (typeof row.projectId !== "string" || !PROJECT_ID.test(row.projectId)) continue;
+      await this.backend?.authorizeWorkspace?.(row.projectId, clientId);
+      result.push({ projectId: row.projectId });
+    }
+    return result;
+  }
+
   private async assertConfiguredProject(projectId: string): Promise<void> {
     validateProjectId(projectId);
     if (!(await this.projects()).includes(projectId)) throw new AgentWorkspaceError("project_unavailable");
@@ -173,7 +185,7 @@ export class AgentWorkspaceService {
       throw new AgentWorkspaceError("bridge_output_invalid");
     }
     const executionSummaries = await this.execution.summaries(projectId);
-    return { ...result, executionResources: await this.backend?.workspaceResources?.(projectId) ?? [], ...(executionSummaries.length ? { executionSummaries } : {}) } as unknown as AgentWorkspaceSnapshot;
+    return { ...result, executionResources: await this.backend?.workspaceResources?.(projectId) ?? [], executions: executionSummaries, executionRevision: Math.max(0, ...executionSummaries.map(row => row.updatedAt)), ...(executionSummaries.length ? { executionSummaries } : {}) } as unknown as AgentWorkspaceSnapshot;
   }
 
   async update(projectId: string, actor: string, input: Record<string, unknown>): Promise<unknown> {
@@ -190,11 +202,13 @@ export class AgentWorkspaceService {
     const result = await this.execution.dispatch(submission, { projectId: submission.projectId, clientId });
     // Replays can race the original submit. Avoid concurrent projection writes;
     // explicit workspace_sync repairs a missing projection after a crash.
+    let projectionPending = false;
     if (result.accepted && !result.replayed) {
       await this.backend.authorizeWorkspace(submission.projectId, clientId);
-      await this.projectSubmission(submission, `client:${clientId}`, [], []);
+      try { projectionPending = await this.projectSubmission(submission, `client:${clientId}`, [], []); }
+      catch { projectionPending = true; }
     }
-    return { dispatch: result.dispatch, accepted: result.accepted, replayed: result.replayed, ...(result.providerError ? { providerError: result.providerError } : {}) };
+    return { dispatch: result.dispatch, accepted: result.accepted, replayed: result.replayed, projectionPending, ...(result.providerError ? { providerError: result.providerError } : {}) };
   }
 
   async sync(projectId: string, jobId: string, clientId: string): Promise<unknown> {
@@ -204,12 +218,15 @@ export class AgentWorkspaceService {
     const stored = await this.execution.getOwned(projectId, jobId, clientId);
     await this.backend.authorizeWorkspace(projectId, clientId);
     if (stored.actor !== `client:${clientId}`) throw new WorkspaceExecutionError("execution_not_found");
-    await this.projectSubmission(stored.submission, stored.actor, result.results, result.status.tasks);
-    return { dispatch: result.dispatch, status: result.status, results: result.results, resultsUnavailable: result.resultsUnavailable, resultsTruncated: result.resultsTruncated, ...(result.resultError ? { resultError: result.resultError } : {}) };
+    let projectionPending = false;
+    try { projectionPending = await this.projectSubmission(stored.submission, stored.actor, result.results, result.status.tasks); }
+    catch { projectionPending = true; }
+    return { dispatch: result.dispatch, status: result.status, results: result.results, projectionPending, resultsUnavailable: result.resultsUnavailable, resultsTruncated: result.resultsTruncated, ...(result.resultError ? { resultError: result.resultError } : {}) };
   }
 
-  private async projectSubmission(submission: JobSubmission, actor: string, results: { taskId: string; text: string }[], taskStatuses: { taskId: string; state?: string }[]): Promise<void> {
+  private async projectSubmission(submission: JobSubmission, actor: string, results: { taskId: string; text: string }[], taskStatuses: { taskId: string; state?: string }[]): Promise<boolean> {
     let snapshot = await this.snapshot(submission.projectId, actor);
+    let pending = false;
     // Bind every projected identifier to the verified dispatch author and project.
     // A second OAuth client reusing a public job/task id must not collide with it.
     const projectionKey = createHash("sha256").update(`rotoxy:workspace-projection:v1\0${submission.projectId}\0${actor}\0${submission.jobId}`).digest("hex");
@@ -237,6 +254,10 @@ export class AgentWorkspaceService {
       const reportedState = taskStatuses.find(row => row.taskId === task.taskId)?.state?.toLowerCase();
       const result = results.find(row => row.taskId === task.taskId);
       if (projected?.state === "queued" && (result || ["reserved", "starting", "running", "awaiting_output", "blocked", "failed", "completed", "complete", "succeeded", "done"].includes(reportedState ?? ""))) {
+        // Provider execution dependencies and independent workspace reviews are
+        // separate barriers. Keep later artifacts pending until local review
+        // prerequisites are satisfied; never forge an approval to import them.
+        if (task.dependsOn.some(dep => !(snapshot.tasks as any[]).some(row => row.id === projectedTaskId(dep) && row.state === "complete"))) { pending = true; continue; }
         await apply({ action: "task_claim", taskId: workspaceTaskId });
         projected = (snapshot.tasks as any[]).find(row => row.id === workspaceTaskId);
       }
@@ -251,7 +272,10 @@ export class AgentWorkspaceService {
         await apply({ action: "artifact_submit", artifactId: `result-${workspaceTaskId}`, taskId: workspaceTaskId,
           kind: "text", reference: reference || "(empty result)", title: `Execution result · ${task.taskId}` });
       }
+      if (projected?.assignee && projected.assignee !== actor && result) pending = true;
+      if (!result && ["completed", "complete", "succeeded", "done"].includes(reportedState ?? "") && !["review", "complete"].includes(projected?.state)) pending = true;
     }
+    return pending;
   }
 }
 
@@ -278,6 +302,11 @@ const workspaceUpdateSchema = { oneOf: Object.entries(updateActions).map(([actio
 
 export const AW_TOOL_DEFINITIONS: readonly AgentWorkspaceToolDefinition[] = Object.freeze([
   {
+    name: "workspace_projects",
+    description: "Discover only Agent Workspace projects explicitly authorized for this OAuth client. An empty list means an administrator must grant project access.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
     name: "workspace_snapshot",
     description: "Read the bounded project Agent Workspace snapshot and private-to-actor messages.",
     inputSchema: { type: "object", properties: { projectId: { type: "string", minLength: 1, maxLength: 128 }, after: { type: "integer", minimum: 0 } }, required: ["projectId"], additionalProperties: false },
@@ -291,7 +320,7 @@ export const AW_TOOL_DEFINITIONS: readonly AgentWorkspaceToolDefinition[] = Obje
 export const ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS = Object.freeze([...AW_TOOL_DEFINITIONS, ...WORKSPACE_EXECUTION_TOOLS]);
 
 export function isAgentWorkspaceToolName(name: unknown): name is AgentWorkspaceToolName {
-  return name === "workspace_snapshot" || name === "workspace_update" || isWorkspaceExecutionToolName(name);
+  return name === "workspace_projects" || name === "workspace_snapshot" || name === "workspace_update" || isWorkspaceExecutionToolName(name);
 }
 
 export function awRequiredScope(name: AgentWorkspaceToolName): "jobs:read" | "jobs:write" {
@@ -299,6 +328,10 @@ export function awRequiredScope(name: AgentWorkspaceToolName): "jobs:read" | "jo
 }
 
 export function validateAgentWorkspaceToolArguments(name: AgentWorkspaceToolName, raw: unknown): Record<string, unknown> {
+  if (name === "workspace_projects") {
+    if (!isRecord(raw) || Object.keys(raw).length) throw new AgentWorkspaceError("invalid_input");
+    return {};
+  }
   if (!isRecord(raw) || Object.keys(raw).some((key) => !["projectId", ...(name === "workspace_snapshot" ? ["after"] : ["input"])].includes(key)) || typeof raw.projectId !== "string") {
     throw new AgentWorkspaceError("invalid_input");
   }

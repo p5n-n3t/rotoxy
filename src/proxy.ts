@@ -563,6 +563,10 @@ export class McpProxy {
     if (!this.workspace?.backend?.authorizeWorkspace) throw new SupervisorUnavailable();
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new JobInputError("invalid workspace arguments");
     const args = raw as Record<string, unknown>;
+    if (name === "workspace_projects") {
+      if (Object.keys(args).length) throw new JobInputError("workspace_projects accepts no arguments");
+      return { projects: await this.workspace.service.authorizedProjects(clientId) };
+    }
     if (isWorkspaceExecutionToolName(name)) {
       const allowed = name === "workspace_dispatch"
         ? ["schemaVersion", "jobId", "idempotencyKey", "projectId", "eligibleAccountIds", "scheduling", "tasks"]

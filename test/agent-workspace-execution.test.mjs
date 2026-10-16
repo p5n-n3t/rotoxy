@@ -28,21 +28,23 @@ test("workspace execution persists before submit, replays once, reconciles owner
   const dir = await mkdtemp(join(tmpdir(), "rotoxy-aw-execution-"));
   const priorHome = process.env.HOME, priorConfig = process.env.ROTOXY_CONFIG_DIR;
   process.env.HOME = dir; process.env.ROTOXY_CONFIG_DIR = join(dir, "config");
-  const allowed = new Set(); const calls = []; let ambiguous = true; let revokeAfterResults = false;
+  const allowed = new Set(); const submissions = new Map(); const calls = []; let ambiguous = true; let revokeAfterResults = false;
   const backend = {
     listProjects: () => ["project-a"],
+    workspaceProjects: async clientId => allowed.has(clientId) ? [{projectId:"project-a"}] : [],
     authorizeWorkspace: (projectId, clientId) => { if (projectId !== "project-a" || !allowed.has(clientId)) throw new Error("workspace_forbidden"); },
     callTool: async (name, args, caller) => {
       calls.push({ name, args, caller });
       if (name === "job_submit") {
         await new Promise(resolve => setTimeout(resolve, 50));
-        if (args.tasks?.[0]?.instructions === "ambiguous" && ambiguous) { ambiguous = false; throw new Error("timeout after send"); }
+        submissions.set(args.jobId, args);
+        if (args.tasks?.[0]?.instructions === "ambiguous" && ambiguous) { ambiguous = false; throw new Error("timeout after send Basic dXNlcjpwYXNz https://user:secret@invalid.test password=private-value"); }
         return { assignmentId: args.jobId, state: "queued" };
       }
-      if (name === "job_status") return { projectId: args.projectId, assignmentId: args.jobId, state: "completed", revision: 7, tasks: [{ taskId: "task-a", state: "completed" }, { taskId: "unrelated-task", state: "completed" }] };
+      if (name === "job_status") return { projectId: args.projectId, assignmentId: args.jobId, state: "completed", revision: 7, tasks: [...(submissions.get(args.jobId)?.tasks ?? []).map(t => ({taskId:t.taskId,state:"completed"})), { taskId: "unrelated-task", state: "completed" }] };
       if (name === "job_results") {
         if (revokeAfterResults) allowed.delete(caller.clientId);
-        return { assignmentId: args.jobId, results: [{ taskId: "task-a", text: "safe shared result", reportedModel: "reported-model" }, { taskId: "unrelated-task", text: "must not leak" }] };
+        return { assignmentId: args.jobId, results: [...(submissions.get(args.jobId)?.tasks ?? []).map(t => ({taskId:t.taskId,text:"safe shared result",reportedModel:"reported-model"})), { taskId: "unrelated-task", text: "must not leak" }] };
       }
       throw new Error("unexpected tool " + name);
     },
@@ -61,6 +63,11 @@ test("workspace execution persists before submit, replays once, reconciles owner
       const text = body.result?.content?.[0]?.text;
       return { status: response.status, body, value: text ? JSON.parse(text) : undefined };
     };
+    assert.deepEqual((await mcp(readOnly,"workspace_projects",{})).value, {projects:[{projectId:"project-a"}]});
+    assert.ok((await mcp(owner,"workspace_projects",{clientId:collaborator.clientId})).body.error);
+    allowed.delete(readOnly.clientId);
+    assert.deepEqual((await mcp(readOnly,"workspace_projects",{})).value, {projects:[]});
+    allowed.add(readOnly.clientId);
     const listed = await fetch(base + "/mcp", { method: "POST", headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
     assert.ok((await listed.json()).result.tools.some(tool => tool.name === "workspace_dispatch"));
     const readOnlyList = await fetch(base + "/mcp", { method: "POST", headers: { authorization: `Bearer ${readOnly.token}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
@@ -127,12 +134,33 @@ test("workspace execution persists before submit, replays once, reconciles owner
     const ambiguousCallsBefore = calls.filter(call => call.name === "job_submit" && call.caller.clientId === owner.clientId).length;
     const firstAttempt = await mcp(owner, "workspace_dispatch", uncertain);
     assert.equal(firstAttempt.value.accepted, false);
+    assert.equal(firstAttempt.value.providerError,"provider_operation_unavailable");
+    assert.doesNotMatch(JSON.stringify(firstAttempt.value),/dXNlcjpwYXNz|private-value|user:secret/);
     assert.equal(firstAttempt.value.dispatch.state, "needs_reconciliation");
     const retry = await mcp(owner, "workspace_dispatch", uncertain);
     assert.equal(retry.value.replayed, true);
     assert.equal(calls.filter(call => call.name === "job_submit" && call.caller.clientId === owner.clientId).length, ambiguousCallsBefore + 1, "ambiguous submit is not resent");
     const reconciled = await mcp(owner, "workspace_sync", { projectId: "project-a", jobId: uncertain.jobId });
     assert.equal(reconciled.value.status.state, "completed");
+    const dag = submission("job-dependency-review");
+    dag.tasks.push({...structuredClone(dag.tasks[0]), taskId:"task-b", dependsOn:["task-a"], scopeKeys:["path:tests"]});
+    assert.equal((await mcp(owner,"workspace_dispatch",dag)).value.accepted,true);
+    const firstSync=await mcp(owner,"workspace_sync",{projectId:"project-a",jobId:dag.jobId});
+    assert.equal(firstSync.value.projectionPending,true,"provider completion cannot forge a prerequisite review");
+    let board=(await mcp(collaborator,"workspace_snapshot",{projectId:"project-a"})).value;
+    const firstTask=board.tasks.find(t=>t.jobId===dag.jobId&&t.externalTaskId==="task-a");
+    const nextTask=board.tasks.find(t=>t.jobId===dag.jobId&&t.externalTaskId==="task-b");
+    assert.equal(firstTask.state,"review");assert.equal(nextTask.state,"queued");
+    const artifact=board.artifacts.find(a=>a.taskId===firstTask.id);
+    const review=await mcp(collaborator,"workspace_update",{projectId:"project-a",input:{action:"review_decide",artifactId:artifact.id,decision:"approved",idempotencyKey:"dependency-independent-review",expectedRevision:board.revision}});
+    assert.ok(!review.body.error,JSON.stringify(review.body));
+    const nextSync=await mcp(owner,"workspace_sync",{projectId:"project-a",jobId:dag.jobId});
+    assert.equal(nextSync.value.projectionPending,false);
+    board=(await mcp(collaborator,"workspace_snapshot",{projectId:"project-a"})).value;
+    assert.equal(board.tasks.find(t=>t.id===nextTask.id).state,"review");
+    assert.ok(board.executions.some(e=>e.jobId===dag.jobId));
+    assert.ok(board.executionRevision>0);
+
   } finally {
     if (server) await close(server);
     if (priorHome === undefined) delete process.env.HOME; else process.env.HOME = priorHome;

@@ -42,11 +42,8 @@ function workspaceId(kind: string, projectId: string, clientId: string, sourceId
   return "ws-" + createHash("sha256").update(`rotoxy:workspace:${kind}:v1\0${projectId}\0${clientId}\0${sourceId}`).digest("hex").slice(0, 48);
 }
 function safeProviderError(error: unknown): string {
-  let value = error instanceof Error ? error.message : "provider operation failed";
-  value = value.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
-    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|lsat_[A-Za-z0-9_-]+)\b/g, "[REDACTED]")
-    .replace(/(token|api[_-]?key|secret|password)=([^\s&]+)/gi, "$1=[REDACTED]");
-  return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 300) || "provider operation failed";
+  const known = new Set(["ACP_RELAY_DIED", "QUOTA_EXHAUSTED", "RATE_LIMITED", "CREDENTIAL_EXPIRED", "WORKSPACE_INACCESSIBLE"]);
+  return error instanceof Error && known.has(error.message) ? error.message : "provider_operation_unavailable";
 }
 function remoteState(value: unknown): string {
   if (!isObject(value)) return "unknown";

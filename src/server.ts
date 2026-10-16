@@ -20,6 +20,7 @@ import { StateStore, normalizeBasePath } from "./store.js";
 import { TelemetryRecorder } from "./telemetry.js";
 import { createSupervisorAdminRouter, SupervisorApi, type SupervisorBackend } from "./supervisor-api.js";
 import { createSupervisorRuntime } from "./supervisor-runtime.js";
+import { createAgentWorkspaceAccessRouter } from "./agent-workspace-access.js";
 import { liveWebToolsConfig, type ConfiguredWebTools } from "./web-tools-config.js";
 import { createAnalyticsApiRouter } from "./analytics-api.js";
 import { createModelGateway } from "./model-gateway.js";
@@ -69,6 +70,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(cloudflare.router);
   router.use(createInferenceProviderAdminRouter(store, sessions).router);
   router.use(createResourceRoutingAdminRouter(store, sessions).router);
+  router.use(createAgentWorkspaceAccessRouter(store, sessions, options.supervisorBackend));
   router.use(createAgentWorkspaceRouter(store, sessions, agentWorkspace, renderAgentWorkspace));
   router.use(createCommandWorkspaceRouter(store, sessions, options.supervisorBackend));
   router.use(createJobsAdminRouter(store, sessions, options.supervisorBackend));

@@ -48,6 +48,16 @@ class AgentWorkspaceProcessTests(unittest.TestCase):
     def participant(self, actor, revision=None):
         return self.update(actor, {"action": "participant_upsert", "label": actor, "provider": "reported"}, expected=revision)
 
+    def test_shared_messages_redact_basic_url_and_json_credentials(self):
+        self.participant("client:alice")
+        self.update("client:alice", {"action": "message_send", "messageId": "redaction-proof", "to": "all",
+            "text": 'Basic dXNlcjpwYXNz https://user:privatepass@example.test/ {"api_key":"private-json-value"}'})
+        text = self.snapshot()["messages"][0]["text"]
+        self.assertNotIn("dXNlcjpwYXNz", text)
+        self.assertNotIn("privatepass", text)
+        self.assertNotIn("private-json-value", text)
+        self.assertIn("[REDACTED]", text)
+
     def test_process_restart_idempotency_revision_fence_and_permissions(self):
         self.participant("client:alice")
         self.participant("client:bob")

@@ -46,7 +46,7 @@ test("Agent Workspace service binds trusted actors, bounds the Python bridge, an
 
   assert.deepEqual(await service.projects(), ["project-a"]);
   const snapshot = await service.snapshot("project-a", "client:client-1", 9);
-  assert.deepEqual(snapshot, { ...sampleSnapshot("project-a"), executionResources: [] });
+  assert.deepEqual(snapshot, { ...sampleSnapshot("project-a"), executionResources: [], executions: [], executionRevision: 0 });
   assert.equal(calls[0].executable, "/usr/bin/python3");
   assert.deepEqual(calls[0].args.slice(0, 3), ["-m", "snooze.agent_workspace", "--db"]);
   assert.equal(isAbsolute(calls[0].args[3]), true);
@@ -72,7 +72,7 @@ test("Agent Workspace service binds trusted actors, bounds the Python bridge, an
   const oversizedOutput = new AgentWorkspaceService(store, backend, { runner: async () => "x".repeat(512 * 1024 + 1) });
   await assert.rejects(oversizedOutput.snapshot("project-a", "admin:local"), (error) => error.code === "bridge_output_invalid");
 
-  assert.deepEqual(AW_TOOL_DEFINITIONS.map((tool) => tool.name), ["workspace_snapshot", "workspace_update"]);
+  assert.deepEqual(AW_TOOL_DEFINITIONS.map((tool) => tool.name), ["workspace_projects", "workspace_snapshot", "workspace_update"]);
   assert.equal(isAgentWorkspaceToolName("workspace_update"), true);
   assert.equal(isAgentWorkspaceToolName("workspace_delete_all"), false);
   assert.equal(awRequiredScope("workspace_snapshot"), "jobs:read");
@@ -98,7 +98,7 @@ test("Agent Workspace service binds trusted actors, bounds the Python bridge, an
   assert.equal((await fetch(`${base}/admin/api/v1/agent-workspace/unknown-project`, { headers: { cookie } })).status, 404);
   const api = await fetch(`${base}/admin/api/v1/agent-workspace/project-a?after=2`, { headers: { cookie } });
   assert.equal(api.status, 200);
-  assert.deepEqual(await api.json(), { ...sampleSnapshot("project-a"), executionResources: [] });
+  assert.deepEqual(await api.json(), { ...sampleSnapshot("project-a"), executionResources: [], executions: [], executionRevision: 0 });
   assert.equal(calls.at(-1).stdin.after, 2);
   assert.equal(calls.at(-1).stdin.actor, "admin:local");
   const pageResponse = await fetch(`${base}/admin/agents`, { headers: { cookie } });

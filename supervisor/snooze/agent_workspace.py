@@ -25,6 +25,9 @@ MAX_INPUT_BYTES = 64 * 1024
 ADMIN = "admin:local"
 ID_RE = re.compile(r"^[A-Za-z0-9_.:@-]+$")
 SECRET_PATTERNS = (
+    (re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=_-]{4,}"), "Basic [REDACTED]"),
+    (re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@"), r"\1[REDACTED]@"),
+    (re.compile(r'(?i)("(?:access_token|refresh_token|api_key|password|secret)"\s*:\s*")[^"]*(")'), r"\1[REDACTED]\2"),
     (re.compile(r"(?i)\bBearer\s+\S+"), "Bearer [REDACTED]"),
     (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]{10,})\b"), "[REDACTED]"),
     (re.compile(r"\blsat_[A-Za-z0-9_-]+\b"), "[REDACTED]"),
