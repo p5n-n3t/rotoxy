@@ -49,6 +49,8 @@ const pythonImports = [
   "snooze.monitor",
   "snooze.guidance",
   "snooze.oracle_pool",
+  "snooze.agent_workspace",
+  "snooze.claude_workspace_worker",
   "snooze.credit_ledger",
   "snooze.credit_admission",
   "snooze.recovery",

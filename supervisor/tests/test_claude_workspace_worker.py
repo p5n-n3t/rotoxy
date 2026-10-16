@@ -151,6 +151,14 @@ class ClaudeWorkspaceWorkerTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(self.attempt()[0], "error")
 
+    def test_bedrock_profile_reports_exact_observed_model(self):
+        parsed, error = worker.parse_cli_result(json.dumps({"result": "ok", "modelUsage": {"global.anthropic.claude-sonnet-4-6": {}}, "total_cost_usd": 0}))
+        self.assertIsNone(error)
+        self.assertEqual(parsed["model_reported"], "global.anthropic.claude-sonnet-4-6")
+        self.assertEqual(parsed["total_cost"], 0)
+        self.args.model = "global.anthropic.claude-sonnet-4-6"
+        self.assertEqual(worker.validate_args(self.args), [])
+
     def test_runner_uses_stdin_and_fixed_bounded_environment_without_provider_key_inheritance(self):
         capture = self.root / "capture.py"
         capture.write_text("#!/usr/bin/python3\nimport json,os,sys\nprint(json.dumps({'stdin':sys.stdin.read(),'argv':sys.argv[1:],'output':os.getenv('CLAUDE_CODE_MAX_OUTPUT_TOKENS'),'thinking':os.getenv('MAX_THINKING_TOKENS'),'key':os.getenv('ANTHROPIC_API_KEY')}))\n")

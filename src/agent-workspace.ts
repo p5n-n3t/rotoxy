@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -31,7 +32,7 @@ export interface AgentWorkspaceSnapshot {
   events: unknown[];
   nextCursor: number;
 }
-export interface AgentWorkspaceRenderOptions { projectId: string; base: string; csrf: string; csrfToken: string; projects: string[] }
+export interface AgentWorkspaceRenderOptions { projectId: string; base: string; csrf: string; csrfToken: string; projects: string[]; nonce?: string }
 export type AgentWorkspaceRenderer = (snapshot: AgentWorkspaceSnapshot, options: AgentWorkspaceRenderOptions) => string;
 
 export interface AgentWorkspaceCommandOptions {
@@ -165,7 +166,7 @@ export class AgentWorkspaceService {
         !Number.isSafeInteger(result.nextCursor) || !["participants", "tasks", "messages", "artifacts", "reviews", "events"].every((key) => Array.isArray(result[key]))) {
       throw new AgentWorkspaceError("bridge_output_invalid");
     }
-    return result as unknown as AgentWorkspaceSnapshot;
+    return { ...result, executionResources: await this.backend?.workspaceResources?.(projectId) ?? [] } as unknown as AgentWorkspaceSnapshot;
   }
 
   async update(projectId: string, actor: string, input: Record<string, unknown>): Promise<unknown> {
@@ -182,6 +183,21 @@ export interface AgentWorkspaceToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+const workspaceText = (maxLength: number) => ({ type: "string", minLength: 1, maxLength });
+const workspaceId = workspaceText(128);
+const updateCommon = { idempotencyKey: workspaceId, expectedRevision: { type: "integer", minimum: 0 } };
+const updateActions: Record<string, { fields: Record<string, unknown>; required: string[] }> = {
+  participant_upsert: { fields: { label: workspaceText(120), provider: workspaceText(80), model: workspaceText(128), accountId: workspaceId }, required: ["label", "provider"] },
+  task_create: { fields: { taskId: workspaceId, title: workspaceText(200), description: workspaceText(8000), dependsOn: { type: "array", items: workspaceId, maxItems: 16 }, jobId: workspaceId, externalTaskId: workspaceId }, required: ["taskId", "title", "description"] },
+  task_claim: { fields: { taskId: workspaceId }, required: ["taskId"] },
+  task_update: { fields: { taskId: workspaceId, state: { enum: ["running", "blocked", "cancelled"] }, note: workspaceText(2000) }, required: ["taskId", "state"] },
+  message_send: { fields: { messageId: workspaceId, to: workspaceId, taskId: workspaceId, text: workspaceText(2000) }, required: ["messageId", "to", "text"] },
+  message_ack: { fields: { messageId: workspaceId }, required: ["messageId"] },
+  artifact_submit: { fields: { artifactId: workspaceId, taskId: workspaceId, kind: { enum: ["text", "branch", "pull_request"] }, reference: workspaceText(1000), title: workspaceText(200) }, required: ["artifactId", "taskId", "kind", "reference", "title"] },
+  review_decide: { fields: { artifactId: workspaceId, decision: { enum: ["approved", "changes_requested"] }, note: workspaceText(2000) }, required: ["artifactId", "decision"] },
+};
+const workspaceUpdateSchema = { oneOf: Object.entries(updateActions).map(([action, contract]) => ({ type: "object", properties: { action: { const: action }, ...updateCommon, ...contract.fields }, required: ["action", "idempotencyKey", "expectedRevision", ...contract.required], additionalProperties: false })) };
+
 export const AW_TOOL_DEFINITIONS: readonly AgentWorkspaceToolDefinition[] = Object.freeze([
   {
     name: "workspace_snapshot",
@@ -190,8 +206,8 @@ export const AW_TOOL_DEFINITIONS: readonly AgentWorkspaceToolDefinition[] = Obje
   },
   {
     name: "workspace_update",
-    description: "Submit one idempotent Agent Workspace task, message, artifact, participant, or review update.",
-    inputSchema: { type: "object", properties: { projectId: { type: "string", minLength: 1, maxLength: 128 }, input: { type: "object", required: ["action", "idempotencyKey", "expectedRevision"], additionalProperties: true } }, required: ["projectId", "input"], additionalProperties: false },
+    description: "Collaborate through task_create/claim/update, message_send/ack, artifact_submit, review_decide, and participant_upsert. Read snapshot revision first. Actor is verified OAuth client; participant model labels are reported metadata. Review decisions never merge PRs.",
+    inputSchema: { type: "object", properties: { projectId: { type: "string", minLength: 1, maxLength: 128 }, input: workspaceUpdateSchema }, required: ["projectId", "input"], additionalProperties: false },
   },
 ]);
 
@@ -219,12 +235,14 @@ export function validateAgentWorkspaceToolArguments(name: AgentWorkspaceToolName
 }
 
 function securityHeaders(_req: Request, res: Response, next: NextFunction): void {
+  const nonce = randomBytes(18).toString("base64");
+  res.locals.awNonce = nonce;
   res.setHeader("Cache-Control", "no-store, max-age=0");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Referrer-Policy", "no-referrer");
-  res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'");
+  res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`);
   next();
 }
 
@@ -286,7 +304,7 @@ export function createAgentWorkspaceRouter(
       }
       if (!PROJECT_ID.test(selected) || !projects.includes(selected)) return res.status(404).type("html").send(page("Agent Workspace", "<main><h1>Project unavailable</h1></main>"));
       const snapshot = await service.snapshot(selected, "admin:local", 0);
-      const content = renderer?.(snapshot, { projectId: selected, base, csrf, csrfToken: csrf, projects }) ?? `<main class="wrap"><h1>Agent Workspace · ${esc(selected)}</h1><p>Durable workspace data is available. Detailed rendering is not connected yet.</p><pre>${esc(JSON.stringify(snapshot, null, 2))}</pre><p><a href="${esc(base)}/admin/agents">All projects</a></p></main>`;
+      const content = renderer?.(snapshot, { projectId: selected, base, csrf, csrfToken: csrf, projects, nonce: res.locals.awNonce }) ?? `<main class="wrap"><h1>Agent Workspace · ${esc(selected)}</h1><p>Durable workspace data is available. Detailed rendering is not connected yet.</p><pre>${esc(JSON.stringify(snapshot, null, 2))}</pre><p><a href="${esc(base)}/admin/agents">All projects</a></p></main>`;
       return res.type("html").send(renderer ? content : page("Agent Workspace", content));
     } catch (error) { return errorResponse(res, error); }
   });

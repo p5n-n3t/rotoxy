@@ -469,6 +469,13 @@ export class SupervisorRuntime implements SupervisorBackend {
     throw new JobInputError("global supervisor controls are unavailable through project-scoped MCP");
   }
 
+  async workspaceResources(projectId: string): Promise<unknown> {
+    const project = this.config.projects.find(item => item.projectId === projectId);
+    if (!project) throw new JobInputError("project is not configured");
+    const state = await this.options.store.load();
+    return project.registeredSessions.map(session => ({ provider: "lightsprint", sessionId: session.sessionId, workspaceId: session.workspaceId, accountId: session.accountId, accountLabel: state.accounts.find(account => account.id === session.accountId)?.label ?? "Unknown", model: session.model, modelSource: "registered configuration", executionAvailability: "not checked by this snapshot" }));
+  }
+
   authorizeWorkspace(projectId: string, clientId: string): void {
     configuredProject(this.config, { projectId, clientId });
   }

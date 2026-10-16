@@ -46,7 +46,7 @@ test("Agent Workspace service binds trusted actors, bounds the Python bridge, an
 
   assert.deepEqual(await service.projects(), ["project-a"]);
   const snapshot = await service.snapshot("project-a", "client:client-1", 9);
-  assert.deepEqual(snapshot, sampleSnapshot("project-a"));
+  assert.deepEqual(snapshot, { ...sampleSnapshot("project-a"), executionResources: [] });
   assert.equal(calls[0].executable, "/usr/bin/python3");
   assert.deepEqual(calls[0].args.slice(0, 3), ["-m", "snooze.agent_workspace", "--db"]);
   assert.equal(isAbsolute(calls[0].args[3]), true);
@@ -98,7 +98,7 @@ test("Agent Workspace service binds trusted actors, bounds the Python bridge, an
   assert.equal((await fetch(`${base}/admin/api/v1/agent-workspace/unknown-project`, { headers: { cookie } })).status, 404);
   const api = await fetch(`${base}/admin/api/v1/agent-workspace/project-a?after=2`, { headers: { cookie } });
   assert.equal(api.status, 200);
-  assert.deepEqual(await api.json(), sampleSnapshot("project-a"));
+  assert.deepEqual(await api.json(), { ...sampleSnapshot("project-a"), executionResources: [] });
   assert.equal(calls.at(-1).stdin.after, 2);
   assert.equal(calls.at(-1).stdin.actor, "admin:local");
   const pageResponse = await fetch(`${base}/admin/agents`, { headers: { cookie } });

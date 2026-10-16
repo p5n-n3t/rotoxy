@@ -28,6 +28,8 @@ export interface SupervisorBackend {
   callTool(name: JobToolName, args: unknown, caller: SupervisorCaller): Promise<unknown>;
   /** Verify project membership for shared agent collaboration; no caller-supplied actor identity. */
   authorizeWorkspace?(projectId: string, clientId: string): void | Promise<void>;
+  /** Configured execution resources only; availability remains unknown unless observed. */
+  workspaceResources?(projectId: string): Promise<unknown>;
   /** Project-scoped authoritative admin snapshot. */
   listProjects?(): string[];
   readAdmin?(projectId: string): Promise<unknown>;

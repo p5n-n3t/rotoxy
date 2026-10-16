@@ -510,7 +510,7 @@ test("lifecycle and CLI can only ever target Token2OAuth's own /token2oauth path
   const dir = await mkdtemp(join(tmpdir(), "t2o-cli-"));
   const result = await new Promise((resolve) => execFile(process.execPath, ["dist/cli.js", "tailscale", "expose", "--path", "/"], { env: { ...process.env, TOKEN2OAUTH_CONFIG_DIR: dir, PATH: "/nonexistent" } }, (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stderr })));
   assert.notEqual(result.code, 0);
-  assert.match(result.stderr, /only manages its own \/token2oauth/);
+  assert.match(result.stderr, /only manages its own compatibility path/);
   await rm(dir, { recursive: true, force: true });
 });
 

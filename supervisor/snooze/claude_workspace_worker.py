@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS claude_workspace_attempts (
 
 _SAFE_ID = re.compile(r'^[A-Za-z0-9_\-\.]{1,128}$')
 _SAFE_MODEL = "claude-sonnet-4-6"
+_ALLOWED_MODELS = {_SAFE_MODEL, "global.anthropic.claude-sonnet-4-6"}
 
 
 def safe_id(v):
@@ -93,9 +94,12 @@ def update_attempt(db_path, project_id, task_id, status, model_reported=None,
 
 def default_runner(argv, stdin_text, timeout_seconds):
     env = {name: os.environ[name] for name in (
-        "HOME", "PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "USER", "LOGNAME", "SystemRoot"
+        "HOME", "PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "USER", "LOGNAME", "SystemRoot",
+        "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"
     ) if name in os.environ}
     env.update({
+        "CLAUDE_CODE_USE_BEDROCK": "1",
         "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
         "MAX_THINKING_TOKENS": "1024",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "2048",
@@ -167,8 +171,8 @@ def parse_cli_result(raw):
     result_text = result[:900]
     model_reported = None
     usage = data.get("modelUsage")
-    if isinstance(usage, dict) and _SAFE_MODEL in usage:
-        model_reported = _SAFE_MODEL
+    if isinstance(usage, dict):
+        model_reported = next((key for key in usage if key in _ALLOWED_MODELS), None)
     cost = data.get("total_cost_usd") if "total_cost_usd" in data else data.get("cost_usd")
     total_cost = None
     if type(cost) in (int, float) and cost >= 0:
@@ -397,7 +401,7 @@ def validate_args(args):
     elif cb.name != "claude":
         errors.append("--claude-binary basename must be 'claude'")
 
-    if args.model != "claude-sonnet-4-6":
+    if args.model not in _ALLOWED_MODELS:
         errors.append("--model must be claude-sonnet-4-6 for the bounded worker policy")
 
     if not (0.01 <= args.max_budget_usd <= 1.0):
