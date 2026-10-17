@@ -23,7 +23,8 @@ test("Oracle model page is authenticated, explicit-refresh and preview-only unde
   const view = { cacheRevision: revision, configRevision, cacheUpdatedAt: null,
     hosts: [{ id: "ora3", enabled: true, allowedModels: ["qwen3.5:9b"], hostStatus: "unknown", models: [], observedAt: null, load: { running: 0, assigned: 1 } }],
     queue: { available: true, reason: null, statuses: { queued: 1 }, hosts: { ora3: { running: 0, assigned: 1 } } },
-    apply: { mode: "previewOnly", blockedReason: "Pool dispatch has no shared maintenance fence; queue state can change after this snapshot." } };
+    apply: { mode: "previewOnly", blockedReason: "Pool dispatch has no shared maintenance fence; queue state can change after this snapshot." },
+    maintenance: { epoch: 7, paused: true, configRevision, acknowledged: false, blockers: { running: 1, ambiguous: 0, dispatching: 0 }, reason: "draining" } };
   const calls = [];
   const runner = async (command, args, request, input) => {
     calls.push({ command, args, request, input });
@@ -46,7 +47,7 @@ test("Oracle model page is authenticated, explicit-refresh and preview-only unde
   const denied = await post({ action: "refresh", revision }, { withCsrf: false }); assert.equal(denied.status, 403); assert.equal(calls.length, 0);
   const response = await fetch(`${base}/admin/oracle/models`, { headers: { cookie } });
   assert.equal(response.status, 200); const html = await response.text();
-  assert.match(html, /Installed model names come from the last explicit/); assert.match(html, /shared maintenance fence/); assert.match(html, /name="_csrf"/);
+  assert.match(html, /Installed model names come from the last explicit/); assert.match(html, /shared maintenance fence/); assert.match(html, /Pause dispatch and drain/); assert.match(html, /Abort maintenance and resume dispatch/); assert.match(html, /epoch 7/); assert.match(html, /name="_csrf"/);
   assert.equal(calls.length, 1); assert.deepEqual(JSON.parse(calls[0].input), { action: "read" });
   const badOrigin = await post({ action: "refresh", revision }, { origin: "https://attacker.invalid" });
   assert.equal(badOrigin.status, 403); assert.equal(calls.length, 1);
@@ -55,7 +56,11 @@ test("Oracle model page is authenticated, explicit-refresh and preview-only unde
   assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "refresh", expectedCacheRevision: revision });
   const preview = await post({ action: "apply", revision: configRevision });
   assert.equal(preview.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "apply", expectedConfigRevision: configRevision });
+  const pause = await post({ action: "maintenance-request", revision: configRevision, epoch: "7" });
+  assert.equal(pause.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "maintenance-request", expectedConfigRevision: configRevision, expectedEpoch: 7 });
+  const resume = await post({ action: "maintenance-release", revision: configRevision, epoch: "8" });
+  assert.equal(resume.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "maintenance-release", expectedConfigRevision: configRevision, expectedEpoch: 8 });
   const invalid = await post({ action: "exec", command: "/usr/bin/systemctl restart", revision });
-  assert.equal(invalid.status, 400); assert.equal(calls.length, 3);
+  assert.equal(invalid.status, 400); assert.equal(calls.length, 5);
   assert.ok(calls.every((c) => !c.input.includes("systemctl") && !c.input.includes("synthetic-admin-only")));
 });
