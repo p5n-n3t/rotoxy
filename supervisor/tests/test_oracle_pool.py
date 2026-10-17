@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import sys
 import os
@@ -435,12 +436,12 @@ class OraclePoolTests(unittest.TestCase):
         self.assertTrue(ack["acknowledged"])
         self.assertEqual(restarted.status("maint-queued")["status"], "queued")
         self.assertEqual(read_maintenance_status(self.pool.db_path), ack)
-        released = restarted.release_maintenance(1, revision)
+        released = restarted.release_maintenance(expected_epoch=1, config_revision=revision)
         self.assertEqual((released["epoch"], released["paused"], released["configRevision"]), (2, False, None))
         with self.assertRaisesRegex(ValueError, "maintenance_epoch_conflict"):
-            restarted.release_maintenance(1, revision)
+            restarted.release_maintenance(expected_epoch=1, config_revision=revision)
         with self.assertRaisesRegex(ValueError, "maintenance_revision_conflict"):
-            restarted.release_maintenance(2, revision)
+            restarted.release_maintenance(expected_epoch=2, config_revision=revision)
 
     def test_maintenance_ack_waits_for_running_and_ambiguous_tasks_and_unknown_blocks(self):
         revision = "M" * 24
@@ -505,10 +506,90 @@ class OraclePoolTests(unittest.TestCase):
             return result.returncode, json.loads(result.stdout)
         code, status = cli("maintenance-status")
         self.assertEqual(code, 0); self.assertEqual(status["epoch"], 0)
+        missing = Path(self.temp.name) / "maintenance-cli-missing.sqlite"
+        result = subprocess.run([sys.executable, "-m", "snooze.oracle_pool", "--db", str(missing), "maintenance-status"],
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 2); self.assertFalse(missing.exists())
         code, paused = cli("maintenance-request", "--revision", "D" * 24, "--epoch", "0")
         self.assertEqual(code, 0); self.assertTrue(paused["paused"])
         code, resumed = cli("maintenance-release", "--revision", "D" * 24, "--epoch", "1")
         self.assertEqual(code, 0); self.assertEqual(resumed["epoch"], 2); self.assertFalse(resumed["paused"])
+
+    def test_deleted_or_empty_existing_fence_fails_closed_on_restart(self):
+        self.pool.request_maintenance("X" * 24, 0)
+        with self.pool._connect() as db:
+            db.execute("DELETE FROM pool_maintenance WHERE id=1")
+            db.commit()
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        empty_root = Path(self.temp.name) / "empty-existing-fence"
+        empty_root.mkdir(mode=0o700)
+        config = empty_root / "config.json"
+        config.write_text(json.dumps(self.pool.config), encoding="utf-8")
+        config.chmod(0o600)
+        empty_db = empty_root / "queue.sqlite3"
+        with sqlite3.connect(empty_db) as db:
+            db.execute("CREATE TABLE pool_maintenance(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL,paused INTEGER NOT NULL,config_revision TEXT,acknowledged INTEGER NOT NULL,requested_at REAL)")
+        empty_db.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            OraclePool(config, empty_db, FakeTransport())
+
+    def test_legacy_database_migration_initializes_fence_once_and_preserves_tasks(self):
+        task = self.pool.submit("legacy queued task", job_id="legacy-maint-task")
+        with self.pool._connect() as db:
+            db.execute("DROP TABLE pool_maintenance")
+            db.commit()
+        migrated = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        self.assertEqual(migrated.maintenance_status()["epoch"], 0)
+        self.assertFalse(migrated.maintenance_status()["paused"])
+        self.assertEqual(migrated.status(task["id"])["status"], "queued")
+
+    def test_concurrent_first_legacy_migration_creates_one_initial_fence_row(self):
+        root = Path(self.temp.name) / "parallel-init"
+        root.mkdir(mode=0o700)
+        config = root / "config.json"
+        config.write_text(json.dumps(self.pool.config), encoding="utf-8")
+        config.chmod(0o600)
+        db_path = root / "queue.sqlite3"
+        barrier = threading.Barrier(6)
+        results, errors = [], []
+        def construct():
+            try:
+                barrier.wait(timeout=5)
+                pool = OraclePool(config, db_path, FakeTransport())
+                results.append(pool.maintenance_status())
+            except Exception as exc:
+                errors.append(exc)
+        threads = [threading.Thread(target=construct) for _ in range(6)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=10)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 6)
+        self.assertTrue(all(status["epoch"] == 0 and not status["paused"] for status in results))
+        with sqlite3.connect(db_path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM pool_maintenance").fetchone()[0], 1)
+
+    def test_open_maintenance_is_existing_state_only_and_does_not_recover_claims(self):
+        from snooze.oracle_pool import read_maintenance_status
+        missing = Path(self.temp.name) / "missing" / "queue.sqlite3"
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            OraclePool.open_maintenance(missing)
+        self.assertFalse(missing.parent.exists())
+        task = self.pool.submit("possibly dispatched", job_id="maint-open-existing")
+        with self.pool._connect() as db:
+            db.execute("UPDATE pool_tasks SET status='running',claim_pid=99999999,claim_boot='gone',claim_start='gone' WHERE id=?", (task["id"],))
+            db.commit()
+        before = self.pool.db_path.read_bytes()
+        controller = OraclePool.open_maintenance(self.pool.db_path)
+        self.assertEqual(controller.maintenance_status()["blockers"]["running"], 1)
+        self.assertEqual(self.pool.status(task["id"])["status"], "running")
+        self.assertEqual(self.pool.db_path.read_bytes(), before)
+        self.assertEqual(read_maintenance_status(self.pool.db_path)["blockers"]["running"], 1)
+        self.pool.db_path.unlink()
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            controller.maintenance_status()
+        self.assertFalse(self.pool.db_path.exists())
 
     def test_maintenance_fence_cas_and_readonly_helper_fail_closed(self):
         import sqlite3
