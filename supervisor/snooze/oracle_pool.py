@@ -7,6 +7,8 @@ remote command string. No shell, tools, agent loop, or hosted inference is used.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import concurrent.futures
 import ipaddress
 import math
@@ -53,9 +55,18 @@ CATALOG_TIMEOUT = 20
 TASK_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 SOURCE_RE = re.compile(r"[A-Za-z0-9_.:@/-]{1,128}\Z")
 MAINTENANCE_REVISION_RE = re.compile(r"[A-Za-z0-9_-]{24}\Z")
+DAEMON_FRESH_SECONDS = 15.0
+APPLY_ERROR_RE = re.compile(r"[A-Za-z0-9_.:-]{1,160}\Z")
+DAEMON_TABLE_COLUMNS = ("id", "instance_id", "pid", "boot_id", "start_id", "loaded_revision", "heartbeat_at", "observed_epoch")
+APPLY_TABLE_COLUMNS = ("apply_id", "epoch", "target_revision", "previous_instance", "status", "error", "created_at", "updated_at")
+APPLY_SCHEMA_MARKER = "oracle_apply_schema_v1"
 MAINTENANCE_TABLE_COLUMNS = ("id", "epoch", "paused", "config_revision", "acknowledged", "requested_at")
 KNOWN_TASK_STATUSES = {"queued", "running", "dispatching", "complete", "failed", "ambiguous", "cancelled"}
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+
+
+def _config_revision(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(raw).digest()[:18]).decode("ascii").rstrip("=")
 
 
 def default_config() -> dict[str, Any]:
@@ -294,6 +305,7 @@ class OraclePool:
         if isinstance(self.transport, SSHOllamaTransport):
             self.transport.hosts = self.host_by_id
         self._identity = _process_identity()
+        self._daemon_instance_id: str | None = None
         self._init_db()
         self._recover_stale_claims()
 
@@ -311,7 +323,9 @@ class OraclePool:
             mode = self.config_path.stat().st_mode & 0o777
             if mode & 0o077:
                 raise PoolError("config_permissions_not_private")
-            config = json.loads(self.config_path.read_text(encoding="utf-8"))
+            raw = self.config_path.read_bytes()
+            config = json.loads(raw.decode("utf-8"))
+            self.loaded_revision = _config_revision(raw)
         except PoolError:
             raise
         except (OSError, json.JSONDecodeError) as exc:
@@ -375,9 +389,29 @@ class OraclePool:
                 db.execute(statement)
             if not fence_existed:
                 db.execute("INSERT INTO pool_maintenance(id,epoch,paused,config_revision,acknowledged,requested_at) VALUES(1,0,0,NULL,0,NULL)")
+            marker = db.execute("SELECT value FROM pool_meta WHERE key=?", (APPLY_SCHEMA_MARKER,)).fetchone()
+            if marker is not None and marker["value"] != "1":
+                raise ValueError("config_apply_unavailable")
+            if marker is None:
+                existing_apply_tables = db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('pool_daemons','pool_config_applies')"
+                ).fetchall()
+                if existing_apply_tables:
+                    raise ValueError("config_apply_unavailable")
+                db.execute("""CREATE TABLE IF NOT EXISTS pool_daemons(
+                  id INTEGER PRIMARY KEY CHECK(id=1), instance_id TEXT NOT NULL, pid INTEGER NOT NULL,
+                  boot_id TEXT NOT NULL, start_id TEXT NOT NULL, loaded_revision TEXT NOT NULL,
+                  heartbeat_at REAL NOT NULL, observed_epoch INTEGER NOT NULL)""")
+                db.execute("""CREATE TABLE IF NOT EXISTS pool_config_applies(
+                  apply_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL UNIQUE, target_revision TEXT NOT NULL,
+                  previous_instance TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                  created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
+                db.execute("INSERT INTO pool_meta(key,value) VALUES(?, '1')", (APPLY_SCHEMA_MARKER,))
             for host in self.hosts:
                 db.execute("INSERT OR IGNORE INTO pool_hosts(id) VALUES(?)", (host["id"],))
             self._maintenance_row(db)
+            self._daemon_row(db)
+            self._apply_rows(db)
             db.commit()
         os.chmod(self.db_path, 0o600)
 
@@ -386,6 +420,9 @@ class OraclePool:
         """Open only an existing valid queue DB for maintenance-control operations."""
         path = Path(db_path)
         read_maintenance_status(path)
+        if not read_daemon_status(path)["available"]:
+            raise ValueError("daemon_unavailable")
+        read_config_apply_status(path)
         pool = cls.__new__(cls)
         pool.db_path = path
         pool._maintenance_existing_only = True
@@ -413,6 +450,62 @@ class OraclePool:
         return row
 
     @staticmethod
+    def _daemon_row(db: sqlite3.Connection) -> sqlite3.Row | None:
+        try:
+            columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_daemons)"))
+            if columns != DAEMON_TABLE_COLUMNS:
+                raise ValueError("daemon_unavailable")
+            rows = db.execute("SELECT id,instance_id,pid,boot_id,start_id,loaded_revision,heartbeat_at,observed_epoch FROM pool_daemons").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("daemon_unavailable") from exc
+        if len(rows) > 1 or (rows and rows[0]["id"] != 1):
+            raise ValueError("daemon_unavailable")
+        if not rows:
+            return None
+        row = rows[0]
+        try:
+            uuid.UUID(row["instance_id"])
+            valid = (type(row["pid"]) is int and row["pid"] > 0 and isinstance(row["boot_id"], str) and 0 < len(row["boot_id"]) <= 128
+                     and isinstance(row["start_id"], str) and 0 < len(row["start_id"]) <= 128
+                     and isinstance(row["loaded_revision"], str) and MAINTENANCE_REVISION_RE.fullmatch(row["loaded_revision"])
+                     and isinstance(row["heartbeat_at"], (int, float)) and math.isfinite(row["heartbeat_at"]) and row["heartbeat_at"] >= 0
+                     and type(row["observed_epoch"]) is int and row["observed_epoch"] >= 0)
+        except (ValueError, TypeError):
+            valid = False
+        if not valid:
+            raise ValueError("daemon_unavailable")
+        return row
+
+    @staticmethod
+    def _apply_rows(db: sqlite3.Connection) -> list[sqlite3.Row]:
+        try:
+            columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_config_applies)"))
+            if columns != APPLY_TABLE_COLUMNS:
+                raise ValueError("config_apply_unavailable")
+            rows = db.execute("SELECT apply_id,epoch,target_revision,previous_instance,status,error,created_at,updated_at FROM pool_config_applies ORDER BY epoch").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("config_apply_unavailable") from exc
+        for row in rows:
+            try:
+                uuid.UUID(row["apply_id"]); uuid.UUID(row["previous_instance"])
+                valid = (type(row["epoch"]) is int and row["epoch"] >= 0
+                         and isinstance(row["target_revision"], str) and MAINTENANCE_REVISION_RE.fullmatch(row["target_revision"])
+                         and row["status"] in {"prepared", "complete", "failed"}
+                         and (row["error"] is None or isinstance(row["error"], str) and APPLY_ERROR_RE.fullmatch(row["error"]))
+                         and isinstance(row["created_at"], (int, float)) and math.isfinite(row["created_at"]) and row["created_at"] >= 0
+                         and isinstance(row["updated_at"], (int, float)) and math.isfinite(row["updated_at"]) and row["updated_at"] >= 0)
+            except (ValueError, TypeError):
+                valid = False
+            if not valid:
+                raise ValueError("config_apply_unavailable")
+        return rows
+
+    @staticmethod
+    def _operation(row: sqlite3.Row) -> dict[str, Any]:
+        return {"applyId": row["apply_id"], "epoch": row["epoch"], "targetRevision": row["target_revision"],
+                "previousInstance": row["previous_instance"], "status": row["status"], "error": row["error"]}
+
+    @staticmethod
     def _maintenance_blockers(db: sqlite3.Connection) -> dict[str, int]:
         try:
             rows = db.execute("SELECT status,COUNT(*) AS n FROM pool_tasks GROUP BY status").fetchall()
@@ -430,6 +523,110 @@ class OraclePool:
         reason = None if not paused else ("draining" if any(blockers.values()) else "paused" if acknowledged else "awaiting_daemon_ack")
         return {"epoch": row["epoch"], "paused": paused, "configRevision": row["config_revision"],
                 "acknowledged": acknowledged, "blockers": blockers, "reason": reason}
+
+    def register_daemon(self) -> dict[str, Any]:
+        """Register this process as the sole serving daemon; call only from serve."""
+        if self._daemon_instance_id is not None:
+            raise ValueError("daemon_already_registered")
+        instance_id = str(uuid.uuid4())
+        pid, boot, start = self._identity
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            fence = self._maintenance_row(db)
+            prior = self._daemon_row(db)
+            if prior is not None:
+                fresh = 0 <= now - prior["heartbeat_at"] <= DAEMON_FRESH_SECONDS
+                alive = _identity_alive(prior["pid"], prior["boot_id"], prior["start_id"])
+                if fresh and alive:
+                    raise ValueError("daemon_already_registered")
+                if alive:
+                    raise ValueError("daemon_heartbeat_stale_but_process_alive")
+            db.execute("INSERT INTO pool_daemons(id,instance_id,pid,boot_id,start_id,loaded_revision,heartbeat_at,observed_epoch) VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET instance_id=excluded.instance_id,pid=excluded.pid,boot_id=excluded.boot_id,start_id=excluded.start_id,loaded_revision=excluded.loaded_revision,heartbeat_at=excluded.heartbeat_at,observed_epoch=excluded.observed_epoch",
+                       (instance_id, pid, boot, start, self.loaded_revision, now, fence["epoch"]))
+            db.commit()
+        self._daemon_instance_id = instance_id
+        return {"instanceId": instance_id, "loadedRevision": self.loaded_revision, "observedEpoch": fence["epoch"]}
+
+    def begin_config_apply(self, *, expected_epoch: int, target_revision: str) -> dict[str, Any]:
+        if type(expected_epoch) is not int or expected_epoch < 0:
+            raise ValueError("maintenance_epoch_conflict")
+        if not isinstance(target_revision, str) or not MAINTENANCE_REVISION_RE.fullmatch(target_revision):
+            raise ValueError("maintenance_revision_conflict")
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            fence = self._maintenance_row(db); blockers = self._maintenance_blockers(db)
+            ops = self._apply_rows(db)
+            prior = next((row for row in ops if row["epoch"] == expected_epoch), None)
+            if prior is not None:
+                if prior["target_revision"] == target_revision:
+                    result = self._operation(prior); db.commit(); return result
+                raise ValueError("config_apply_conflict")
+            if fence["epoch"] != expected_epoch:
+                raise ValueError("maintenance_epoch_conflict")
+            if not fence["paused"] or not fence["acknowledged"] or any(blockers.values()):
+                raise ValueError("maintenance_not_drained")
+            if fence["config_revision"] != target_revision:
+                raise ValueError("maintenance_revision_conflict")
+            daemon = self._daemon_row(db)
+            if daemon is None or not self._daemon_is_live(daemon, now) or daemon["observed_epoch"] != expected_epoch:
+                raise ValueError("daemon_not_ready")
+            apply_id = str(uuid.uuid4())
+            db.execute("INSERT INTO pool_config_applies(apply_id,epoch,target_revision,previous_instance,status,error,created_at,updated_at) VALUES(?,?,?,?,'prepared',NULL,?,?)",
+                       (apply_id, expected_epoch, target_revision, daemon["instance_id"], now, now))
+            self._event(db, None, "config_apply_prepared", {"status": "prepared", "source": apply_id}, now)
+            row = self._apply_rows(db)[-1]; result = self._operation(row); db.commit(); return result
+
+    @staticmethod
+    def _daemon_is_live(row: sqlite3.Row, now: float) -> bool:
+        return 0 <= now - row["heartbeat_at"] <= DAEMON_FRESH_SECONDS and _identity_alive(row["pid"], row["boot_id"], row["start_id"])
+
+    def complete_config_apply(self, *, apply_id: str, expected_epoch: int, target_revision: str) -> dict[str, Any]:
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            ops = self._apply_rows(db)
+            op = next((row for row in ops if row["apply_id"] == apply_id), None)
+            if op is None or op["epoch"] != expected_epoch or op["target_revision"] != target_revision:
+                raise ValueError("config_apply_conflict")
+            if op["status"] == "complete":
+                result = self._operation(op); db.commit(); return result
+            if op["status"] == "failed":
+                raise ValueError("config_apply_failed")
+            fence = self._maintenance_row(db); blockers = self._maintenance_blockers(db); daemon = self._daemon_row(db)
+            if (fence["epoch"] != expected_epoch or not fence["paused"] or not fence["acknowledged"]
+                    or fence["config_revision"] != target_revision or any(blockers.values())):
+                raise ValueError("maintenance_not_drained")
+            if (daemon is None or not self._daemon_is_live(daemon, now) or daemon["instance_id"] == op["previous_instance"]
+                    or daemon["loaded_revision"] != target_revision or daemon["observed_epoch"] != expected_epoch):
+                raise ValueError("replacement_daemon_not_ready")
+            db.execute("UPDATE pool_config_applies SET status='complete',error=NULL,updated_at=? WHERE apply_id=? AND status='prepared'", (now, apply_id))
+            db.execute("UPDATE pool_maintenance SET epoch=epoch+1,paused=0,config_revision=NULL,acknowledged=0,requested_at=NULL WHERE id=1 AND epoch=? AND paused=1", (expected_epoch,))
+            self._event(db, None, "config_apply_completed", {"status": "complete", "source": apply_id}, now)
+            op = next(row for row in self._apply_rows(db) if row["apply_id"] == apply_id)
+            result = self._operation(op); db.commit(); return result
+
+    def fail_config_apply(self, *, apply_id: str, expected_epoch: int, error: str) -> dict[str, Any]:
+        if not isinstance(error, str) or not APPLY_ERROR_RE.fullmatch(error):
+            error = "service_apply_failed"
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            ops = self._apply_rows(db); op = next((row for row in ops if row["apply_id"] == apply_id), None)
+            if op is None or op["epoch"] != expected_epoch:
+                raise ValueError("config_apply_conflict")
+            if op["status"] == "failed":
+                result = self._operation(op); db.commit(); return result
+            if op["status"] != "prepared":
+                raise ValueError("config_apply_conflict")
+            fence = self._maintenance_row(db)
+            if fence["epoch"] != expected_epoch or not fence["paused"]:
+                raise ValueError("maintenance_epoch_conflict")
+            db.execute("UPDATE pool_config_applies SET status='failed',error=?,updated_at=? WHERE apply_id=? AND status='prepared'", (error, now, apply_id))
+            self._event(db, None, "config_apply_failed", {"status": "failed", "error_code": error, "source": apply_id}, now)
+            op = next(row for row in self._apply_rows(db) if row["apply_id"] == apply_id)
+            result = self._operation(op); db.commit(); return result
 
     def maintenance_status(self) -> dict[str, Any]:
         """Read the durable fence without acknowledging or changing it."""
@@ -472,6 +669,9 @@ class OraclePool:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._maintenance_row(db)
+            operations = self._apply_rows(db)
+            if any(op["status"] in {"prepared", "failed"} for op in operations):
+                raise ValueError("config_apply_reserved")
             if row["epoch"] != expected_epoch:
                 raise ValueError("maintenance_epoch_conflict")
             if not row["paused"] or row["config_revision"] != config_revision:
@@ -678,10 +878,18 @@ class OraclePool:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             maintenance = self._maintenance_row(db)
+            daemon = self._daemon_row(db)
+            registered = self._daemon_instance_id is not None
+            if registered:
+                if (daemon is None or daemon["instance_id"] != self._daemon_instance_id
+                        or (daemon["pid"], daemon["boot_id"], daemon["start_id"]) != self._identity):
+                    raise ValueError("daemon_replaced")
+                db.execute("UPDATE pool_daemons SET heartbeat_at=?,observed_epoch=? WHERE id=1 AND instance_id=?",
+                           (now, maintenance["epoch"], self._daemon_instance_id))
             if maintenance["paused"]:
                 blockers = self._maintenance_blockers(db)
-                acknowledged = int(not any(blockers.values()))
-                if maintenance["acknowledged"] != acknowledged:
+                acknowledged = int(registered and not any(blockers.values()))
+                if registered and maintenance["acknowledged"] != acknowledged:
                     db.execute("UPDATE pool_maintenance SET acknowledged=? WHERE id=1", (acknowledged,))
                     self._event(db, None, "maintenance_acknowledged" if acknowledged else "maintenance_ack_revoked",
                                 {"epoch": maintenance["epoch"], "config_revision": maintenance["config_revision"],
@@ -809,37 +1017,77 @@ class OraclePool:
         return {"tasks_deleted": len(ids), "events_deleted": old_events}
 
 
-def read_maintenance_status(db_path: str | Path) -> dict[str, Any]:
-    """Read existing private maintenance state without initializing or acknowledging it."""
+def _read_existing_private_db(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path)
     try:
-        if not path.is_absolute() or "\x00" in str(path) or any(part.is_symlink() for part in (path, *path.parents)):
+        if not path.is_absolute() or "\\x00" in str(path) or any(part.is_symlink() for part in (path, *path.parents)):
             raise ValueError("maintenance_unavailable")
-        info = path.lstat()
-        parent = path.parent.lstat()
+        info = path.lstat(); parent = path.parent.lstat()
         if (not path.is_file() or info.st_uid != os.getuid() or info.st_mode & 0o077
                 or not path.parent.is_dir() or path.parent.is_symlink() or parent.st_uid != os.getuid() or parent.st_mode & 0o077):
             raise ValueError("maintenance_unavailable")
-        uri = path.as_uri() + "?mode=ro"
-        db = sqlite3.connect(uri, uri=True, timeout=5)
+        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA query_only=ON")
-        try:
-            db.execute("BEGIN")
-            columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_maintenance)"))
-            task_columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_tasks)"))
-            if columns != MAINTENANCE_TABLE_COLUMNS or "status" not in task_columns:
-                raise ValueError("maintenance_unavailable")
-            row = OraclePool._maintenance_row(db)
-            result = OraclePool._maintenance_dto(row, OraclePool._maintenance_blockers(db))
-            db.commit()
-            return result
-        finally:
-            db.close()
+        db.execute("PRAGMA query_only=ON"); db.execute("BEGIN")
+        return db
     except ValueError:
         raise
     except (OSError, sqlite3.DatabaseError, RuntimeError) as exc:
         raise ValueError("maintenance_unavailable") from exc
+
+
+def read_maintenance_status(db_path: str | Path) -> dict[str, Any]:
+    """Read existing private maintenance state without initializing or acknowledging it."""
+    db = _read_existing_private_db(db_path)
+    try:
+        columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_maintenance)"))
+        task_columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_tasks)"))
+        if columns != MAINTENANCE_TABLE_COLUMNS or "status" not in task_columns:
+            raise ValueError("maintenance_unavailable")
+        row = OraclePool._maintenance_row(db)
+        result = OraclePool._maintenance_dto(row, OraclePool._maintenance_blockers(db))
+        db.commit(); return result
+    finally:
+        db.close()
+
+
+def read_daemon_status(db_path: str | Path) -> dict[str, Any]:
+    unavailable = {"available": False, "instanceId": None, "loadedRevision": None,
+                   "heartbeatAt": None, "observedEpoch": None, "alive": False}
+    try:
+        db = _read_existing_private_db(db_path)
+        try:
+            marker = db.execute("SELECT value FROM pool_meta WHERE key=?", (APPLY_SCHEMA_MARKER,)).fetchone()
+            if marker is None or marker["value"] != "1":
+                return unavailable
+            if tuple(row[1] for row in db.execute("PRAGMA table_info(pool_daemons)")) != DAEMON_TABLE_COLUMNS:
+                return unavailable
+            row = OraclePool._daemon_row(db)
+            db.commit()
+            if row is None:
+                return {**unavailable, "available": True}
+            return {"available": True, "instanceId": row["instance_id"], "loadedRevision": row["loaded_revision"],
+                    "heartbeatAt": row["heartbeat_at"], "observedEpoch": row["observed_epoch"],
+                    "alive": OraclePool._daemon_is_live(row, time.time())}
+        finally:
+            db.close()
+    except (ValueError, sqlite3.DatabaseError):
+        return unavailable
+
+
+def read_config_apply_status(db_path: str | Path) -> dict[str, Any] | None:
+    db = _read_existing_private_db(db_path)
+    try:
+        marker = db.execute("SELECT value FROM pool_meta WHERE key=?", (APPLY_SCHEMA_MARKER,)).fetchone()
+        if marker is None or marker["value"] != "1":
+            raise ValueError("config_apply_unavailable")
+        if tuple(row[1] for row in db.execute("PRAGMA table_info(pool_config_applies)")) != APPLY_TABLE_COLUMNS:
+            raise ValueError("config_apply_unavailable")
+        rows = OraclePool._apply_rows(db)
+        db.commit()
+        return OraclePool._operation(rows[-1]) if rows else None
+    finally:
+        db.close()
 
 
 def _json(value: Any) -> None:
@@ -930,6 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "cleanup":
             _json(pool.cleanup(older_than_seconds=args.older_than_days * 86400))
         elif args.command == "serve":
+            pool.register_daemon()
             stopped = threading.Event()
             for signum in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(signum, lambda *_: stopped.set())

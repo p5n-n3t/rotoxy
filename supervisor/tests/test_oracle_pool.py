@@ -19,6 +19,10 @@ from snooze.oracle_pool import (
     OraclePool,
     PoolError,
     SSHOllamaTransport,
+    _config_revision,
+    APPLY_SCHEMA_MARKER,
+    read_daemon_status,
+    read_config_apply_status,
 )
 
 
@@ -430,6 +434,7 @@ class OraclePoolTests(unittest.TestCase):
         self.assertEqual(read_maintenance_status(self.pool.db_path), requested)
         self.assertEqual(self.pool.db_path.read_bytes(), before)
         restarted = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        restarted.register_daemon()
         self.assertFalse(restarted.maintenance_status()["acknowledged"])
         self.assertEqual(restarted._claim(), [])
         ack = restarted.maintenance_status()
@@ -451,6 +456,7 @@ class OraclePoolTests(unittest.TestCase):
             db.execute("UPDATE pool_tasks SET status='running' WHERE id='maint-running'")
             db.execute("UPDATE pool_tasks SET status='ambiguous' WHERE id='maint-ambiguous'")
             db.commit()
+        self.pool.register_daemon()
         requested = self.pool.request_maintenance(revision, 0)
         self.assertEqual(requested["blockers"], {"running": 1, "ambiguous": 1, "dispatching": 0})
         self.assertFalse(self.pool._claim())
@@ -478,6 +484,7 @@ class OraclePoolTests(unittest.TestCase):
         self.pool.catalog(refresh=True)
         self.pool.submit("claim-or-pause", job_id="maint-race")
         peer = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        peer.register_daemon()
         barrier = threading.Barrier(2)
         results = {}
         def claim():
@@ -623,6 +630,7 @@ class OraclePoolTests(unittest.TestCase):
         token = "E" * 24
         self.pool.request_maintenance(token, 0)
         self.pool.request_maintenance(token, 0)
+        self.pool.register_daemon()
         self.pool._claim()
         self.pool._claim()
         self.pool.release_maintenance(expected_epoch=1, config_revision=token)
@@ -634,6 +642,136 @@ class OraclePoolTests(unittest.TestCase):
         self.assertTrue(data[1]["acknowledged"])
         self.assertFalse(data[-1]["paused"])
         self.assertTrue(all(set(x) == {"epoch", "config_revision", "paused", "acknowledged"} for x in data))
+
+    def test_loaded_revision_hashes_exact_bytes_parsed_once(self):
+        raw = self.pool.config_path.read_bytes()
+        self.assertEqual(self.pool.loaded_revision, _config_revision(raw))
+        alternative = json.dumps(self.pool.config, separators=(",", ":")).encode()
+        self.pool.config_path.write_bytes(alternative)
+        self.assertNotEqual(self.pool.loaded_revision, _config_revision(self.pool.config_path.read_bytes()))
+        self.assertEqual(self.pool.loaded_revision, _config_revision(raw))
+
+    def test_daemon_registration_is_serve_owned_unique_and_claim_heartbeats(self):
+        self.assertEqual(read_daemon_status(self.pool.db_path),
+                         {"available": True, "instanceId": None, "loadedRevision": None,
+                          "heartbeatAt": None, "observedEpoch": None, "alive": False})
+        started = self.pool.register_daemon()
+        self.assertEqual(started["loadedRevision"], self.pool.loaded_revision)
+        self.assertEqual(started["observedEpoch"], 0)
+        peer = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        with self.assertRaisesRegex(ValueError, "daemon_already_registered"):
+            peer.register_daemon()
+        before = read_daemon_status(self.pool.db_path)
+        self.pool.request_maintenance("H" * 24, 0)
+        self.pool._claim()
+        after = read_daemon_status(self.pool.db_path)
+        self.assertEqual(after["instanceId"], started["instanceId"])
+        self.assertEqual(after["observedEpoch"], 1)
+        self.assertTrue(after["alive"])
+        self.assertTrue(self.pool.maintenance_status()["acknowledged"])
+        self.assertLessEqual(after["heartbeatAt"], time.time())
+        self.assertGreaterEqual(after["heartbeatAt"], before["heartbeatAt"])
+
+    def test_begin_apply_requires_registered_observing_daemon_and_deduplicates(self):
+        revision = "A" * 24
+        self.pool.request_maintenance(revision, 0)
+        with self.assertRaisesRegex(ValueError, "maintenance_not_drained|daemon_not_ready"):
+            self.pool.begin_config_apply(expected_epoch=1, target_revision=revision)
+        self.pool.register_daemon()
+        self.pool._claim()
+        controller = OraclePool.open_maintenance(self.pool.db_path)
+        op = controller.begin_config_apply(expected_epoch=1, target_revision=revision)
+        self.assertEqual(set(op), {"applyId", "epoch", "targetRevision", "previousInstance", "status", "error"})
+        self.assertEqual(op["status"], "prepared")
+        self.assertEqual(controller.begin_config_apply(expected_epoch=1, target_revision=revision), op)
+        with self.assertRaisesRegex(ValueError, "config_apply_conflict"):
+            controller.begin_config_apply(expected_epoch=1, target_revision="B" * 24)
+        with self.assertRaisesRegex(ValueError, "config_apply_reserved"):
+            controller.release_maintenance(expected_epoch=1, config_revision=revision)
+        self.assertEqual(read_config_apply_status(self.pool.db_path), op)
+
+    def test_apply_completion_requires_replacement_instance_and_exact_loaded_revision(self):
+        original = self.pool.register_daemon()
+        target_bytes = json.dumps(self.pool.config, separators=(",", ":")).encode()
+        target = _config_revision(target_bytes)
+        self.pool.request_maintenance(target, 0)
+        self.pool._claim()
+        controller = OraclePool.open_maintenance(self.pool.db_path)
+        op = controller.begin_config_apply(expected_epoch=1, target_revision=target)
+        with self.assertRaisesRegex(ValueError, "replacement_daemon_not_ready"):
+            controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision=target)
+        self.pool.config_path.write_bytes(target_bytes)
+        replacement = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        self.assertEqual(replacement.loaded_revision, target)
+        with patch("snooze.oracle_pool._identity_alive", return_value=False):
+            replacement.register_daemon()
+        with self.assertRaisesRegex(ValueError, "daemon_replaced"):
+            self.pool._claim()
+        replacement._claim()
+        completed = controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision=target)
+        self.assertEqual(completed["status"], "complete")
+        self.assertNotEqual(completed["previousInstance"], read_daemon_status(self.pool.db_path)["instanceId"])
+        self.assertEqual(controller.maintenance_status()["epoch"], 2)
+        self.assertFalse(controller.maintenance_status()["paused"])
+        self.assertEqual(controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision=target), completed)
+        events = [event for event in controller.events()["events"] if event.get("kind") == "config_apply_completed"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(completed["previousInstance"], original["instanceId"])
+
+    def test_failed_apply_is_retained_and_cannot_release_or_retry(self):
+        self.pool.register_daemon()
+        revision = "F" * 24
+        self.pool.request_maintenance(revision, 0)
+        self.pool._claim()
+        controller = OraclePool.open_maintenance(self.pool.db_path)
+        op = controller.begin_config_apply(expected_epoch=1, target_revision=revision)
+        failed = controller.fail_config_apply(apply_id=op["applyId"], expected_epoch=1, error="service_restart_failed")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"], "service_restart_failed")
+        self.assertTrue(controller.maintenance_status()["paused"])
+        with self.assertRaisesRegex(ValueError, "config_apply_reserved"):
+            controller.release_maintenance(expected_epoch=1, config_revision=revision)
+        self.assertEqual(controller.begin_config_apply(expected_epoch=1, target_revision=revision), failed)
+        with self.assertRaisesRegex(ValueError, "config_apply_conflict"):
+            controller.begin_config_apply(expected_epoch=1, target_revision="G" * 24)
+        with self.assertRaisesRegex(ValueError, "config_apply_failed"):
+            controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision=revision)
+
+    def test_daemon_and_apply_readers_fail_closed_for_corrupt_schema(self):
+        unavailable = Path(self.temp.name) / "missing-daemon-db"
+        self.assertEqual(read_daemon_status(unavailable),
+                         {"available": False, "instanceId": None, "loadedRevision": None,
+                          "heartbeatAt": None, "observedEpoch": None, "alive": False})
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            read_config_apply_status(unavailable)
+        with self.pool._connect() as db:
+            db.execute("DROP TABLE pool_config_applies")
+            db.commit()
+        with self.assertRaisesRegex(ValueError, "config_apply_unavailable"):
+            read_config_apply_status(self.pool.db_path)
+        with self.assertRaisesRegex(ValueError, "config_apply_unavailable"):
+            OraclePool.open_maintenance(self.pool.db_path)
+
+    def test_missing_apply_schema_marker_with_existing_tables_fails_closed(self):
+        with self.pool._connect() as db:
+            db.execute("DELETE FROM pool_meta WHERE key=?", (APPLY_SCHEMA_MARKER,))
+            db.commit()
+        with self.assertRaisesRegex(ValueError, "config_apply_unavailable"):
+            OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        self.assertFalse(read_daemon_status(self.pool.db_path)["available"])
+        with self.assertRaisesRegex(ValueError, "config_apply_unavailable"):
+            read_config_apply_status(self.pool.db_path)
+
+    def test_registration_rejects_stale_heartbeat_while_process_is_alive(self):
+        from snooze.oracle_pool import DAEMON_FRESH_SECONDS
+        self.pool.register_daemon()
+        with self.pool._connect() as db:
+            db.execute("UPDATE pool_daemons SET heartbeat_at=? WHERE id=1", (time.time() - DAEMON_FRESH_SECONDS - 1,))
+            db.commit()
+        peer = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        with patch("snooze.oracle_pool._identity_alive", return_value=True):
+            with self.assertRaisesRegex(ValueError, "daemon_heartbeat_stale_but_process_alive"):
+                peer.register_daemon()
 
 
 if __name__ == "__main__":
