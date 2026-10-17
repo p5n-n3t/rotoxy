@@ -63,6 +63,31 @@ test("loader uses only fixed Python module and trusted explicit pool paths", asy
   assert.equal(calls[0].request.cwd, join(root, "repo", "supervisor"));
 });
 
+test("loader accepts bounded configured hosts and model IDs without an enum filter", async (t) => {
+  const root = await isolatedEnv(t);
+  const snapshot = fixture();
+  snapshot.hosts.push({ host: "ora7-lab", models: ["team/model-x:4b"], lastCatalogCheck: 20,
+    catalogCheckState: "checked", configured: true, enabled: true, assignedTasks: 0, completedTasks: 0, runningTasks: 0 });
+  const loaded = await loadOracleOpsSnapshot({ supervisorCwd: root, configPath: join(root, "config"), dbPath: join(root, "db"),
+    commandRunner: async () => JSON.stringify(snapshot) });
+  assert.equal(loaded.hosts.at(-1).host, "ora7-lab");
+  assert.deepEqual(loaded.hosts.at(-1).models, ["team/model-x:4b"]);
+});
+
+test("loader fails closed on malformed host and model identifiers", async (t) => {
+  const root = await isolatedEnv(t);
+  const options = { supervisorCwd: root, configPath: join(root, "config"), dbPath: join(root, "db"), commandRunner: async () => "" };
+  for (const change of [
+    (snapshot) => { snapshot.hosts[0].host = "<img src=x>"; },
+    (snapshot) => { snapshot.hosts[0].models = ["<script>"]; },
+    (snapshot) => { snapshot.tasks.items[0].actualModel = { untrusted: true }; },
+  ]) {
+    const snapshot = fixture(); change(snapshot);
+    await assert.rejects(loadOracleOpsSnapshot({ ...options, commandRunner: async () => JSON.stringify(snapshot) }),
+      (error) => error instanceof OracleOpsError && error.code === "invalid_snapshot");
+  }
+});
+
 test("loader rejects non-absolute trusted paths and out-of-bound pagination before invoking command", async (t) => {
   const root = await isolatedEnv(t);
   let calls = 0;
@@ -75,12 +100,29 @@ test("loader rejects non-absolute trusted paths and out-of-bound pagination befo
 
 test("rendered operator page is escaped, bounded in scope, and labels unknown data honestly", () => {
   const snapshot = fixture();
+  snapshot.hosts.push({ host: "ora7-lab", models: ["team/model-x:4b"], lastCatalogCheck: 20, catalogCheckState: "checked",
+    configured: true, enabled: true, assignedTasks: 4, completedTasks: 3, runningTasks: 1 });
+  snapshot.tasks.items[0].assignedHost = "ora7-lab";
+  snapshot.tasks.items[0].actualModel = "team/model-x:4b";
+  snapshot.tasks.items[0].errorCode = "worker_error";
+  snapshot.summary.assignmentDistribution.push({ host: "ora7-lab", count: 1, share: 0.25 });
+  snapshot.summary.assignmentDenominator = 4;
   snapshot.hosts[0].catalogError = "<script>owner-secret</script>";
   snapshot.summary.promptTokens.total = null;
   snapshot.summary.assignmentDenominator = 0;
   snapshot.summary.assignmentDistribution = snapshot.summary.assignmentDistribution.map((entry) => ({ ...entry, count: 0, share: null }));
   const html = renderOracleOpsPage({ base: "/gateway", snapshot });
   assert.match(html, /Oracle pool/);
+  assert.match(html, /ora7-lab/);
+  assert.match(html, /team\/model-x:4b/);
+  assert.match(html, /Provider: Unknown/);
+  assert.match(html, /Utilization unknown: no stored host-slot capacity/);
+  assert.match(html, /1 completed · 1 error/);
+  assert.match(html, /Requested model/);
+  assert.match(html, /Reported model/);
+  assert.match(html, /\/gateway\/admin\/oracle\/models/);
+  assert.match(html, /\/gateway\/admin\/services/);
+  assert.match(html, /min-width:1050px/);
   assert.match(html, /Lightweight advisory model/);
   assert.match(html, /share unknown/);
   assert.match(html, /Prompt tokens observed<\/div><div class="metric">Unknown/);
