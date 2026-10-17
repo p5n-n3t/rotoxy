@@ -104,6 +104,21 @@ class OracleFleetConfigTests(unittest.TestCase):
             "enabled": True, "allowedModels": [DEFAULT_MODEL]}})
         self.assertEqual(json.loads(response.stdout)["error"], "config_locked")
 
+    def test_fleet_lock_is_released_after_process_crash_without_unlinking_inode(self):
+        from snooze.oracle_fleet_config import _locked
+        script = "from pathlib import Path; import os; from snooze.oracle_fleet_config import _locked; lock=_locked(Path(os.environ['FLEET_TEST_CONFIG'])); lock.__enter__(); os._exit(0)"
+        env = {**os.environ, "FLEET_TEST_CONFIG": str(self.config)}
+        result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lock_path = self.config.with_name(self.config.name + ".lock.v2")
+        inode = lock_path.stat().st_ino
+        with _locked(self.config):
+            self.assertEqual(lock_path.stat().st_ino, inode)
+            nested = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, timeout=5)
+            self.assertNotEqual(nested.returncode, 0)
+        with _locked(self.config):
+            self.assertEqual(lock_path.stat().st_ino, inode)
+
 
 if __name__ == "__main__":
     unittest.main()

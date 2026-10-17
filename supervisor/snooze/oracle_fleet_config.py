@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import hashlib
+import fcntl
 import json
 import os
 import stat
@@ -100,22 +101,30 @@ def _host_input(raw: Any) -> dict[str, Any]:
 
 @contextmanager
 def _locked(path: Path):
-    lock = path.with_name(path.name + ".lock")
+    """Crash-released lock; retain its inode so concurrent waiters cannot split locks."""
     _check_parent(path, create=True)
+    legacy = path.with_name(path.name + ".lock")
+    lock = path.with_name(path.name + ".lock.v2")
+    if legacy.exists() or legacy.is_symlink():
+        raise ValueError("config_locked")
     try:
-        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as exc:
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
         raise ValueError("config_locked") from exc
     try:
-        os.write(fd, f"{os.getpid()}\n".encode())
-        os.fsync(fd)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_mode & 0o077 or info.st_nlink != 1):
+            raise ValueError("config_locked")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError("config_locked") from exc
+        if legacy.exists() or legacy.is_symlink():
+            raise ValueError("config_locked")
         yield
     finally:
         os.close(fd)
-        try:
-            os.unlink(lock)
-        except FileNotFoundError:
-            pass
 
 
 def _response(raw: bytes, config: dict[str, Any], hosts: tuple[dict[str, Any], ...]) -> dict[str, Any]:
