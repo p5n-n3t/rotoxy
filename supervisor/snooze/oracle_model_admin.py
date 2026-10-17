@@ -249,7 +249,10 @@ def _apply_controller(config_path: Path, db_path: Path):
         from .oracle_apply import OracleApplyController
     except (ImportError, AttributeError):
         return None
-    return OracleApplyController(config_path, db_path, wait_seconds=15)
+    try:
+        return OracleApplyController(config_path, db_path, wait_seconds=15)
+    except (ImportError, AttributeError):
+        return None
 
 
 def _apply_status_value(value: Any) -> dict[str, Any] | None:
@@ -301,10 +304,11 @@ def snapshot(config_path: Path, db_path: Path, cache_path: Path,
         rows.append({"id": host["id"], "enabled": host["enabled"], "allowedModels": host["allowedModels"],
                      "hostStatus": saved.get("status", "unknown"), "models": installed,
                      "observedAt": saved.get("observedAt"), "load": queue["hosts"].get(host["id"]) if queue["available"] else None})
+    apply_status = _read_apply_status(config_path, db_path, controller_factory)
     return {"cacheRevision": revision(cache_raw), "configRevision": revision(fleet_raw), "cacheUpdatedAt": cache.get("updatedAt"),
             "hosts": rows, "queue": queue, "maintenance": _maintenance_readonly(db_path),
-            "applyStatus": _read_apply_status(config_path, db_path, controller_factory),
-            "apply": {"mode": "previewOnly", "blockedReason": "Restart/reload protocol is not yet validated; changes remain preview-only."}}
+            "applyStatus": apply_status,
+            "apply": {"mode": "previewOnly", "blockedReason": "Apply coordinator unavailable; changes remain preview-only." if apply_status is None else "Readiness check is read-only; no apply request was made."}}
 
 
 def refresh(config_path: Path, db_path: Path, cache_path: Path, expected_cache_revision: str,
@@ -332,8 +336,9 @@ def refresh(config_path: Path, db_path: Path, cache_path: Path, expected_cache_r
     return snapshot(config_path, db_path, cache_path)
 
 
-def apply_preview(config_path: Path, db_path: Path, cache_path: Path, expected_config_revision: str) -> dict[str, Any]:
-    current = snapshot(config_path, db_path, cache_path)
+def apply_preview(config_path: Path, db_path: Path, cache_path: Path, expected_config_revision: str,
+                  controller_factory: Callable[[Path, Path], Any] = _apply_controller) -> dict[str, Any]:
+    current = snapshot(config_path, db_path, cache_path, controller_factory)
     if current["configRevision"] != expected_config_revision: raise ValueError("config_revision_conflict")
     queue = current["queue"]
     if not queue["available"]:
@@ -341,7 +346,7 @@ def apply_preview(config_path: Path, db_path: Path, cache_path: Path, expected_c
     elif not queue.get("applySafeAtRead"):
         reason = "Queue has running, ambiguous, dispatching, or unknown task state."
     else:
-        reason = "Restart/reload protocol is not yet validated; changes remain preview-only."
+        reason = "Readiness check is read-only; no apply request was made." if current.get("applyStatus") is not None else "Apply coordinator unavailable; changes remain preview-only."
     current["apply"] = {"mode": "previewOnly", "blockedReason": reason}
     return current
 
@@ -359,7 +364,7 @@ def apply_request(config_path: Path, db_path: Path, cache_path: Path, request: A
     if request["action"] == "apply" and set(request) == {"action", "expectedConfigRevision"}:
         token = request["expectedConfigRevision"]
         if not isinstance(token, str) or len(token) != 24: raise ValueError("revision_invalid")
-        current = apply_preview(config_path, db_path, cache_path, token)
+        current = apply_preview(config_path, db_path, cache_path, token, controller_factory)
         current["applyStatus"] = _read_apply_status(config_path, db_path, controller_factory)
         return current
     if request["action"] == "apply-config" and set(request) == {"action", "expectedConfigRevision", "expectedEpoch"}:
@@ -368,16 +373,25 @@ def apply_request(config_path: Path, db_path: Path, cache_path: Path, request: A
         if type(epoch) is not int or epoch < 0: raise ValueError("apply_epoch_invalid")
         current = snapshot(config_path, db_path, cache_path, controller_factory)
         if current["configRevision"] != token: raise ValueError("apply_revision_conflict")
-        controller = controller_factory(config_path, db_path)
+        try:
+            controller = controller_factory(config_path, db_path)
+        except (ImportError, AttributeError):
+            controller = None
         if controller is None: raise ValueError("apply_coordinator_unavailable")
-        before = _apply_status_value(controller.status())
+        try:
+            before = _apply_status_value(controller.status())
+        except (ImportError, AttributeError, ValueError, OSError, sqlite3.Error):
+            before = None
         if before is None: raise ValueError("apply_coordinator_unavailable")
         if not before["ready"]: raise ValueError("apply_not_ready")
         if before["daemon"]["observedEpoch"] != epoch: raise ValueError("apply_epoch_conflict")
-        status = _apply_status_value(controller.apply(expected_config_revision=token, expected_epoch=epoch))
+        apply_method = getattr(controller, "apply", None)
+        if not callable(apply_method): raise ValueError("apply_coordinator_unavailable")
+        status = _apply_status_value(apply_method(expected_config_revision=token, expected_epoch=epoch))
         if status is None: raise ValueError("apply_status_invalid")
-        current["applyStatus"] = status
-        return current
+        # Re-read all persisted state after the controller returns; its operation
+        # response may describe the transition, while the page needs current fences.
+        return snapshot(config_path, db_path, cache_path, controller_factory)
     if request["action"] in {"maintenance-request", "maintenance-release"} and set(request) == {"action", "expectedConfigRevision", "expectedEpoch"}:
         token, epoch = request["expectedConfigRevision"], request["expectedEpoch"]
         if not isinstance(token, str) or len(token) != 24: raise ValueError("maintenance_revision_invalid")

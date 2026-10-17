@@ -73,7 +73,7 @@ class OracleModelAdminTests(unittest.TestCase):
         self.assertEqual(first["queue"]["hosts"]["ora1"]["assigned"], 1)
         preview = models.apply_preview(self.config, self.db, self.cache, first["configRevision"])
         self.assertEqual(preview["apply"]["mode"], "previewOnly")
-        self.assertIn("Restart/reload protocol is not yet validated", preview["apply"]["blockedReason"])
+        self.assertIn("Apply coordinator unavailable", preview["apply"]["blockedReason"])
         with self.assertRaisesRegex(ValueError, "config_revision_conflict"):
             models.apply_preview(self.config, self.db, self.cache, "A" * 24)
         active_db = sqlite3.connect(self.db); active_db.execute("INSERT INTO pool_tasks VALUES('run','running','ora3')"); active_db.commit(); active_db.close()
@@ -88,31 +88,44 @@ class OracleModelAdminTests(unittest.TestCase):
         self.assertEqual(self.db.read_bytes(), before)
         expected = {"daemon": {"available": True, "instanceId": "worker-1", "loadedRevision": "old", "heartbeatAt": 1.0, "observedEpoch": 4, "alive": True},
                     "operation": None, "maintenance": None, "ready": True, "reason": None}
+        reported = [expected]
         calls = []
         class FakeController:
             def status(self):
                 calls.append("status")
-                return expected
+                return reported[0]
             def apply(self, *, expected_config_revision, expected_epoch):
                 calls.append((expected_config_revision, expected_epoch))
                 if expected_epoch != 4:
                     raise ValueError("apply_epoch_conflict")
-                return expected
+                # Simulate the coordinator completing and changing persisted state.
+                config = json.loads(self_outer.config.read_text())
+                config["hosts"][0]["allowedModels"].append("new-model:1")
+                self_outer.config.write_text(json.dumps(config)); os.chmod(self_outer.config, 0o600)
+                reported[0] = {**expected, "daemon": {**expected["daemon"], "loadedRevision": "new", "observedEpoch": 5},
+                               "operation": {"applyId": "apply-1", "epoch": 5, "targetRevision": expected_config_revision,
+                                             "previousInstance": "worker-1", "status": "complete", "error": None}}
+                return reported[0]
+        self_outer = self
         factory = lambda *_: FakeController()
         got = models.apply_request(self.config, self.db, self.cache,
             {"action": "apply-config", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 4}, controller_factory=factory)
         self.assertTrue(got["applyStatus"]["ready"])
-        self.assertEqual(calls[-1], (initial["configRevision"], 4))
+        self.assertEqual(got["applyStatus"]["operation"]["status"], "complete")
+        self.assertEqual(got["applyStatus"]["daemon"]["loadedRevision"], "new")
+        self.assertEqual(got["configRevision"], models.revision(self.config.read_bytes()))
+        self.assertIn((initial["configRevision"], 4), calls)
+        current_revision = got["configRevision"]
         with self.assertRaisesRegex(ValueError, "apply_epoch_conflict"):
             models.apply_request(self.config, self.db, self.cache,
-                {"action": "apply-config", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 3}, controller_factory=factory)
+                {"action": "apply-config", "expectedConfigRevision": current_revision, "expectedEpoch": 3}, controller_factory=factory)
         self.assertEqual(calls.count((initial["configRevision"], 4)), 1)
         not_ready = {**expected, "ready": False, "reason": "daemon_not_live"}
         class NotReadyController(FakeController):
             def status(self): return not_ready
         with self.assertRaisesRegex(ValueError, "apply_not_ready"):
             models.apply_request(self.config, self.db, self.cache,
-                {"action": "apply-config", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 4}, controller_factory=lambda *_: NotReadyController())
+                {"action": "apply-config", "expectedConfigRevision": current_revision, "expectedEpoch": 4}, controller_factory=lambda *_: NotReadyController())
 
     def test_apply_config_closed_schema_and_missing_coordinator_fail_closed(self):
         view = models.snapshot(self.config, self.db, self.cache, controller_factory=lambda *_: None)
