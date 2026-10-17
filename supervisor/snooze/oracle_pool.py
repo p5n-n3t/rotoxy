@@ -46,6 +46,7 @@ MAX_TEXT_CHARS = 4000
 MAX_RESULT_BYTES = 16 * 1024
 MAX_PENDING = 100
 MAX_BATCH = 12
+MAX_POOL_CONCURRENCY = 32
 MAX_RETAINED = 10_000
 MAX_EVENTS = 10_000
 MAX_CATALOG_MODELS = 64
@@ -89,6 +90,13 @@ def validate_config(config: Any) -> tuple[dict[str, Any], tuple[dict[str, Any], 
     for key, expected in defaults.items():
         if key == "version":
             continue
+        if key == "max_total_running":
+            # V1 keeps its historical default. V2 may set a bounded pool size;
+            # the dispatcher still caps actual claims to enabled host capacity.
+            value = config.get(key)
+            if type(value) is not int or not 1 <= value <= 32:
+                raise PoolError("unsupported_config")
+            continue
         if type(config.get(key)) is not type(expected) or config.get(key) != expected:
             raise PoolError("unsupported_config")
     raw_hosts = config.get("hosts")
@@ -124,7 +132,7 @@ def validate_config(config: Any) -> tuple[dict[str, Any], tuple[dict[str, Any], 
     enabled_models = {model for host in hosts if host["enabled"] for model in host["allowedModels"]}
     if not enabled_models or config["default_model"] not in enabled_models:
         raise PoolError("unsupported_config")
-    normalized = {**defaults, "version": 2, "hosts": hosts}
+    normalized = {**defaults, "version": 2, "max_total_running": config["max_total_running"], "hosts": hosts}
     return normalized, tuple(hosts)
 
 
@@ -888,7 +896,7 @@ class OraclePool:
                             "updated": r["updated"], "error_code": r["error_code"], "assigned": r["assigned"]}
                            for r in rows if r["id"] in self.host_by_id]}
 
-    def _claim(self, limit: int = 3) -> list[dict[str, Any]]:
+    def _claim(self, limit: int = MAX_POOL_CONCURRENCY) -> list[dict[str, Any]]:
         pid, boot, start = self._identity
         claimed = []
         now = time.time()
@@ -1009,10 +1017,10 @@ class OraclePool:
         return {"id": task["id"], **safe}
 
     def run_once(self) -> dict[str, Any]:
-        tasks = self._claim(limit=3)
+        tasks = self._claim(limit=MAX_POOL_CONCURRENCY)
         if not tasks:
             return {"claimed": 0, "completed": [], "running": self.status()["counts"].get("running", 0)}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3, thread_name_prefix="oracle-pool") as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks), thread_name_prefix="oracle-pool") as executor:
             futures = [executor.submit(self._execute, task) for task in tasks]
             completed = [future.result() for future in futures]
         return {"claimed": len(tasks), "completed": completed, "running": self.status()["counts"].get("running", 0)}

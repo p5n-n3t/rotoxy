@@ -26,6 +26,8 @@ from snooze.oracle_pool import (
     _serve_loop,
     read_daemon_status,
     read_config_apply_status,
+    validate_config,
+    default_config,
 )
 
 
@@ -123,31 +125,53 @@ class OraclePoolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.pool.submit("bounded task", model="unapproved-model")
 
-    def _fleet_config(self, hosts):
+    def _fleet_config(self, hosts, max_total_running=3):
         return {"version": 2, "default_model": DEFAULT_MODEL, "max_context": 4096,
-                "max_predict": 512, "max_total_running": 3, "max_running_per_host": 1,
+                "max_predict": 512, "max_total_running": max_total_running, "max_running_per_host": 1,
                 "inference_timeout_seconds": 240, "hosts": hosts}
 
-    def _new_fleet(self, hosts, name="fleet"):
+    def _new_fleet(self, hosts, name="fleet", max_total_running=3):
         root = self.root / name
         root.mkdir(parents=True, exist_ok=True)
         config = root / "config.json"
-        config.write_text(json.dumps(self._fleet_config(hosts)), encoding="utf-8")
+        config.write_text(json.dumps(self._fleet_config(hosts, max_total_running)), encoding="utf-8")
         config.chmod(0o600)
         return OraclePool(config, root / "queue.sqlite3", FakeTransport())
 
-    def test_v2_fourth_host_joins_catalog_and_fair_dispatch(self):
+    def test_v2_fourth_host_and_explicit_capacity_four_join_dispatch(self):
         hosts = [{**host, "enabled": True, "allowedModels": list(APPROVED_MODELS)} for host in HOSTS]
-        hosts.append({"id": "ora7", "ip": "100.68.1.7", "ssh_host": "shh-ora7.ziopsyop.tech",
+        hosts.append({"id": "ora6", "ip": "100.68.1.6", "ssh_host": "shh-ora6.ziopsyop.tech",
                       "enabled": True, "allowedModels": [DEFAULT_MODEL]})
-        pool = self._new_fleet(hosts)
+        pool = self._new_fleet(hosts, max_total_running=4)
         pool.catalog(refresh=True)
         for i in range(4):
             pool.submit(f"fourth host task {i}", job_id=f"fleet:{i}")
-        self.assertEqual(pool.run_once()["claimed"], 3)
-        self.assertEqual(pool.run_once()["claimed"], 1)
-        self.assertIn("ora7", {row["id"] for row in pool.catalog()["hosts"]})
-        self.assertIn(("ora7", DEFAULT_MODEL, "fourth host task 3"), pool.transport.calls)
+        pool.transport.gate = threading.Event()
+        outcomes = []
+        thread = threading.Thread(target=lambda: outcomes.append(pool.run_once()))
+        thread.start()
+        deadline = time.monotonic() + 2
+        while len(pool.transport.calls) < 4 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(len(pool.transport.calls), 4)
+        self.assertEqual(pool.status()["counts"]["running"], 4)
+        pool.transport.gate.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcomes[0]["claimed"], 4)
+        self.assertEqual(pool.run_once()["claimed"], 0)
+        self.assertIn("ora6", {row["id"] for row in pool.catalog()["hosts"]})
+        self.assertEqual({call[0] for call in pool.transport.calls}, {"ora1", "ora3", "ora5", "ora6"})
+
+    def test_v2_max_total_running_rejects_bool_and_out_of_range_values(self):
+        hosts = [{**host, "enabled": True, "allowedModels": list(APPROVED_MODELS)} for host in HOSTS]
+        for value in (True, 0, 33):
+            with self.subTest(max_total_running=value), self.assertRaises(PoolError):
+                self._new_fleet(hosts, f"invalid-capacity-{value}", max_total_running=value)
+
+    def test_v1_default_capacity_remains_three(self):
+        normalized, _ = validate_config(default_config())
+        self.assertEqual(normalized["max_total_running"], 3)
 
     def test_disabled_host_is_not_probed_or_selected_for_new_dispatch(self):
         hosts = [{**host, "enabled": host["id"] != "ora3", "allowedModels": list(APPROVED_MODELS)} for host in HOSTS]
