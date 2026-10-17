@@ -22,6 +22,14 @@ and observed epoch in the claim transaction. A replaced process fails with
 `daemon_replaced`; an unregistered one-shot worker cannot claim while the global
 maintenance fence is paused.
 
+`heartbeat_daemon()` is a liveness-only transaction: it verifies the registered
+instance and process identity, then updates `heartbeat_at` without changing the
+observed epoch or maintenance acknowledgement. Only the `serve` command starts
+the two-second heartbeat thread. It remains active while a bounded inference
+batch is executing, then is stopped and joined during shutdown. If it loses
+ownership, it signals stop and emits a safe fixed error after the current
+execution returns; it never cancels or replays an in-flight task.
+
 `read_daemon_status(db_path)` is read-only and returns exactly
 `available`, `instanceId`, `loadedRevision`, `heartbeatAt`, `observedEpoch`,
 and `alive`. On an unavailable or corrupt schema it returns `available: false`

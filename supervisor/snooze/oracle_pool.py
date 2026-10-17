@@ -548,6 +548,27 @@ class OraclePool:
         self._daemon_instance_id = instance_id
         return {"instanceId": instance_id, "loadedRevision": self.loaded_revision, "observedEpoch": fence["epoch"]}
 
+    def heartbeat_daemon(self) -> float:
+        """Refresh only this registered daemon's liveness timestamp."""
+        instance_id = self._daemon_instance_id
+        if instance_id is None:
+            raise ValueError("daemon_not_registered")
+        now = time.time()
+        with self._connect() as db:
+            db.execute("PRAGMA busy_timeout=1000")
+            db.execute("BEGIN IMMEDIATE")
+            daemon = self._daemon_row(db)
+            if (self._identity != _process_identity() or daemon is None
+                    or daemon["instance_id"] != instance_id
+                    or (daemon["pid"], daemon["boot_id"], daemon["start_id"]) != self._identity):
+                raise ValueError("daemon_replaced")
+            updated = db.execute("UPDATE pool_daemons SET heartbeat_at=? WHERE id=1 AND instance_id=?",
+                                 (now, instance_id)).rowcount
+            if updated != 1:
+                raise ValueError("daemon_replaced")
+            db.commit()
+        return now
+
     def begin_config_apply(self, *, expected_epoch: int, target_revision: str) -> dict[str, Any]:
         if type(expected_epoch) is not int or expected_epoch < 0:
             raise ValueError("maintenance_epoch_conflict")
@@ -1090,6 +1111,36 @@ def _json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def _serve_loop(pool: OraclePool, stopped: threading.Event, *, heartbeat_interval: float = 2.0) -> None:
+    heartbeat_failed = threading.Event()
+
+    def heartbeat_loop() -> None:
+        while not stopped.wait(heartbeat_interval):
+            try:
+                pool.heartbeat_daemon()
+            except Exception:
+                heartbeat_failed.set()
+                stopped.set()
+                return
+
+    heartbeat_thread = threading.Thread(target=heartbeat_loop, name="oracle-daemon-heartbeat", daemon=True)
+    heartbeat_thread.start()
+    try:
+        while not stopped.is_set():
+            outcome = pool.run_once()
+            if heartbeat_failed.is_set():
+                raise ValueError("daemon_heartbeat_failed")
+            if outcome["claimed"]:
+                _json(outcome)
+            else:
+                stopped.wait(2)
+        if heartbeat_failed.is_set():
+            raise ValueError("daemon_heartbeat_failed")
+    finally:
+        stopped.set()
+        heartbeat_thread.join()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Private bounded Oracle Ollama text-task pool")
     parser.add_argument("--config", help="private config path")
@@ -1178,12 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
             stopped = threading.Event()
             for signum in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(signum, lambda *_: stopped.set())
-            while not stopped.is_set():
-                outcome = pool.run_once()
-                if outcome["claimed"]:
-                    _json(outcome)
-                else:
-                    stopped.wait(2)
+            _serve_loop(pool, stopped)
         return 0
     except (PoolError, ValueError, KeyError, OSError) as exc:
         # The bounded MCP bridge reads structured failures from stdout and discards stderr.
