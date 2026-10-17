@@ -567,8 +567,6 @@ class OraclePool:
                 raise ValueError("maintenance_epoch_conflict")
             if not fence["paused"] or not fence["acknowledged"] or any(blockers.values()):
                 raise ValueError("maintenance_not_drained")
-            if fence["config_revision"] != target_revision:
-                raise ValueError("maintenance_revision_conflict")
             daemon = self._daemon_row(db)
             if daemon is None or not self._daemon_is_live(daemon, now) or daemon["observed_epoch"] != expected_epoch:
                 raise ValueError("daemon_not_ready")
@@ -592,16 +590,14 @@ class OraclePool:
                 raise ValueError("config_apply_conflict")
             if op["status"] == "complete":
                 result = self._operation(op); db.commit(); return result
-            if op["status"] == "failed":
-                raise ValueError("config_apply_failed")
             fence = self._maintenance_row(db); blockers = self._maintenance_blockers(db); daemon = self._daemon_row(db)
             if (fence["epoch"] != expected_epoch or not fence["paused"] or not fence["acknowledged"]
-                    or fence["config_revision"] != target_revision or any(blockers.values())):
+                    or any(blockers.values())):
                 raise ValueError("maintenance_not_drained")
             if (daemon is None or not self._daemon_is_live(daemon, now) or daemon["instance_id"] == op["previous_instance"]
                     or daemon["loaded_revision"] != target_revision or daemon["observed_epoch"] != expected_epoch):
                 raise ValueError("replacement_daemon_not_ready")
-            db.execute("UPDATE pool_config_applies SET status='complete',error=NULL,updated_at=? WHERE apply_id=? AND status='prepared'", (now, apply_id))
+            db.execute("UPDATE pool_config_applies SET status='complete',error=NULL,updated_at=? WHERE apply_id=? AND status IN ('prepared','failed')", (now, apply_id))
             db.execute("UPDATE pool_maintenance SET epoch=epoch+1,paused=0,config_revision=NULL,acknowledged=0,requested_at=NULL WHERE id=1 AND epoch=? AND paused=1", (expected_epoch,))
             self._event(db, None, "config_apply_completed", {"status": "complete", "source": apply_id}, now)
             op = next(row for row in self._apply_rows(db) if row["apply_id"] == apply_id)

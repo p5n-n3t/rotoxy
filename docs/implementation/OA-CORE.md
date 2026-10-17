@@ -39,16 +39,24 @@ The apply API is:
 
 - `begin_config_apply(*, expected_epoch, target_revision)` reserves one durable
   operation only while the fence is paused, acknowledged, drained, at the exact
-  epoch/revision, and observed by a live daemon. Repeating the same epoch and
-  target returns the existing operation. A different target conflicts.
+  epoch, and observed by a live daemon. The fence's `configRevision` remains
+  the old loaded revision used to request/pin the pause; `target_revision` is
+  the separately checked current-file revision supplied by the coordinator.
+  Repeating the same epoch and target returns the existing operation. A
+  different target conflicts. The transaction commits before this method
+  returns, so the coordinator can then wait for service restart without
+  holding a SQLite write lock.
 - `complete_config_apply(*, apply_id, expected_epoch, target_revision)` requires
-  the exact prepared reservation and a fresh replacement daemon (new instance)
-  that loaded the target revision and observed the paused epoch. In one
-  transaction it completes the operation, records an audit event, and releases
-  the fence at the next epoch.
+  the exact reservation and a fresh replacement daemon (new instance) that
+  loaded the reserved target revision and observed the paused epoch. It can
+  reconcile either a prepared or failed reservation when those exact checks
+  now pass; wrong targets and the old daemon still fail. In one transaction it
+  completes the operation, records an audit event, and releases the fence at
+  the next epoch.
 - `fail_config_apply(*, apply_id, expected_epoch, error)` records a bounded
   error code and leaves the reservation and fence paused. It cannot be retried
-  as a new apply.
+  as a new reservation, but a later healthy replacement can reconcile that
+  same operation through `complete_config_apply()`.
 - `read_config_apply_status(db_path)` reads the latest operation or returns
   `None`; malformed or unavailable state raises `ValueError` with the stable
   code `config_apply_unavailable`.
