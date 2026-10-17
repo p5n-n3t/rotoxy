@@ -80,6 +80,43 @@ class OracleModelAdminTests(unittest.TestCase):
         active = models.apply_preview(self.config, self.db, self.cache, first["configRevision"])
         self.assertIn("running", active["apply"]["blockedReason"])
 
+    def test_apply_status_is_read_only_and_explicit_apply_uses_revision_and_epoch(self):
+        initial = models.snapshot(self.config, self.db, self.cache, controller_factory=lambda *_: None)
+        self.assertIsNone(initial["applyStatus"])
+        before = self.db.read_bytes()
+        self.assertIsNone(models.apply_request(self.config, self.db, self.cache, {"action": "read"}, controller_factory=lambda *_: None)["applyStatus"])
+        self.assertEqual(self.db.read_bytes(), before)
+        expected = {"daemon": {"available": True, "instanceId": "worker-1", "loadedRevision": "old", "heartbeatAt": 1.0, "observedEpoch": 4, "alive": True},
+                    "operation": None, "maintenance": None, "ready": True, "reason": None}
+        calls = []
+        class FakeController:
+            def status(self):
+                calls.append("status")
+                return expected
+            def apply(self, *, expected_config_revision, expected_epoch):
+                calls.append((expected_config_revision, expected_epoch))
+                if expected_epoch != 4:
+                    raise ValueError("apply_epoch_conflict")
+                return expected
+        factory = lambda *_: FakeController()
+        got = models.apply_request(self.config, self.db, self.cache,
+            {"action": "apply-config", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 4}, controller_factory=factory)
+        self.assertTrue(got["applyStatus"]["ready"])
+        self.assertEqual(calls[-1], (initial["configRevision"], 4))
+        with self.assertRaisesRegex(ValueError, "apply_epoch_conflict"):
+            models.apply_request(self.config, self.db, self.cache,
+                {"action": "apply-config", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 3}, controller_factory=factory)
+        self.assertEqual(calls.count((initial["configRevision"], 4)), 1)
+
+    def test_apply_config_closed_schema_and_missing_coordinator_fail_closed(self):
+        view = models.snapshot(self.config, self.db, self.cache, controller_factory=lambda *_: None)
+        with self.assertRaisesRegex(ValueError, "request_invalid"):
+            models.apply_request(self.config, self.db, self.cache,
+                {"action": "apply-config", "expectedConfigRevision": view["configRevision"], "expectedEpoch": 0, "restartCommand": "systemctl"})
+        with self.assertRaisesRegex(ValueError, "apply_coordinator_unavailable"):
+            models.apply_request(self.config, self.db, self.cache,
+                {"action": "apply-config", "expectedConfigRevision": view["configRevision"], "expectedEpoch": 0}, controller_factory=lambda *_: None)
+
     def test_missing_database_unknown_status_and_arbitrary_command_are_rejected(self):
         view = models.snapshot(self.config, self.root / "missing.sqlite", self.cache)
         self.assertFalse(view["queue"]["available"])

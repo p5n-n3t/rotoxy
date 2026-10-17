@@ -1,0 +1,7 @@
+# Oracle apply controls
+
+The Oracle model page now reads the optional `snooze.oracle_apply.OracleApplyController` status contract and renders daemon liveness, heartbeat, loaded/requested revisions, active operation/error, readiness and recovery state. Missing coordinator support is represented as unavailable; it does not synthesize a healthy daemon or mutate maintenance state. The existing apply-readiness action remains preview-only.
+
+Only an authenticated, same-origin, CSRF-verified `POST /admin/oracle/models` with the closed `apply-config` form (`revision`, `epoch`) invokes `controller.apply(expected_config_revision, expected_epoch)`. The coordinator remains responsible for its durable reservation, epoch fence and readiness checks. The UI disables apply unless status reports `ready === true`; maintenance release is disabled when apply reservation status is unavailable, prepared or failed. GET and preview never pause/restart a service. Python IPC is bounded at 40 seconds for the coordinator's documented restart/poll window.
+
+Verification uses fake bridge/controller state and temporary SQLite/config files. No live daemon restart or actual apply was attempted. On this base the coordinator module is not present, so production apply remains unavailable until the separately-owned coordinator/core API is integrated; the page fails closed meanwhile. `OA-UI` does not edit core or coordinator files.
