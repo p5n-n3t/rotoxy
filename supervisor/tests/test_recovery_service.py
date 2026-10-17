@@ -227,6 +227,21 @@ class RecoveryServiceTests(unittest.TestCase):
         self.assertEqual(actions[0][0], "completed")
         self.assertIn("codex-exec-resume", actions[0][1])
 
+    def test_idle_event_reaches_headless_supervisor_once_without_inferred_completion(self):
+        event = self.observe("idle")
+        config, capture, _ = self.headless_config()
+        first = RecoveryService(config, resource_verifier=self.verified_resources).run_once()
+        self.assertEqual(first["processed"], 1)
+        self.assertTrue(capture.exists())
+        self.assertEqual(RecoveryService(config, resource_verifier=self.verified_resources).run_once()["processed"], 0)
+        with sqlite3.connect(self.state_path) as db:
+            kind, state = db.execute("SELECT kind,state FROM recovery_events").fetchone()
+            count = db.execute("SELECT count(*) FROM recovery_actions WHERE action='headless'").fetchone()[0]
+        self.assertEqual(kind, "idle")
+        self.assertEqual(state, "completed")  # supervisor invocation completed, not the provider task
+        self.assertEqual(count, 1)
+        self.assertEqual(self.inbox.inbox()[0]["kind"], "idle_needs_review")
+
     def test_headless_config_rejects_session_mapping_collisions_and_unsafe_executable(self):
         config, _, _ = self.headless_config()
         config["headless"]["sessions"].append({"project": "project-b", "owner": "owner-b",

@@ -19,6 +19,7 @@ from types import MappingProxyType
 
 LEVELS = {"observe", "notify", "rules", "cloud-supervisor", "headless", "human"}
 SIGNIFICANT = {"failed", "stalled", "ambiguous", "needs_instructions", "ownership_unknown", "quota_blocked"}
+SUPERVISOR_EVENTS = SIGNIFICANT | {"idle", "completed", "cancelled", "timed_out", "needs_approval"}
 IDENTITY = re.compile(r"[A-Za-z0-9_.:@/-]{1,160}\Z")
 INCIDENTS = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 MAX_EVENTS = 100_000
@@ -324,7 +325,7 @@ class RecoveryEngine:
             result = self._handoff(event_id, "headless_adapter_unverified", level)
         elif level == "cloud-supervisor" and row["kind"] not in SIGNIFICANT:
             result = self._handoff(event_id, "incident_not_significant", level)
-        elif level == "headless" and row["kind"] not in SIGNIFICANT:
+        elif level == "headless" and row["kind"] not in SUPERVISOR_EVENTS:
             result = self._handoff(event_id, "incident_not_significant", level)
         elif level == "rules" and (not action or action not in self.adapters):
             result = self._handoff(event_id, "registered_rule_unavailable", level)
