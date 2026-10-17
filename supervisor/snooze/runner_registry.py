@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse, base64, fcntl, hashlib, json, os, re, selectors, signal, stat, subprocess, sys, tempfile, time
 from pathlib import Path
+from .oracle_fleet_config import _check_parent
 
 MAX_INPUT=16*1024; MAX_OUTPUT=16*1024; MAX_PROFILES=40
 KINDS={"claude","opencode","hermes"}; MODEL=re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+/@-]{0,159}$"); ID=re.compile(r"^[A-Za-z0-9_-]{16,48}$")
@@ -18,19 +19,19 @@ def _trusted(value):
             if os.path.isfile(resolved) and os.access(resolved,os.X_OK): real.append(resolved)
         result[kind]=sorted(set(real))
     return result
-def _validate_profile(value,trusted):
+def _validate_profile(value,trusted,*,enforce_trust=True):
     if type(value) is not dict or set(value)!={"id","kind","label","cwd","binary","enabled","allowedModels"}: raise ValueError("invalid_profile")
     if not isinstance(value["id"],str) or not ID.fullmatch(value["id"]) or value["kind"] not in KINDS: raise ValueError("invalid_profile")
     label=value["label"]
     if not isinstance(label,str) or not 1<=len(label)<=80 or label.strip()!=label or any(ord(c)<32 for c in label): raise ValueError("invalid_profile")
     binary=value["binary"]
-    if not isinstance(binary,str) or binary not in trusted.get(value["kind"],[]): raise ValueError("executable_not_trusted")
+    if not isinstance(binary,str) or not os.path.isabs(binary) or "\x00" in binary or enforce_trust and binary not in trusted.get(value["kind"],[]): raise ValueError("executable_not_trusted")
     cwd=value["cwd"]
     if not isinstance(cwd,str) or not os.path.isabs(cwd) or "\x00" in cwd: raise ValueError("invalid_working_directory")
     try:
         p=Path(cwd)
-        if p.is_symlink() or not p.is_dir(): raise ValueError("invalid_working_directory")
-        cwd=str(p.resolve(strict=True))
+        if enforce_trust and (p.is_symlink() or not p.is_dir()): raise ValueError("invalid_working_directory")
+        if enforce_trust: cwd=str(p.resolve(strict=True))
     except OSError as exc: raise ValueError("invalid_working_directory") from exc
     models=value["allowedModels"]
     if type(models) is not list or len(models)>100 or any(not isinstance(m,str) or not MODEL.fullmatch(m) for m in models) or len(set(models))!=len(models): raise ValueError("invalid_models")
@@ -42,7 +43,13 @@ def _read(path, trusted):
         info=path.lstat()
     except FileNotFoundError:return b"",{"version":1,"profiles":[]}
     if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)&0o077: raise ValueError("registry_permissions_invalid")
-    raw=path.read_bytes()
+    if info.st_size > 64*1024: raise ValueError("registry_too_large")
+    fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+    try:
+        opened=os.fstat(fd)
+        if opened.st_ino!=info.st_ino or opened.st_dev!=info.st_dev or not stat.S_ISREG(opened.st_mode): raise ValueError("registry_path_invalid")
+        raw=os.read(fd,64*1024+1)
+    finally: os.close(fd)
     if len(raw)>64*1024: raise ValueError("registry_too_large")
     doc=json.loads(raw)
     if type(doc) is not dict or set(doc)!={"version","profiles"} or doc["version"]!=1 or type(doc["profiles"]) is not list or len(doc["profiles"])>MAX_PROFILES: raise ValueError("registry_invalid")
@@ -50,13 +57,15 @@ def _read(path, trusted):
     for profile in doc["profiles"]:
         if type(profile) is not dict or set(profile)!={"id","kind","label","cwd","binary","enabled","allowedModels","probeState","probeCheck","probeAt","probeOutput"}: raise ValueError("registry_invalid")
         clean={key:profile[key] for key in ("id","kind","label","cwd","binary","enabled","allowedModels")}
-        _validate_profile(clean,trusted)
+        _validate_profile(clean,trusted,enforce_trust=False)
+        if clean["binary"] not in trusted.get(clean["kind"],[]):
+            profile.update({"probeState":"unavailable","probeCheck":None,"probeAt":None,"probeOutput":"Executable is no longer available in the trusted installation registry."})
         if clean["id"] in seen: raise ValueError("registry_invalid")
         seen.add(clean["id"])
         if profile["probeState"] not in {"unverified","available","unavailable","timeout","output_limited"} or profile["probeCheck"] not in {None,"version","help"} or (profile["probeAt"] is not None and (type(profile["probeAt"]) is not int or profile["probeAt"]<0)) or not isinstance(profile["probeOutput"],str) or len(profile["probeOutput"].encode())>1024: raise ValueError("registry_invalid")
     return raw,doc
 def _atomic(path,raw):
-    path.parent.mkdir(mode=0o700,parents=True,exist_ok=True); os.chmod(path.parent,0o700)
+    _check_parent(path, create=True)
     if path.parent.is_symlink() or path.parent.stat().st_uid!=os.getuid() or stat.S_IMODE(path.parent.stat().st_mode)&0o077: raise ValueError("registry_permissions_invalid")
     tmp=path.with_name(path.name+f".tmp.{os.getpid()}.{os.urandom(4).hex()}")
     fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -96,10 +105,13 @@ def apply(path:Path,request,trusted_executables,probe_runner=None,now=None):
     if type(request) is not dict or request.get("action") not in {"read","add","update","remove","enable","probe"}:raise ValueError("invalid_request")
     path=Path(path)
     if not path.is_absolute() or "\x00" in str(path):raise ValueError("registry_path_invalid")
-    path.parent.mkdir(mode=0o700,parents=True,exist_ok=True);os.chmod(path.parent,0o700)
+    _check_parent(path, create=True)
     lock_path=path.with_name(path.name+".lock")
     if lock_path.is_symlink():raise ValueError("registry_path_invalid")
-    lock_fd=os.open(lock_path,os.O_CREAT|os.O_RDWR,0o600)
+    lock_fd=os.open(lock_path,os.O_CREAT|os.O_RDWR|getattr(os,"O_NOFOLLOW",0),0o600)
+    lock_info=os.fstat(lock_fd)
+    if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid!=os.getuid():
+        os.close(lock_fd); raise ValueError("registry_path_invalid")
     try:
         os.fchmod(lock_fd,0o600);fcntl.flock(lock_fd,fcntl.LOCK_EX)
         raw,doc=_read(path,trusted);rev=revision(raw);action=request["action"]

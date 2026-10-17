@@ -26,7 +26,7 @@ _TAGS_SCRIPT = """import json, urllib.request, urllib.error
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
-opener = urllib.request.build_opener(NoRedirect())
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 try:
     with opener.open('http://127.0.0.1:11434/api/tags', timeout=5) as response:
         body = response.read(262145)

@@ -58,6 +58,8 @@ const pythonImports = [
   "snooze.controlled_batches",
   "snooze.controlled_batch_admin",
   "snooze.private_services",
+  "snooze.runner_registry",
+  "snooze.oracle_model_admin",
   "snooze.recovery",
   "snooze.recovery_service",
   "snooze.headless",

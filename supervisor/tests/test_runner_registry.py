@@ -53,4 +53,15 @@ class RunnerRegistryTests(unittest.TestCase):
         result=self.invoke({"action":"probe","revision":result["revision"],"id":self.profile()["id"],"check":"help"},noisy)
         self.assertLessEqual(len(result["profiles"][0]["probeOutput"].encode()),1024)
 
+    def test_missing_installation_stays_visible_and_removable_without_execution(self):
+        initial=self.invoke({"action":"read"})
+        added=self.invoke({"action":"add","revision":initial["revision"],"profile":self.profile()})
+        self.binary.unlink(); self.cwd.rmdir()
+        read=self.invoke({"action":"read"})
+        self.assertEqual(read["profiles"][0]["probeState"],"unavailable")
+        with self.assertRaises(ValueError):
+            self.invoke({"action":"probe","revision":read["revision"],"id":self.profile()["id"],"check":"version"})
+        removed=self.invoke({"action":"remove","revision":read["revision"],"id":self.profile()["id"]})
+        self.assertEqual(removed["profiles"],[])
+
 if __name__=="__main__": unittest.main()

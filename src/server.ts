@@ -1,3 +1,7 @@
+import { createRunnerAdminRouter } from "./runner-admin.js";
+import { createOracleModelAdminRouter } from "./oracle-model-admin.js";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { createControlledBatchAdminRouter } from "./controlled-batch-admin.js";
 import { createPrivateServiceAdminRouter } from "./private-service-admin.js";
 import { AgentWorkspaceService, createAgentWorkspaceRouter } from "./agent-workspace.js";
@@ -77,6 +81,13 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(createControlledBatchAdminRouter(store, sessions).router);
   router.use(createPrivateServiceAdminRouter(store, sessions).router);
   router.use(createOracleFleetAdminRouter(store, sessions).router);
+  const localBinary = (paths: (string | undefined)[]) => [...new Set(paths.filter((path): path is string => Boolean(path && existsSync(path))).map(path => realpathSync(path)))];
+  router.use(createRunnerAdminRouter(store, sessions, { configPath: join(store.dir, "runner-profiles.json"), trustedExecutables: {
+    claude: localBinary([process.env.ROTOXY_CLAUDE_BINARY, join(homedir(), ".config/nvm/versions/node/v26.3.1/bin/claude"), "/usr/local/bin/claude"]),
+    hermes: localBinary([process.env.ROTOXY_HERMES_BINARY, join(homedir(), ".local/bin/hermes")]),
+    opencode: localBinary([process.env.ROTOXY_OPENCODE_BINARY, join(homedir(), ".opencode/bin/opencode"), "/usr/local/bin/opencode"]),
+  }}).router);
+  router.use(createOracleModelAdminRouter(store, sessions).router);
   router.use(createResourceRoutingAdminRouter(store, sessions).router);
   router.use(createAgentWorkspaceAccessRouter(store, sessions, options.supervisorBackend));
   router.use(createAgentWorkspaceRouter(store, sessions, agentWorkspace, renderAgentWorkspace));
