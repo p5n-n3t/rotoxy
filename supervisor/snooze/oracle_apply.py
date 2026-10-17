@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import base64
+import fcntl
 import hashlib
 import math
 import os
@@ -120,24 +121,30 @@ def _apply_lock(config_path: Path):
     if (not parent.is_dir() or parent.is_symlink() or info.st_mode & 0o077 or
             hasattr(os, "getuid") and info.st_uid != os.getuid()):
         raise ValueError("config_directory_permissions_invalid")
-    path = config_path.with_name(config_path.name + ".apply.lock")
+    legacy = config_path.with_name(config_path.name + ".apply.lock")
+    if os.path.lexists(legacy):
+        raise ValueError("apply_locked")
+    path = config_path.with_name(config_path.name + ".apply.lock.v2")
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    except FileExistsError as exc:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
         raise ValueError("apply_locked") from exc
     try:
         st = os.fstat(fd)
         if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_mode & 0o077 or
                 hasattr(os, "getuid") and st.st_uid != os.getuid()):
             raise ValueError("apply_locked")
-        os.write(fd, f"{os.getpid()}\n".encode("ascii")); os.fsync(fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError("apply_locked") from exc
         yield
     finally:
-        os.close(fd)
         try:
-            path.unlink()
-        except FileNotFoundError:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
             pass
+        os.close(fd)
 
 
 class OracleApplyController:
@@ -179,24 +186,28 @@ class OracleApplyController:
             operation = None
         ready = False
         if reason is None:
-            if operation is not None:
-                reason = "apply_complete" if operation["status"] == "complete" else "recovery_required"
+            # A completed row is retained for audit; only a row at or beyond the
+            # active fence epoch can reserve/restrict the current apply.
+            active_operation = operation
+            if (active_operation is not None and active_operation["status"] == "complete" and
+                    maintenance is not None and active_operation["epoch"] < maintenance["epoch"]):
+                active_operation = None
+            if active_operation is not None and active_operation["status"] == "failed" and revision is not None and maintenance is not None and active_operation["epoch"] == maintenance["epoch"] and active_operation["targetRevision"] == revision and maintenance["paused"] and maintenance["acknowledged"] and not any(maintenance["blockers"].values()) and _healthy_new_daemon(daemon, active_operation):
+                ready, reason = True, "reconcile_ready"
+            elif active_operation is not None:
+                reason = "apply_complete" if active_operation["status"] == "complete" else "recovery_required"
             elif revision is None or maintenance is None:
                 reason = "maintenance_unavailable"
             elif not maintenance["paused"]:
                 reason = "maintenance_not_paused"
             elif maintenance["epoch"] < 0 or not maintenance["acknowledged"] or any(maintenance["blockers"].values()):
                 reason = "maintenance_not_drained"
-            elif maintenance["configRevision"] != revision:
-                reason = "maintenance_revision_conflict"
             elif daemon is None or not daemon["available"] or not daemon["instanceId"]:
                 reason = "daemon_unavailable"
             elif not daemon["alive"]:
                 reason = "daemon_not_alive"
             elif not _heartbeat_fresh(daemon):
                 reason = "daemon_heartbeat_stale"
-            elif daemon["loadedRevision"] != revision:
-                reason = "daemon_revision_conflict"
             elif daemon["observedEpoch"] != maintenance["epoch"]:
                 reason = "daemon_epoch_conflict"
             else:
@@ -247,15 +258,31 @@ class OracleApplyController:
                 existing = _operation(core["read_config_apply_status"](self.db_path))
                 if maintenance is None:
                     return self._snapshot("maintenance_unavailable")
+                if existing is not None and existing["status"] == "complete" and existing["epoch"] < maintenance["epoch"]:
+                    # Historical success remains visible in status, but does not
+                    # reserve a later maintenance epoch.
+                    existing = None
                 if existing is not None:
                     if existing["epoch"] != expected_epoch or existing["targetRevision"] != current_revision:
                         return self._snapshot("recovery_required")
                     if existing["status"] == "complete":
                         return self._snapshot("apply_complete")
-                    if (existing["status"] != "prepared" or not maintenance["paused"] or
+                    if (existing["status"] not in {"prepared", "failed"} or not maintenance["paused"] or
                             maintenance["epoch"] != expected_epoch or not maintenance["acknowledged"] or
-                            any(maintenance["blockers"].values()) or maintenance["configRevision"] != current_revision):
+                            any(maintenance["blockers"].values())):
                         return self._snapshot("recovery_required")
+                    if existing["status"] == "failed":
+                        current_daemon = _daemon(core["read_daemon_status"](self.db_path))
+                        if not _healthy_new_daemon(current_daemon, existing):
+                            return self._snapshot("recovery_required")
+                        pool = core["OraclePool"].open_maintenance(self.db_path)
+                        try:
+                            completed = _operation(pool.complete_config_apply(apply_id=existing["applyId"], expected_epoch=expected_epoch, target_revision=current_revision))
+                        except Exception:
+                            return self._snapshot("recovery_required")
+                        if completed is None or completed["status"] != "complete":
+                            return self._snapshot("recovery_required")
+                        return self._snapshot("apply_complete")
                     return self._reconcile_existing(core, existing)
                 before = self._snapshot()
                 if not before["ready"] or before["maintenance"]["epoch"] != expected_epoch:
@@ -292,7 +319,10 @@ class OracleApplyController:
                         self._fail(core, operation, "daemon_not_observed")
                         return self._snapshot("recovery_required")
                     time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-                if self._config_revision() != current_revision:
+                # The fleet lock held by this apply protects the current target
+                # revision throughout the restart and observation window.
+                revision_after_restart = self._config_revision()
+                if revision_after_restart != current_revision:
                     self._fail(core, operation, "config_revision_changed")
                     return self._snapshot("config_revision_conflict")
                 try:

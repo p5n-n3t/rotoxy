@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -48,8 +50,9 @@ class OracleApplyTests(unittest.TestCase):
                 def begin_config_apply(self, *, expected_epoch, target_revision):
                     outer.begin_calls += 1
                     if expected_epoch != outer.maintenance["epoch"]: raise ValueError("maintenance_epoch_conflict")
-                    if target_revision != outer.maintenance["configRevision"]: raise ValueError("maintenance_revision_conflict")
-                    if outer.operation is not None: return dict(outer.operation)
+                    if (outer.operation is not None and not
+                            (outer.operation["status"] == "complete" and outer.operation["epoch"] < expected_epoch)):
+                        return dict(outer.operation)
                     outer.operation = {"applyId": "apply-1", "epoch": expected_epoch, "targetRevision": target_revision,
                         "previousInstance": outer.daemon["instanceId"], "status": "prepared", "error": None}
                     return dict(outer.operation)
@@ -57,6 +60,7 @@ class OracleApplyTests(unittest.TestCase):
                     outer.complete_calls += 1
                     if not outer.operation or outer.operation["applyId"] != apply_id or outer.operation["epoch"] != expected_epoch or outer.operation["targetRevision"] != target_revision:
                         raise ValueError("config_apply_conflict")
+                    if outer.operation["status"] not in {"prepared", "failed"}: raise ValueError("config_apply_conflict")
                     outer.operation["status"] = "complete"
                     outer.maintenance.update(epoch=expected_epoch + 1, paused=False, configRevision=None, acknowledged=False, reason=None)
                     return dict(outer.operation)
@@ -77,9 +81,9 @@ class OracleApplyTests(unittest.TestCase):
     def controller(self, runner=None, wait=0):
         return oracle_apply.OracleApplyController(self.config, self.db, service_runner=runner, wait_seconds=wait)
 
-    def healthy_restart(self):
-        self.api.daemon.update(instanceId="new-instance", loadedRevision=self.revision,
-            heartbeatAt=time.time(), observedEpoch=self.epoch, alive=True)
+    def healthy_restart(self, revision=None, epoch=None, instance="new-instance"):
+        self.api.daemon.update(instanceId=instance, loadedRevision=revision or self.revision,
+            heartbeatAt=time.time(), observedEpoch=self.epoch if epoch is None else epoch, alive=True)
 
     def test_success_and_status_get_leave_database_unchanged(self):
         before = self.db.read_bytes(); calls = []
@@ -94,6 +98,84 @@ class OracleApplyTests(unittest.TestCase):
         self.assertEqual(done["operation"]["status"], "complete")
         self.assertFalse(done["maintenance"]["paused"])
         self.assertEqual(self.api.complete_calls, 1)
+
+    def test_apply_targets_new_config_while_fence_and_daemon_report_old_revision(self):
+        old_revision = self.revision
+        self.config.write_text(self.config.read_text() + "\n")
+        self.config.chmod(0o600)
+        new_revision = oracle_apply._revision(self.config.read_bytes())
+        self.api.maintenance["configRevision"] = old_revision
+        self.api.daemon["loadedRevision"] = old_revision
+        calls = []
+        def restart():
+            calls.append(1)
+            self.healthy_restart(new_revision, self.epoch)
+        status = self.controller(restart, wait=0).status()
+        self.assertTrue(status["ready"], status)
+        result = self.controller(restart, wait=0).apply(new_revision, self.epoch)
+        self.assertEqual(result["reason"], "apply_complete")
+        self.assertEqual(result["operation"]["targetRevision"], new_revision)
+        self.assertEqual(calls, [1])
+
+    def test_historical_complete_operation_does_not_block_second_apply(self):
+        first = self.controller(lambda: self.healthy_restart(), wait=0).apply(self.revision, self.epoch)
+        self.assertEqual(first["reason"], "apply_complete")
+        self.epoch += 1
+        self.api.maintenance.update(epoch=self.epoch, paused=True, acknowledged=True,
+            configRevision="Z" * 24, blockers={"running": 0, "ambiguous": 0, "dispatching": 0})
+        self.api.daemon.update(loadedRevision="Z" * 24, observedEpoch=self.epoch, heartbeatAt=time.time())
+        calls = []
+        def restart():
+            calls.append(1)
+            self.healthy_restart(self.revision, self.epoch, "third-instance")
+        result = self.controller(restart, wait=0).apply(self.revision, self.epoch)
+        self.assertEqual(result["reason"], "apply_complete")
+        self.assertEqual(calls, [1])
+        self.assertEqual(self.api.begin_calls, 2)
+        self.assertEqual(result["operation"]["epoch"], self.epoch)
+
+    def test_failed_reservation_can_reconcile_late_exact_daemon_without_restart(self):
+        self.api.operation = {"applyId": "apply-1", "epoch": self.epoch, "targetRevision": self.revision,
+            "previousInstance": "old-instance", "status": "failed", "error": "daemon_not_observed"}
+        self.healthy_restart()
+        self.assertTrue(self.controller().status()["ready"])
+        self.assertEqual(self.controller().status()["reason"], "reconcile_ready")
+        calls = []
+        result = self.controller(lambda: calls.append(1), wait=0).apply(self.revision, self.epoch)
+        self.assertEqual(result["reason"], "apply_complete")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.api.complete_calls, 1)
+
+    def test_failed_reservation_without_proof_stays_blocked_and_never_restarts(self):
+        self.api.operation = {"applyId": "apply-1", "epoch": self.epoch, "targetRevision": self.revision,
+            "previousInstance": "old-instance", "status": "failed", "error": "restart_ambiguous"}
+        calls = []
+        result = self.controller(lambda: calls.append(1), wait=0).apply(self.revision, self.epoch)
+        self.assertEqual(result["reason"], "recovery_required")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.api.complete_calls, 0)
+
+    def test_apply_flock_releases_on_process_crash_and_persistent_inode_remains(self):
+        script = ("from pathlib import Path; from snooze.oracle_apply import _apply_lock; "
+                  "import sys,time; p=Path(sys.argv[1]); "
+                  "ctx=_apply_lock(p); ctx.__enter__(); print('locked',flush=True); time.sleep(30)")
+        child = subprocess.Popen([sys.executable, "-c", script, str(self.config)],
+            cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "locked")
+            child.kill(); child.wait(timeout=3)
+            with oracle_apply._apply_lock(self.config):
+                pass
+            self.assertTrue(self.config.with_name(self.config.name + ".apply.lock.v2").exists())
+        finally:
+            if child.poll() is None: child.kill(); child.wait(timeout=3)
+            child.stdout.close()
+
+    def test_legacy_lock_sidecar_is_rejected(self):
+        legacy = self.config.with_name(self.config.name + ".apply.lock")
+        legacy.write_text("stale")
+        with self.assertRaisesRegex(ValueError, "apply_locked"):
+            with oracle_apply._apply_lock(self.config): pass
 
     def test_config_revision_and_epoch_cas_reject_before_restart(self):
         calls = []
