@@ -413,5 +413,131 @@ class OraclePoolTests(unittest.TestCase):
             self.pool.submit("one too many")
 
 
+    def test_durable_maintenance_fence_drains_and_preserves_queued_work(self):
+        from snooze.oracle_pool import read_maintenance_status
+        revision = "R" * 24
+        self.pool.catalog(refresh=True)
+        queued = self.pool.submit("preserve during maintenance", job_id="maint-queued")
+        initial = self.pool.maintenance_status()
+        self.assertEqual(set(initial), {"epoch", "paused", "configRevision", "acknowledged", "blockers", "reason"})
+        self.assertEqual(initial, {"epoch": 0, "paused": False, "configRevision": None, "acknowledged": False,
+                                  "blockers": {"running": 0, "ambiguous": 0, "dispatching": 0}, "reason": None})
+        requested = self.pool.request_maintenance(revision, 0)
+        self.assertEqual((requested["epoch"], requested["paused"], requested["acknowledged"]), (1, True, False))
+        self.assertEqual(self.pool.request_maintenance(revision, 0), requested)  # matching retry only
+        before = self.pool.db_path.read_bytes()
+        self.assertEqual(read_maintenance_status(self.pool.db_path), requested)
+        self.assertEqual(self.pool.db_path.read_bytes(), before)
+        restarted = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        self.assertFalse(restarted.maintenance_status()["acknowledged"])
+        self.assertEqual(restarted._claim(), [])
+        ack = restarted.maintenance_status()
+        self.assertTrue(ack["acknowledged"])
+        self.assertEqual(restarted.status("maint-queued")["status"], "queued")
+        self.assertEqual(read_maintenance_status(self.pool.db_path), ack)
+        released = restarted.release_maintenance(1, revision)
+        self.assertEqual((released["epoch"], released["paused"], released["configRevision"]), (2, False, None))
+        with self.assertRaisesRegex(ValueError, "maintenance_epoch_conflict"):
+            restarted.release_maintenance(1, revision)
+        with self.assertRaisesRegex(ValueError, "maintenance_revision_conflict"):
+            restarted.release_maintenance(2, revision)
+
+    def test_maintenance_ack_waits_for_running_and_ambiguous_tasks_and_unknown_blocks(self):
+        revision = "M" * 24
+        self.pool.submit("running", job_id="maint-running")
+        self.pool.submit("ambiguous", job_id="maint-ambiguous")
+        with self.pool._connect() as db:
+            db.execute("UPDATE pool_tasks SET status='running' WHERE id='maint-running'")
+            db.execute("UPDATE pool_tasks SET status='ambiguous' WHERE id='maint-ambiguous'")
+            db.commit()
+        requested = self.pool.request_maintenance(revision, 0)
+        self.assertEqual(requested["blockers"], {"running": 1, "ambiguous": 1, "dispatching": 0})
+        self.assertFalse(self.pool._claim())
+        self.assertFalse(self.pool.maintenance_status()["acknowledged"])
+        with self.pool._connect() as db:
+            db.execute("UPDATE pool_tasks SET status='complete' WHERE id='maint-running'")
+            db.commit()
+        self.pool._claim()
+        self.assertFalse(self.pool.maintenance_status()["acknowledged"])
+        with self.pool._connect() as db:
+            db.execute("UPDATE pool_tasks SET status='complete' WHERE id='maint-ambiguous'")
+            db.execute("INSERT INTO pool_tasks(id,text,text_hash,model,status,created,updated) VALUES('unknown','x','x',?,'mystery',1,1)", (DEFAULT_MODEL,))
+            db.commit()
+        self.pool._claim()
+        status = self.pool.maintenance_status()
+        self.assertEqual(status["blockers"]["dispatching"], 1)
+        self.assertFalse(status["acknowledged"])
+        with self.pool._connect() as db:
+            db.execute("DELETE FROM pool_tasks WHERE id='unknown'")
+            db.commit()
+        self.pool._claim()
+        self.assertTrue(self.pool.maintenance_status()["acknowledged"])
+
+    def test_maintenance_request_races_with_claim_across_pool_instances(self):
+        self.pool.catalog(refresh=True)
+        self.pool.submit("claim-or-pause", job_id="maint-race")
+        peer = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        barrier = threading.Barrier(2)
+        results = {}
+        def claim():
+            barrier.wait(); results["claim"] = peer._claim()
+        def request():
+            barrier.wait(); results["request"] = self.pool.request_maintenance("C" * 24, 0)
+        threads = [threading.Thread(target=claim), threading.Thread(target=request)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertTrue(results["request"]["paused"])
+        self.assertIn(len(results["claim"]), (0, 1))
+        self.assertEqual(peer._claim(), [])
+        status = peer.maintenance_status()
+        self.assertTrue(status["paused"])
+        if results["claim"]:
+            self.assertEqual(status["blockers"]["running"], 1)
+            self.assertFalse(status["acknowledged"])
+        else:
+            self.assertTrue(status["acknowledged"])
+
+    def test_maintenance_cli_status_request_and_release(self):
+        def cli(*args):
+            result = subprocess.run([sys.executable, "-m", "snooze.oracle_pool", "--config", str(self.pool.config_path),
+                "--db", str(self.pool.db_path), *args], text=True, capture_output=True, timeout=10)
+            return result.returncode, json.loads(result.stdout)
+        code, status = cli("maintenance-status")
+        self.assertEqual(code, 0); self.assertEqual(status["epoch"], 0)
+        code, paused = cli("maintenance-request", "--revision", "D" * 24, "--epoch", "0")
+        self.assertEqual(code, 0); self.assertTrue(paused["paused"])
+        code, resumed = cli("maintenance-release", "--revision", "D" * 24, "--epoch", "1")
+        self.assertEqual(code, 0); self.assertEqual(resumed["epoch"], 2); self.assertFalse(resumed["paused"])
+
+    def test_maintenance_fence_cas_and_readonly_helper_fail_closed(self):
+        import sqlite3
+        from snooze.oracle_pool import read_maintenance_status
+        with self.assertRaisesRegex(ValueError, "maintenance_epoch_conflict"):
+            self.pool.request_maintenance("B" * 24, 1)
+        with self.assertRaisesRegex(ValueError, "maintenance_revision_conflict"):
+            self.pool.request_maintenance("invalid", 0)
+        with self.assertRaisesRegex(ValueError, "maintenance_epoch_conflict"):
+            self.pool.request_maintenance("B" * 24, True)
+        absent = Path(self.temp.name) / "does-not-exist.sqlite"
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            read_maintenance_status(absent)
+        empty = Path(self.temp.name) / "empty.sqlite"
+        sqlite3.connect(empty).close(); empty.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            read_maintenance_status(empty)
+        link = Path(self.temp.name) / "linked.sqlite"
+        link.symlink_to(self.pool.db_path)
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            read_maintenance_status(link)
+        with self.pool._connect() as db:
+            db.execute("UPDATE pool_maintenance SET paused=2 WHERE id=1")
+            db.commit()
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            self.pool.maintenance_status()
+        with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
+            read_maintenance_status(self.pool.db_path)
+
+
 if __name__ == "__main__":
     unittest.main()
