@@ -694,10 +694,13 @@ class OraclePoolTests(unittest.TestCase):
         original = self.pool.register_daemon()
         target_bytes = json.dumps(self.pool.config, separators=(",", ":")).encode()
         target = _config_revision(target_bytes)
-        self.pool.request_maintenance(target, 0)
+        old_revision = self.pool.loaded_revision
+        self.assertNotEqual(old_revision, target)
+        self.pool.request_maintenance(old_revision, 0)
         self.pool._claim()
         controller = OraclePool.open_maintenance(self.pool.db_path)
         op = controller.begin_config_apply(expected_epoch=1, target_revision=target)
+        self.assertEqual(controller.maintenance_status()["configRevision"], old_revision)
         with self.assertRaisesRegex(ValueError, "replacement_daemon_not_ready"):
             controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision=target)
         self.pool.config_path.write_bytes(target_bytes)
@@ -718,24 +721,40 @@ class OraclePoolTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(completed["previousInstance"], original["instanceId"])
 
-    def test_failed_apply_is_retained_and_cannot_release_or_retry(self):
-        self.pool.register_daemon()
-        revision = "F" * 24
-        self.pool.request_maintenance(revision, 0)
+    def test_failed_apply_reconciles_only_with_exact_healthy_replacement(self):
+        original = self.pool.register_daemon()
+        old_revision = self.pool.loaded_revision
+        target_bytes = json.dumps(self.pool.config, separators=(",", ":")).encode()
+        target = _config_revision(target_bytes)
+        self.assertNotEqual(old_revision, target)
+        self.pool.request_maintenance(old_revision, 0)
         self.pool._claim()
         controller = OraclePool.open_maintenance(self.pool.db_path)
-        op = controller.begin_config_apply(expected_epoch=1, target_revision=revision)
+        op = controller.begin_config_apply(expected_epoch=1, target_revision=target)
         failed = controller.fail_config_apply(apply_id=op["applyId"], expected_epoch=1, error="service_restart_failed")
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["error"], "service_restart_failed")
         self.assertTrue(controller.maintenance_status()["paused"])
         with self.assertRaisesRegex(ValueError, "config_apply_reserved"):
-            controller.release_maintenance(expected_epoch=1, config_revision=revision)
-        self.assertEqual(controller.begin_config_apply(expected_epoch=1, target_revision=revision), failed)
+            controller.release_maintenance(expected_epoch=1, config_revision=old_revision)
+        self.assertEqual(controller.begin_config_apply(expected_epoch=1, target_revision=target), failed)
         with self.assertRaisesRegex(ValueError, "config_apply_conflict"):
             controller.begin_config_apply(expected_epoch=1, target_revision="G" * 24)
-        with self.assertRaisesRegex(ValueError, "config_apply_failed"):
-            controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision=revision)
+        with self.assertRaisesRegex(ValueError, "config_apply_conflict"):
+            controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision="G" * 24)
+        with self.assertRaisesRegex(ValueError, "replacement_daemon_not_ready"):
+            controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision=target)
+        self.assertEqual(controller.maintenance_status()["configRevision"], old_revision)
+        self.pool.config_path.write_bytes(target_bytes)
+        replacement = OraclePool(self.pool.config_path, self.pool.db_path, FakeTransport())
+        with patch("snooze.oracle_pool._identity_alive", return_value=False):
+            replacement.register_daemon()
+        replacement._claim()
+        completed = controller.complete_config_apply(apply_id=op["applyId"], expected_epoch=1, target_revision=target)
+        self.assertEqual(completed["status"], "complete")
+        self.assertIsNone(completed["error"])
+        self.assertEqual(completed["previousInstance"], original["instanceId"])
+        self.assertFalse(controller.maintenance_status()["paused"])
 
     def test_daemon_and_apply_readers_fail_closed_for_corrupt_schema(self):
         unavailable = Path(self.temp.name) / "missing-daemon-db"
