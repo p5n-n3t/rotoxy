@@ -189,35 +189,24 @@ def _maintenance_value(value: Any) -> dict[str, Any] | None:
 
 
 def _maintenance_readonly(db_path: Path) -> dict[str, Any] | None:
-    """Read the core's pool_meta maintenance_state JSON without constructing OraclePool."""
+    """Use the core's supported read-only helper; never guess its SQLite schema."""
     try:
-        info = db_path.lstat()
-        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_mode & 0o077 or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
-            return None
-        from urllib.parse import quote
-        db = sqlite3.connect("file:" + quote(str(db_path), safe="/") + "?mode=ro", uri=True, timeout=2)
-        db.execute("PRAGMA query_only=ON")
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "pool_meta" not in tables:
-            db.close(); return None
-        columns = {row[1] for row in db.execute("PRAGMA table_info(pool_meta)")}
-        if not {"key", "value"}.issubset(columns):
-            db.close(); return None
-        row = db.execute("SELECT value FROM pool_meta WHERE key='maintenance_state'").fetchone()
-        db.close()
-        if not row:
-            return None
-        return _maintenance_value(json.loads(row[0]))
-    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        from .oracle_pool import read_maintenance_status
+        return _maintenance_value(read_maintenance_status(db_path))
+    except ValueError:
+        return None
+    except (ImportError, AttributeError):
+        # Older pool builds do not expose the fence reader, so report unavailable.
         return None
 
 
 def _core_pool(db_path: Path):
-    # Avoid OraclePool.__init__: GET must not create state or recover stale claims.
+    # Mutations use only the core's explicit existing-database-only factory.
     from .oracle_pool import OraclePool
-    pool = OraclePool.__new__(OraclePool)
-    pool.db_path = db_path
-    return pool
+    factory = getattr(OraclePool, "open_maintenance", None)
+    if not callable(factory):
+        raise ValueError("maintenance_api_unavailable")
+    return factory(db_path)
 
 
 def _maintenance_action(config_path: Path, db_path: Path, cache_path: Path, action: str,
@@ -233,7 +222,7 @@ def _maintenance_action(config_path: Path, db_path: Path, cache_path: Path, acti
         method = getattr(pool, "request_maintenance" if action == "maintenance-request" else "release_maintenance", None)
         if not callable(method):
             raise ValueError("maintenance_api_unavailable")
-        result = _maintenance_value(method(expected_revision, expected_epoch))
+        result = _maintenance_value(method(config_revision=expected_revision, expected_epoch=expected_epoch))
         if result is None:
             raise ValueError("maintenance_response_invalid")
     view = snapshot(config_path, db_path, cache_path)
@@ -256,7 +245,7 @@ def snapshot(config_path: Path, db_path: Path, cache_path: Path) -> dict[str, An
                      "observedAt": saved.get("observedAt"), "load": queue["hosts"].get(host["id"]) if queue["available"] else None})
     return {"cacheRevision": revision(cache_raw), "configRevision": revision(fleet_raw), "cacheUpdatedAt": cache.get("updatedAt"),
             "hosts": rows, "queue": queue, "maintenance": _maintenance_readonly(db_path),
-            "apply": {"mode": "previewOnly", "blockedReason": "Pool dispatch has no shared maintenance fence; queue state can change after this snapshot."}}
+            "apply": {"mode": "previewOnly", "blockedReason": "Restart/reload protocol is not yet validated; changes remain preview-only."}}
 
 
 def refresh(config_path: Path, db_path: Path, cache_path: Path, expected_cache_revision: str,
@@ -293,7 +282,7 @@ def apply_preview(config_path: Path, db_path: Path, cache_path: Path, expected_c
     elif not queue.get("applySafeAtRead"):
         reason = "Queue has running, ambiguous, dispatching, or unknown task state."
     else:
-        reason = "Pool dispatch has no shared maintenance fence; queue state can change after this snapshot."
+        reason = "Restart/reload protocol is not yet validated; changes remain preview-only."
     current["apply"] = {"mode": "previewOnly", "blockedReason": reason}
     return current
 

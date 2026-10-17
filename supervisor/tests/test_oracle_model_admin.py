@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from snooze import oracle_model_admin as models
@@ -23,8 +24,7 @@ class OracleModelAdminTests(unittest.TestCase):
         self.config.write_text(json.dumps(fleet)); os.chmod(self.config, 0o600)
         conn = sqlite3.connect(self.db)
         conn.executescript("""CREATE TABLE pool_tasks(id TEXT PRIMARY KEY,status TEXT,assigned_host TEXT);
-        CREATE TABLE pool_hosts(id TEXT PRIMARY KEY,assigned INTEGER);
-        CREATE TABLE pool_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);""")
+        CREATE TABLE pool_hosts(id TEXT PRIMARY KEY,assigned INTEGER);""")
         conn.executemany("INSERT INTO pool_hosts VALUES(?,0)", [(h["id"],) for h in HOSTS])
         conn.execute("INSERT INTO pool_tasks VALUES('queued-one','queued',NULL)")
         conn.execute("INSERT INTO pool_tasks VALUES('done-one','complete','ora1')")
@@ -73,7 +73,7 @@ class OracleModelAdminTests(unittest.TestCase):
         self.assertEqual(first["queue"]["hosts"]["ora1"]["assigned"], 1)
         preview = models.apply_preview(self.config, self.db, self.cache, first["configRevision"])
         self.assertEqual(preview["apply"]["mode"], "previewOnly")
-        self.assertIn("no shared maintenance fence", preview["apply"]["blockedReason"])
+        self.assertIn("Restart/reload protocol is not yet validated", preview["apply"]["blockedReason"])
         with self.assertRaisesRegex(ValueError, "config_revision_conflict"):
             models.apply_preview(self.config, self.db, self.cache, "A" * 24)
         active_db = sqlite3.connect(self.db); active_db.execute("INSERT INTO pool_tasks VALUES('run','running','ora3')"); active_db.commit(); active_db.close()
@@ -91,6 +91,15 @@ class OracleModelAdminTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "request_invalid"):
             models.apply_request(self.config, self.db, self.cache, {"action": "run", "command": "systemctl restart"})
 
+    def test_legacy_pool_meta_json_is_not_a_maintenance_source(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE pool_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        conn.execute("INSERT INTO pool_meta VALUES('maintenance_state', ?)", (json.dumps({"epoch": 8, "paused": True,
+            "configRevision": "A" * 24, "acknowledged": True,
+            "blockers": {"running": 0, "ambiguous": 0, "dispatching": 0}, "reason": "paused"}),))
+        conn.commit(); conn.close()
+        self.assertIsNone(models._maintenance_readonly(self.db))
+
     def test_unknown_queue_status_is_not_treated_as_safe(self):
         conn = sqlite3.connect(self.db); conn.execute("INSERT INTO pool_tasks VALUES('future','future-state',NULL)"); conn.commit(); conn.close()
         view = models.snapshot(self.config, self.db, self.cache)
@@ -102,25 +111,26 @@ class OracleModelAdminTests(unittest.TestCase):
     def test_maintenance_status_read_is_readonly_and_actions_use_config_and_epoch_cas(self):
         initial = models.snapshot(self.config, self.db, self.cache)
         self.assertIsNone(initial["maintenance"])  # Old DB: no fence means unavailable, never an assumed epoch zero.
-        state = {"epoch": 4, "paused": True, "configRevision": initial["configRevision"], "acknowledged": False,
-                 "blockers": {"running": 2, "ambiguous": 0, "dispatching": 0}, "reason": "draining"}
-        conn = sqlite3.connect(self.db); conn.execute("INSERT INTO pool_meta VALUES('maintenance_state',?)", (json.dumps(state),)); conn.commit(); conn.close()
-        loaded = models.snapshot(self.config, self.db, self.cache)
-        self.assertEqual(loaded["maintenance"], state)
+        state = {"epoch": 4, "paused": False, "configRevision": None, "acknowledged": False,
+                 "blockers": {"running": 2, "ambiguous": 0, "dispatching": 0}, "reason": None}
         calls = []
         class FakePool:
-            def request_maintenance(self, config_revision, epoch):
-                calls.append(("request", config_revision, epoch))
-                return {**state, "epoch": epoch + 1, "paused": True, "acknowledged": False, "reason": "draining"}
-            def release_maintenance(self, config_revision, epoch):
-                calls.append(("release", config_revision, epoch))
-                return {**state, "epoch": epoch + 1, "paused": False, "acknowledged": True, "blockers": {"running": 0, "ambiguous": 0, "dispatching": 0}, "reason": None}
+            def request_maintenance(self, *, config_revision, expected_epoch):
+                calls.append(("request", config_revision, expected_epoch))
+                state.update(epoch=expected_epoch + 1, paused=True, configRevision=config_revision, acknowledged=False, reason="draining")
+                return dict(state)
+            def release_maintenance(self, *, config_revision, expected_epoch):
+                calls.append(("release", config_revision, expected_epoch))
+                state.update(epoch=expected_epoch + 1, paused=False, configRevision=None, acknowledged=False, blockers={"running": 0, "ambiguous": 0, "dispatching": 0}, reason=None)
+                return dict(state)
         factory = lambda _path: FakePool()
-        requested = models.apply_request(self.config, self.db, self.cache,
-            {"action": "maintenance-request", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 4}, pool_factory=factory)
-        self.assertEqual(requested["maintenance"]["epoch"], 5)
-        resumed = models.apply_request(self.config, self.db, self.cache,
-            {"action": "maintenance-release", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 5}, pool_factory=factory)
+        with patch.object(models, "_maintenance_readonly", side_effect=lambda _db: dict(state)):
+            requested = models.apply_request(self.config, self.db, self.cache,
+                {"action": "maintenance-request", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 4}, pool_factory=factory)
+            self.assertEqual(requested["maintenance"]["epoch"], 5)
+            self.assertEqual(requested["maintenance"]["reason"], "draining")
+            resumed = models.apply_request(self.config, self.db, self.cache,
+                {"action": "maintenance-release", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 5}, pool_factory=factory)
         self.assertFalse(resumed["maintenance"]["paused"])
         self.assertEqual(calls, [("request", initial["configRevision"], 4), ("release", initial["configRevision"], 5)])
 
@@ -128,13 +138,36 @@ class OracleModelAdminTests(unittest.TestCase):
         view = models.snapshot(self.config, self.db, self.cache)
         calls = []
         class FakePool:
-            def request_maintenance(self, *_): calls.append("request"); raise ValueError("maintenance_epoch_conflict")
+            def request_maintenance(self, **_kwargs): calls.append("request"); raise ValueError("maintenance_epoch_conflict")
         factory = lambda _path: FakePool()
         with self.assertRaisesRegex(ValueError, "maintenance_revision_conflict"):
             models.apply_request(self.config, self.db, self.cache, {"action": "maintenance-request", "expectedConfigRevision": "Z" * 24, "expectedEpoch": 0}, pool_factory=factory)
         with self.assertRaisesRegex(ValueError, "maintenance_epoch_conflict"):
             models.apply_request(self.config, self.db, self.cache, {"action": "maintenance-request", "expectedConfigRevision": view["configRevision"], "expectedEpoch": 0}, pool_factory=factory)
         self.assertEqual(calls, ["request"])
+
+    def test_actual_core_controller_request_snapshot_release_stale_epoch_and_readonly_get(self):
+        from snooze import oracle_pool
+        if not hasattr(oracle_pool.OraclePool, "open_maintenance") or not hasattr(oracle_pool, "read_maintenance_status"):
+            self.skipTest("integration requires the maintenance-fence core API to be integrated")
+        db_path = self.root / "core-maintenance.sqlite3"
+        oracle_pool.OraclePool(self.config, db_path)  # Create a realistic temporary core database.
+        initial = models.snapshot(self.config, db_path, self.cache)
+        before = db_path.read_bytes()
+        read_again = models.snapshot(self.config, db_path, self.cache)
+        self.assertEqual(read_again["maintenance"], oracle_pool.read_maintenance_status(db_path))
+        self.assertEqual(db_path.read_bytes(), before, "GET must not mutate the maintenance database")
+        requested = models.apply_request(self.config, db_path, self.cache,
+            {"action": "maintenance-request", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 0})
+        self.assertTrue(requested["maintenance"]["paused"])
+        self.assertEqual(requested["maintenance"]["epoch"], 1)
+        with self.assertRaisesRegex(ValueError, "maintenance_epoch_conflict"):
+            models.apply_request(self.config, db_path, self.cache,
+                {"action": "maintenance-release", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 0})
+        resumed = models.apply_request(self.config, db_path, self.cache,
+            {"action": "maintenance-release", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 1})
+        self.assertFalse(resumed["maintenance"]["paused"])
+        self.assertEqual(resumed["maintenance"]["epoch"], 2)
 
 
 if __name__ == "__main__": unittest.main()
