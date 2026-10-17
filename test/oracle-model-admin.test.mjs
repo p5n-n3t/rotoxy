@@ -55,11 +55,11 @@ test("Oracle model page uses CSRF and epoch-fenced explicit apply controls", asy
   const denied = await post({ action: "refresh", revision }, { withCsrf: false }); assert.equal(denied.status, 403); assert.equal(calls.length, 0);
   const response = await fetch(`${base}/admin/oracle/models`, { headers: { cookie } });
   assert.equal(response.status, 200); const html = await response.text();
-  assert.match(html, /Installed model names come from the last explicit/); assert.match(html, /Paused; draining/); assert.match(html, /Pause prevents new claims/); assert.match(html, /without applying changes/); assert.match(html, /Readiness check is read-only/); assert.match(html, /Apply this configuration/); assert.match(html, /older-revision/); assert.match(html, /process identity alive/); assert.match(html, /last heartbeat timestamp/); assert.match(html, /worker-1/); assert.match(html, /Pause dispatch and drain/); assert.match(html, /Abort maintenance and resume dispatch/); assert.match(html, /epoch 7/); assert.match(html, /name="_csrf"/);
+  assert.match(html, /Installed model names come from the last explicit/); assert.match(html, /Paused; draining/); assert.match(html, /Pause prevents new claims/); assert.match(html, /without applying changes/); assert.match(html, /Readiness check is read-only/); assert.match(html, /Apply this configuration/); assert.match(html, /older-revision/); assert.match(html, /process identity alive/); assert.match(html, /Heartbeat/); assert.match(html, /worker-1/); assert.match(html, /Pause dispatch and drain/); assert.match(html, /Abort maintenance and resume dispatch/); assert.match(html, /epoch 7/); assert.match(html, /name="_csrf"/);
   assert.equal(calls.length, 1); assert.deepEqual(JSON.parse(calls[0].input), { action: "read" });
   view.applyStatus.ready = false; view.applyStatus.reason = "apply_prepared"; view.applyStatus.operation = { applyId: "apply-1", epoch: 8, targetRevision: configRevision, previousInstance: "worker-1", status: "prepared", error: null };
   const fencedHtml = await (await fetch(`${base}/admin/oracle/models`, { headers: { cookie } })).text();
-  assert.match(fencedHtml, /apply_prepared/); assert.match(fencedHtml, /Resume is disabled while apply reservation state is unavailable or prepared\/failed/);
+  assert.match(fencedHtml, /apply prepared/); assert.match(fencedHtml, /Resume is disabled while apply reservation state is unavailable or prepared\/failed/);
   assert.match(fencedHtml, /name="action" value="apply-config"[\s\S]*?<button disabled>Apply this configuration/);
   view.applyStatus.ready = true; view.applyStatus.reason = null; view.applyStatus.operation = null;
   const badOrigin = await post({ action: "refresh", revision }, { origin: "https://attacker.invalid" });
@@ -73,7 +73,7 @@ test("Oracle model page uses CSRF and epoch-fenced explicit apply controls", asy
   assert.equal(applied.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "apply-config", expectedConfigRevision: configRevision, expectedEpoch: 8 });
   assert.match(applied.headers.get("location"), /applyProcessed=1/);
   const afterApply = await (await fetch(new URL(applied.headers.get("location"), base), { headers: { cookie } })).text();
-  assert.match(afterApply, /Apply request processed; inspect the current operation and daemon status below/); assert.match(afterApply, /apply-done · complete/); assert.doesNotMatch(afterApply, /changes remain preview-only/);
+  assert.match(afterApply, /Apply request processed; inspect the current operation and daemon status below/); assert.match(afterApply, /apply-done<\/code> · complete/); assert.doesNotMatch(afterApply, /changes remain preview-only/);
   assert.match(afterApply, /name="action" value="apply-config"[\s\S]*?<button>Apply this configuration/);
   assert.match(afterApply, /name="action" value="maintenance-release"[\s\S]*?<button class="secondary">Abort maintenance/);
   failApply = true;
