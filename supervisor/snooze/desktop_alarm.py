@@ -33,6 +33,8 @@ EVENT_TEXT = {
     "timed_out": "A supervised worker exceeded its time limit.",
     "completed": "A supervised worker completed its task.",
     "cancelled": "A supervised worker was cancelled.",
+    "idle": "A supervised worker is idle and may need attention.",
+    "idle": "A supervised worker is idle and may need attention.",
     "instruction": "A supervised worker is waiting for instructions.",
     "approval": "A supervised worker needs approval.",
     "blocked": "A supervised task is blocked and needs attention.",
@@ -46,6 +48,7 @@ EVENT_TEXT = {
     "human_handoff": "A supervised event needs human attention.",
 }
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
+BUS_ADDRESS = re.compile(r"unix:path=/run/user/(?P<uid>[0-9]+)/bus(?:,guid=[A-Fa-f0-9-]{8,64})?\Z")
 
 
 class AlarmError(RuntimeError):
@@ -65,7 +68,6 @@ def _private_db_path(path: Path, *, create_parent: bool = False) -> None:
         raise AlarmError("database_path_invalid")
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(path.parent, 0o700)
     try:
         parent = path.parent.lstat()
     except OSError as exc:
@@ -93,6 +95,28 @@ def _readonly_connection(path: Path) -> sqlite3.Connection:
         return db
     except sqlite3.Error as exc:
         raise AlarmError("source_database_unavailable") from exc
+
+
+def _notification_environment(source: dict[str, str], *, uid: int | None = None) -> dict[str, str]:
+    """Return a small environment only when it points at this user's local bus."""
+    if uid is None:
+        uid = os.getuid()
+    expected = Path(f"/run/user/{uid}")
+    supplied_dir = source.get("XDG_RUNTIME_DIR")
+    address = source.get("DBUS_SESSION_BUS_ADDRESS")
+    try:
+        info = expected.lstat()
+    except OSError as exc:
+        raise AlarmError("desktop_runtime_directory_unavailable") from exc
+    if (not expected.is_absolute() or supplied_dir != str(expected) or
+            not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or
+            info.st_uid != uid or info.st_mode & 0o077):
+        raise AlarmError("desktop_runtime_directory_invalid")
+    match = BUS_ADDRESS.fullmatch(address or "")
+    if not match or int(match.group("uid")) != uid:
+        raise AlarmError("desktop_bus_address_invalid")
+    return {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+            "XDG_RUNTIME_DIR": str(expected), "DBUS_SESSION_BUS_ADDRESS": address}
 
 
 class DesktopAlarm:
@@ -123,6 +147,14 @@ class DesktopAlarm:
     def _initialize(self) -> None:
         old = os.umask(0o077)
         try:
+            source = _readonly_connection(self.source_db)
+            try:
+                source_table = source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='recovery_service_notifications'").fetchone()
+                if not source_table:
+                    raise AlarmError("notification_source_schema_unavailable")
+                initial_rowid = int(source.execute("SELECT COALESCE(MAX(rowid),0) FROM recovery_service_notifications").fetchone()[0])
+            finally:
+                source.close()
             db = self._receipts()
             try:
                 db.execute("""CREATE TABLE IF NOT EXISTS desktop_alarm_receipts(
@@ -133,6 +165,10 @@ class DesktopAlarm:
                     updated REAL NOT NULL,
                     detail TEXT NOT NULL DEFAULT ''
                 )""")
+                db.execute("CREATE TABLE IF NOT EXISTS desktop_alarm_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL)")
+                # On first install, baseline existing history so a timer does
+                # not page through old incidents. New rows use larger rowids.
+                db.execute("INSERT OR IGNORE INTO desktop_alarm_meta(key,value) VALUES('source_rowid',?)", (initial_rowid,))
             finally:
                 db.close()
             os.chmod(self.receipts_db, 0o600)
@@ -147,23 +183,42 @@ class DesktopAlarm:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='recovery_service_notifications'").fetchone()
             if not exists:
                 raise AlarmError("notification_source_schema_unavailable")
-            rows = db.execute("""SELECT recovery_event_id,kind FROM recovery_service_notifications
-                                ORDER BY created ASC LIMIT ?""", (limit,)).fetchall()
-            return [{"event_id": row["recovery_event_id"], "kind": row["kind"]} for row in rows]
+            receipt_db = self._receipts()
+            try:
+                cursor_row = receipt_db.execute("SELECT value FROM desktop_alarm_meta WHERE key='source_rowid'").fetchone()
+                cursor = int(cursor_row["value"]) if cursor_row else 0
+            finally:
+                receipt_db.close()
+            rows = db.execute("""SELECT rowid AS source_rowid,recovery_event_id,kind FROM recovery_service_notifications
+                                WHERE rowid>? ORDER BY rowid ASC LIMIT ?""", (cursor, limit)).fetchall()
+            return [{"source_rowid": row["source_rowid"], "event_id": row["recovery_event_id"], "kind": row["kind"]} for row in rows]
         except sqlite3.Error as exc:
             raise AlarmError("notification_source_read_failed") from exc
         finally:
             db.close()
 
-    def _claim(self, event_id: str, kind: str) -> bool:
+    def _claim_batch(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         now = self.clock()
         db = self._receipts()
         try:
             db.execute("BEGIN IMMEDIATE")
-            cur = db.execute("INSERT OR IGNORE INTO desktop_alarm_receipts(event_id,kind,state,created,updated,detail) VALUES(?,?,'dispatching',?,?,?)",
-                             (event_id, kind, now, now, "delivery outcome pending"))
+            claimed = []
+            last_rowid = None
+            for event in events:
+                last_rowid = event["source_rowid"]
+                event_id, kind = event["event_id"], event["kind"]
+                if not isinstance(event_id, str) or not SAFE_ID.fullmatch(event_id):
+                    continue
+                if not isinstance(kind, str) or kind not in EVENT_TEXT:
+                    continue
+                cur = db.execute("INSERT OR IGNORE INTO desktop_alarm_receipts(event_id,kind,state,created,updated,detail) VALUES(?,?,'dispatching',?,?,?)",
+                                 (event_id, kind, now, now, "delivery outcome pending"))
+                if cur.rowcount == 1:
+                    claimed.append(event)
+            if last_rowid is not None:
+                db.execute("UPDATE desktop_alarm_meta SET value=MAX(value,?) WHERE key='source_rowid'", (last_rowid,))
             db.execute("COMMIT")
-            return cur.rowcount == 1
+            return claimed
         except sqlite3.Error as exc:
             try:
                 db.execute("ROLLBACK")
@@ -173,11 +228,13 @@ class DesktopAlarm:
         finally:
             db.close()
 
-    def _finish(self, event_id: str, state: str, detail: str) -> None:
+    def _finish_batch(self, events: list[dict[str, Any]], state: str, detail: str) -> None:
         db = self._receipts()
         try:
-            db.execute("UPDATE desktop_alarm_receipts SET state=?,updated=?,detail=? WHERE event_id=? AND state='dispatching'",
-                       (state, self.clock(), detail[:160], event_id))
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany("UPDATE desktop_alarm_receipts SET state=?,updated=?,detail=? WHERE event_id=? AND state='dispatching'",
+                           [(state, self.clock(), detail[:160], event["event_id"]) for event in events])
+            db.execute("COMMIT")
         except sqlite3.Error as exc:
             # dispatching remains a visible ambiguous outcome and will never
             # be automatically re-sent after a crash or receipt-write failure.
@@ -189,38 +246,35 @@ class DesktopAlarm:
         if type(limit) is not int or not 1 <= limit <= MAX_EVENTS_PER_PASS:
             raise AlarmError("event_limit_invalid")
         events = self._events(limit)
-        submitted = failed = ambiguous = 0
-        for event in events:
-            event_id, kind = event["event_id"], event["kind"]
-            if not isinstance(event_id, str) or not SAFE_ID.fullmatch(event_id):
-                continue
-            if not isinstance(kind, str) or kind not in EVENT_TEXT:
-                continue
-            if not self._claim(event_id, kind):
-                continue
-            try:
-                result = subprocess.run(
-                    [self.executable, "--app-name=ROTOXY", "--urgency=critical",
-                     "ROTOXY worker alert", EVENT_TEXT[kind]],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=5, check=False,
-                    shell=False, close_fds=True,
-                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-                )
-            except subprocess.TimeoutExpired:
-                self._finish(event_id, "failed", "notification command timed out; delivery may be ambiguous")
-                ambiguous += 1
-            except OSError:
-                self._finish(event_id, "failed", "notification command unavailable")
-                failed += 1
-            else:
-                if result.returncode == 0:
-                    self._finish(event_id, "submitted", "desktop notification request accepted")
-                    submitted += 1
-                else:
-                    self._finish(event_id, "failed", "desktop notification command rejected request")
-                    failed += 1
-        return AlarmResult(len(events), submitted, failed, ambiguous)
+        claimed = self._claim_batch(events)
+        if not claimed:
+            return AlarmResult(len(events), 0, 0, 0)
+        count = len(claimed)
+        body = f"{count} worker event{'s' if count != 1 else ''} need attention."
+        try:
+            env = _notification_environment(dict(os.environ))
+            result = subprocess.run(
+                [self.executable, "--app-name=ROTOXY", "--urgency=critical",
+                 "ROTOXY worker alert", body],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=5, check=False,
+                shell=False, close_fds=True,
+                env=env,
+            )
+        except AlarmError:
+            self._finish_batch(claimed, "failed", "desktop notification session is unavailable or invalid")
+            return AlarmResult(len(events), 0, count, 0)
+        except subprocess.TimeoutExpired:
+            self._finish_batch(claimed, "failed", "notification command timed out; delivery may be ambiguous")
+            return AlarmResult(len(events), 0, 0, count)
+        except OSError:
+            self._finish_batch(claimed, "failed", "notification command unavailable")
+            return AlarmResult(len(events), 0, count, 0)
+        if result.returncode == 0:
+            self._finish_batch(claimed, "submitted", "desktop notification request accepted")
+            return AlarmResult(len(events), count, 0, 0)
+        self._finish_batch(claimed, "failed", "desktop notification command rejected request")
+        return AlarmResult(len(events), 0, count, 0)
 
 
 def main(argv: list[str] | None = None) -> int:

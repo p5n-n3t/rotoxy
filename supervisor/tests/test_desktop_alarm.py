@@ -6,8 +6,9 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from snooze.desktop_alarm import AlarmError, DesktopAlarm, NOTIFY_SEND
+from snooze.desktop_alarm import AlarmError, DesktopAlarm, NOTIFY_SEND, _notification_environment
 
 
 class DesktopAlarmTests(unittest.TestCase):
@@ -34,9 +35,13 @@ class DesktopAlarmTests(unittest.TestCase):
         self.executable.chmod(0o700)
 
     def add_event(self, event_id="event-1", kind="failed", project="secret-project", owner="secret-owner", job="private-job"):
-        with sqlite3.connect(self.source) as db:
+        db = sqlite3.connect(self.source)
+        try:
             db.execute("INSERT INTO recovery_service_notifications VALUES(?,?,?,?,?,?)",
                        (event_id, project, owner, job, kind, 100.0))
+            db.commit()
+        finally:
+            db.close()
 
     def alarm(self, **kwargs):
         alarm = DesktopAlarm(self.source, self.receipts, executable=self.executable.as_posix(), **kwargs)
@@ -44,14 +49,19 @@ class DesktopAlarmTests(unittest.TestCase):
         return alarm
 
     def _run(self, alarm):
-        return alarm.run_once()
+        safe_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                    "XDG_RUNTIME_DIR": "/run/user/1000",
+                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+        with patch("snooze.desktop_alarm._notification_environment", return_value=safe_env):
+            return alarm.run_once()
 
     def test_submission_is_sanitized_deduplicated_after_restart(self):
+        alarm = self.alarm()
         self.add_event()
-        result = self._run(self.alarm())
+        result = self._run(alarm)
         self.assertEqual((result.submitted, result.failed, result.ambiguous), (1, 0, 0))
         first_call = json.loads(self.calls.read_text().splitlines()[0])
-        self.assertEqual(first_call[-2:], ["ROTOXY worker alert", "A supervised worker failed and needs attention."])
+        self.assertEqual(first_call[-2:], ["ROTOXY worker alert", "1 worker event need attention."])
         self.assertNotIn("secret-project", " ".join(first_call))
         self.assertNotIn("private-job", " ".join(first_call))
         restarted = self._run(self.alarm())
@@ -62,8 +72,8 @@ class DesktopAlarmTests(unittest.TestCase):
         self.assertEqual(state, "submitted")
 
     def test_pre_send_capture_is_never_replayed_after_restart(self):
-        self.add_event()
         self.alarm()
+        self.add_event()
         with sqlite3.connect(self.receipts) as db:
             db.execute("INSERT INTO desktop_alarm_receipts(event_id,kind,state,created,updated,detail) VALUES(?,?,?,?,?,?)",
                        ("event-1", "failed", "dispatching", 1, 1, "delivery outcome pending"))
@@ -75,6 +85,7 @@ class DesktopAlarmTests(unittest.TestCase):
         self.assertEqual(state, "dispatching")
 
     def test_nonzero_command_result_stays_visible_and_is_not_retried(self):
+        self.alarm()
         self.add_event(kind="approval")
         self.exit_code = 1
         # Regenerate the test-only fake executable with the requested outcome.
@@ -94,12 +105,65 @@ class DesktopAlarmTests(unittest.TestCase):
         self.assertIn("rejected", row[1])
 
     def test_unknown_kind_and_malformed_event_id_are_not_sent(self):
+        alarm = self.alarm()
         self.add_event(event_id="bad\nvalue", kind="failed")
         self.add_event(event_id="event-2", kind="unknown")
-        result = self._run(self.alarm())
+        result = self._run(alarm)
         self.assertEqual(result.scanned, 2)
         self.assertEqual(result.submitted, 0)
         self.assertFalse(self.calls.exists())
+
+    def test_more_than_one_batch_is_not_starved(self):
+        alarm = self.alarm()
+        for index in range(101):
+            self.add_event(event_id=f"event-{index + 1}", kind="idle")
+        first = self._run(alarm)
+        second = self._run(alarm)
+        self.assertEqual((first.scanned, first.submitted), (100, 100))
+        self.assertEqual((second.scanned, second.submitted), (1, 1))
+        self.assertEqual(len(self.calls.read_text().splitlines()), 2)
+        lines = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual([line[-1] for line in lines], [
+            "100 worker events need attention.", "1 worker event need attention."
+        ])
+
+    def test_first_install_baselines_old_history_without_alert_storm(self):
+        for index in range(2858):
+            self.add_event(event_id=f"old-{index + 1}", kind="idle")
+        alarm = self.alarm()
+        initial = self._run(alarm)
+        self.assertEqual((initial.scanned, initial.submitted), (0, 0))
+        self.assertFalse(self.calls.exists())
+        self.add_event(event_id="new-event", kind="failed")
+        later = self._run(alarm)
+        self.assertEqual((later.scanned, later.submitted), (1, 1))
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+
+    def test_desktop_environment_accepts_only_current_users_private_local_bus(self):
+        uid = os.getuid()
+        runtime_dir = Path(f"/run/user/{uid}")
+        if not runtime_dir.exists():
+            self.skipTest("no per-user desktop runtime directory in this test environment")
+        safe = {"XDG_RUNTIME_DIR": str(runtime_dir),
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus,guid=0123456789abcdef"}
+        accepted = _notification_environment(safe, uid=uid)
+        self.assertEqual(accepted["DBUS_SESSION_BUS_ADDRESS"], safe["DBUS_SESSION_BUS_ADDRESS"])
+        self.assertNotIn("HOME", accepted)
+        for bad in (
+            {**safe, "DBUS_SESSION_BUS_ADDRESS": "tcp:host=remote,port=1234"},
+            {**safe, "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/99999/bus"},
+            {**safe, "XDG_RUNTIME_DIR": "/tmp/arbitrary"},
+        ):
+            with self.assertRaises(AlarmError):
+                _notification_environment(bad, uid=uid)
+
+    def test_existing_parent_permissions_are_validated_not_rewritten(self):
+        directory = self.root / "shared"
+        directory.mkdir(mode=0o700)
+        directory.chmod(0o750)
+        with self.assertRaises(AlarmError):
+            DesktopAlarm(self.source, directory / "receipt.sqlite3")
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o750)
 
     def test_fixed_notification_executable_and_permission_checks(self):
         self.assertEqual(NOTIFY_SEND, "/usr/bin/notify-send")
