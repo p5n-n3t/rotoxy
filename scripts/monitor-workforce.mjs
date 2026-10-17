@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { StateStore } from '../dist/store.js';
 import { serverMessages } from '../dist/jsonrpc-wire.js';
 import { boundObservationDiagnostics, classifyObservationFailure, normalizeSessionObservation, WorkerObservationFailure } from '../dist/worker-observation.js';
+import { runDesktopAlarm } from './desktop-alarm-hook.mjs';
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const configPath=process.argv[2];
@@ -19,6 +20,12 @@ if(!Array.isArray(cfg.workers)||cfg.workers.length>1000||!cfg.workers.every(w=>[
     new Set(cfg.workers.map(w=>w.id)).size!==cfg.workers.length||!Number.isInteger(cfg.intervalSeconds)||cfg.intervalSeconds<60||cfg.intervalSeconds>3600)throw Error('invalid_config');
 for(const k of ['inboxDb','poolConfig','poolDb'])if(typeof cfg[k]!=='string'||!cfg[k].startsWith('/'))throw Error('absolute_private_paths_required');
 if(cfg.recoveryServiceConfig!==undefined&&(typeof cfg.recoveryServiceConfig!=='string'||!cfg.recoveryServiceConfig.startsWith('/')))throw Error('absolute_private_paths_required');
+if(cfg.desktopAlarm!==undefined){
+  const alarm=cfg.desktopAlarm;
+  if(cfg.recoveryServiceConfig===undefined||typeof alarm!=='object'||alarm===null||Array.isArray(alarm)||
+      Object.keys(alarm).sort().join(',')!=='receiptsDb,sourceDb'||
+      ['sourceDb','receiptsDb'].some(k=>typeof alarm[k]!=='string'||!alarm[k].startsWith('/')))throw Error('invalid_desktop_alarm_config');
+}
 const store=new StateStore();
 let stopping=false,phase="startup";
 process.on('SIGTERM',()=>{stopping=true;});process.on('SIGINT',()=>{stopping=true;});
@@ -96,9 +103,19 @@ async function check(){
     }));
   }
   phase='guidance';const guide=cfg.guide===true?await python('guide'):undefined;
-  phase='recovery';const recovery=cfg.recoveryServiceConfig?await recoveryOnce():undefined;
+  phase='recovery';let recovery,recoveryStatus=cfg.recoveryServiceConfig?'completed':'not_configured';
+  if(cfg.recoveryServiceConfig){
+    try{recovery=await recoveryOnce();}
+    catch{recoveryStatus='failed';console.error(JSON.stringify({at:new Date().toISOString(),event:'recovery_service_outcome',status:'failed',error:'recovery_service_failed'}));}
+  }
+  let desktopAlarm={status:'not_configured',scanned:0,submitted:0,failed:0,ambiguous:0};
+  if(cfg.desktopAlarm){
+    desktopAlarm=await runDesktopAlarm({config:cfg.desktopAlarm,root});
+    if(desktopAlarm.status!=='completed')console.error(JSON.stringify({at:new Date().toISOString(),event:'desktop_alarm_outcome',...desktopAlarm}));
+  }
   const diagnostics=boundObservationDiagnostics(observationFailures);
-  console.log(JSON.stringify({at:new Date().toISOString(),checked,statusErrors:errors,observationDiagnostics:diagnostics.items,observationDiagnosticsOmitted:diagnostics.omitted,guidanceSubmitted:guide?.submitted??0,recoveryProcessed:recovery?.processed??0}));
+  console.log(JSON.stringify({at:new Date().toISOString(),checked,statusErrors:errors,observationDiagnostics:diagnostics.items,observationDiagnosticsOmitted:diagnostics.omitted,guidanceSubmitted:guide?.submitted??0,recoveryProcessed:recovery?.processed??0,recoveryStatus,desktopAlarm}));
+  if(recoveryStatus==='failed'&&process.argv.includes('--once'))process.exitCode=1;
 }
 do{
   try{await check();}catch{console.error(JSON.stringify({at:new Date().toISOString(),error:'monitor_check_failed',phase}));if(process.argv.includes('--once'))process.exitCode=1;}

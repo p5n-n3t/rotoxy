@@ -19,6 +19,7 @@ const requiredPackageFiles = [
   "assets/brand/favicon.svg",
   "dist/jsonrpc-wire.js",
   "scripts/monitor-workforce.mjs",
+  "scripts/desktop-alarm-hook.mjs",
   "scripts/verify-recovery-continuity.py",
   "supervisor/snooze/headless.py",
   "scripts/rotoxy-control.mjs", "install-rotoxy.sh", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service",
@@ -112,6 +113,7 @@ try {
   assert(packageJson.name === "rotoxy", "unexpected package name");
   assert(JSON.stringify(packageJson.bin) === JSON.stringify(expectedBins), "package bin map does not match the canonical ROTOXY entrypoints");
   assert(packageJson.files?.includes("scripts/monitor-workforce.mjs"), "package files allowlist omits scripts/monitor-workforce.mjs");
+  assert(packageJson.files?.includes("scripts/desktop-alarm-hook.mjs"), "package files allowlist omits scripts/desktop-alarm-hook.mjs");
 
   const compiler = join(repoRoot, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
   try { await access(compiler); } catch {
@@ -140,7 +142,7 @@ try {
   const stagePaths = [
     "package.json", "tsconfig.json", "src", "docs", "assets/brand", "supervisor/snooze",
     "supervisor/LICENSE", "supervisor/THIRD_PARTY_NOTICES.md", "supervisor/SECURITY.md",
-    "supervisor/UPSTREAM.md", "supervisor/install.sh", "scripts/monitor-workforce.mjs", "scripts/verify-recovery-continuity.py",
+    "supervisor/UPSTREAM.md", "supervisor/install.sh", "scripts/monitor-workforce.mjs", "scripts/desktop-alarm-hook.mjs", "scripts/verify-recovery-continuity.py",
     "scripts/rotoxy-control.mjs", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service", "install-rotoxy.sh",
     "install.sh", "uninstall.sh", "LICENSE", "README.md", "SECURITY.md", "CHANGELOG.md",
   ];
