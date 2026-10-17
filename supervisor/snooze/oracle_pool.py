@@ -320,8 +320,15 @@ class OraclePool:
         return normalized, hosts
 
     def _connect(self):
-        db = sqlite3.connect(self.db_path, timeout=20, isolation_level=None,
-                             factory=_ClosingConnection)
+        if getattr(self, "_maintenance_existing_only", False):
+            try:
+                db = sqlite3.connect(self.db_path.as_uri() + "?mode=rw", uri=True, timeout=20,
+                                     isolation_level=None, factory=_ClosingConnection)
+            except sqlite3.DatabaseError as exc:
+                raise ValueError("maintenance_unavailable") from exc
+        else:
+            db = sqlite3.connect(self.db_path, timeout=20, isolation_level=None,
+                                 factory=_ClosingConnection)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=20000")
         db.execute("PRAGMA foreign_keys=ON")
@@ -329,40 +336,60 @@ class OraclePool:
 
     def _init_db(self) -> None:
         if not self.db_path.exists():
-            fd = os.open(self.db_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            os.close(fd)
+            try:
+                fd = os.open(self.db_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(fd)
         os.chmod(self.db_path, 0o600)
         with self._connect() as db:
-            db.executescript("""
-            CREATE TABLE IF NOT EXISTS pool_tasks(
-              id TEXT PRIMARY KEY, text TEXT NOT NULL, text_hash TEXT NOT NULL,
-              source TEXT, model TEXT NOT NULL, status TEXT NOT NULL,
-              created REAL NOT NULL, updated REAL NOT NULL,
-              assigned_host TEXT, claim_token TEXT, claim_pid INTEGER,
-              claim_boot TEXT, claim_start TEXT, attempts INTEGER NOT NULL DEFAULT 0,
-              error_code TEXT, result TEXT, actual_model TEXT,
-              prompt_tokens INTEGER, eval_tokens INTEGER, remote_seconds REAL,
-              elapsed_seconds REAL);
-            CREATE INDEX IF NOT EXISTS pool_tasks_queue ON pool_tasks(status,created,id);
-            CREATE INDEX IF NOT EXISTS pool_tasks_host ON pool_tasks(assigned_host,status);
-            CREATE TABLE IF NOT EXISTS pool_hosts(
-              id TEXT PRIMARY KEY, models TEXT NOT NULL DEFAULT '[]',
-              updated REAL, error_code TEXT, assigned INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS pool_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS pool_maintenance(
-              id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL,
-              paused INTEGER NOT NULL, config_revision TEXT,
-              acknowledged INTEGER NOT NULL, requested_at REAL);
-            CREATE TABLE IF NOT EXISTS pool_events(
-              id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, kind TEXT NOT NULL,
-              at REAL NOT NULL, data TEXT NOT NULL);
-            """)
             db.execute("PRAGMA journal_mode=DELETE")
-            db.execute("INSERT OR IGNORE INTO pool_maintenance(id,epoch,paused,config_revision,acknowledged,requested_at) VALUES(1,0,0,NULL,0,NULL)")
+            db.execute("BEGIN IMMEDIATE")
+            fence_existed = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pool_maintenance'").fetchone() is not None
+            statements = (
+                """CREATE TABLE IF NOT EXISTS pool_tasks(
+                  id TEXT PRIMARY KEY, text TEXT NOT NULL, text_hash TEXT NOT NULL,
+                  source TEXT, model TEXT NOT NULL, status TEXT NOT NULL,
+                  created REAL NOT NULL, updated REAL NOT NULL,
+                  assigned_host TEXT, claim_token TEXT, claim_pid INTEGER,
+                  claim_boot TEXT, claim_start TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+                  error_code TEXT, result TEXT, actual_model TEXT,
+                  prompt_tokens INTEGER, eval_tokens INTEGER, remote_seconds REAL,
+                  elapsed_seconds REAL)""",
+                "CREATE INDEX IF NOT EXISTS pool_tasks_queue ON pool_tasks(status,created,id)",
+                "CREATE INDEX IF NOT EXISTS pool_tasks_host ON pool_tasks(assigned_host,status)",
+                """CREATE TABLE IF NOT EXISTS pool_hosts(
+                  id TEXT PRIMARY KEY, models TEXT NOT NULL DEFAULT '[]',
+                  updated REAL, error_code TEXT, assigned INTEGER NOT NULL DEFAULT 0)""",
+                "CREATE TABLE IF NOT EXISTS pool_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
+                """CREATE TABLE IF NOT EXISTS pool_maintenance(
+                  id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL,
+                  paused INTEGER NOT NULL, config_revision TEXT,
+                  acknowledged INTEGER NOT NULL, requested_at REAL)""",
+                """CREATE TABLE IF NOT EXISTS pool_events(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, kind TEXT NOT NULL,
+                  at REAL NOT NULL, data TEXT NOT NULL)""",
+            )
+            for statement in statements:
+                db.execute(statement)
+            if not fence_existed:
+                db.execute("INSERT INTO pool_maintenance(id,epoch,paused,config_revision,acknowledged,requested_at) VALUES(1,0,0,NULL,0,NULL)")
             for host in self.hosts:
                 db.execute("INSERT OR IGNORE INTO pool_hosts(id) VALUES(?)", (host["id"],))
             self._maintenance_row(db)
+            db.commit()
         os.chmod(self.db_path, 0o600)
+
+    @classmethod
+    def open_maintenance(cls, db_path: str | Path) -> "OraclePool":
+        """Open only an existing valid queue DB for maintenance-control operations."""
+        path = Path(db_path)
+        read_maintenance_status(path)
+        pool = cls.__new__(cls)
+        pool.db_path = path
+        pool._maintenance_existing_only = True
+        return pool
 
     @staticmethod
     def _maintenance_row(db: sqlite3.Connection) -> sqlite3.Row:
@@ -434,7 +461,7 @@ class OraclePool:
             updated = self._maintenance_row(db)
             result = self._maintenance_dto(updated, self._maintenance_blockers(db)); db.commit(); return result
 
-    def release_maintenance(self, expected_epoch: int, config_revision: str) -> dict[str, Any]:
+    def release_maintenance(self, *, expected_epoch: int, config_revision: str) -> dict[str, Any]:
         if type(expected_epoch) is not int or expected_epoch < 0:
             raise ValueError("maintenance_epoch_conflict")
         if not isinstance(config_revision, str) or not MAINTENANCE_REVISION_RE.fullmatch(config_revision):
@@ -848,7 +875,20 @@ def main(argv: list[str] | None = None) -> int:
     cleanup.add_argument("--older-than-days", type=int, default=30)
     args = parser.parse_args(argv)
     try:
-        pool = OraclePool(args.config, args.db)
+        maintenance_commands = {"maintenance-status", "maintenance-request", "maintenance-release"}
+        if args.command in maintenance_commands:
+            if args.db:
+                maintenance_db = Path(args.db)
+            else:
+                home = Path.home()
+                canonical = home / ".local/state/rotoxy"
+                legacy = home / ".local/state/token2oauth"
+                has_state = lambda root: any((root / "oracle-pool" / relative).exists() for relative in ("config.json", "queue.sqlite3"))
+                state_root = canonical if has_state(canonical) or not has_state(legacy) else legacy
+                maintenance_db = state_root / "oracle-pool/queue.sqlite3"
+            pool = OraclePool.open_maintenance(maintenance_db)
+        else:
+            pool = OraclePool(args.config, args.db)
         if args.command == "catalog":
             _json(pool.catalog(refresh=args.refresh))
         elif args.command == "submit":
@@ -875,7 +915,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "maintenance-request":
             _json(pool.request_maintenance(args.revision, args.epoch))
         elif args.command == "maintenance-release":
-            _json(pool.release_maintenance(args.epoch, args.revision))
+            _json(pool.release_maintenance(expected_epoch=args.epoch, config_revision=args.revision))
         elif args.command == "run-once":
             _json(pool.run_once())
         elif args.command == "cleanup":
