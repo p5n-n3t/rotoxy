@@ -1116,12 +1116,21 @@ def _serve_loop(pool: OraclePool, stopped: threading.Event, *, heartbeat_interva
 
     def heartbeat_loop() -> None:
         while not stopped.wait(heartbeat_interval):
-            try:
-                pool.heartbeat_daemon()
-            except Exception:
-                heartbeat_failed.set()
-                stopped.set()
-                return
+            # A short external SQLite lock is expected during an audited apply.
+            # Preserve liveness while it clears, but fail closed before the row can
+            # become stale or if ownership/schema validation fails.
+            deadline = time.monotonic() + max(1.0, DAEMON_FRESH_SECONDS - heartbeat_interval - 1.0)
+            while not stopped.is_set():
+                try:
+                    pool.heartbeat_daemon()
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                        heartbeat_failed.set(); stopped.set(); return
+                    if time.monotonic() >= deadline or stopped.wait(0.05):
+                        heartbeat_failed.set(); stopped.set(); return
+                except Exception:
+                    heartbeat_failed.set(); stopped.set(); return
 
     heartbeat_thread = threading.Thread(target=heartbeat_loop, name="oracle-daemon-heartbeat", daemon=True)
     heartbeat_thread.start()

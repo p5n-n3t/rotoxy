@@ -722,6 +722,40 @@ class OraclePoolTests(unittest.TestCase):
         self.assertFalse(thread.is_alive(), "serve loop did not join its heartbeat thread")
         self.assertEqual(failures, [])
 
+    def test_serve_loop_retries_brief_external_sqlite_lock(self):
+        self.pool.register_daemon()
+        before = read_daemon_status(self.pool.db_path)
+        locked = threading.Event(); release = threading.Event(); stopped = threading.Event(); failures = []
+
+        def hold_lock():
+            db = sqlite3.connect(self.pool.db_path)
+            try:
+                db.execute("BEGIN EXCLUSIVE"); locked.set(); release.wait(timeout=3)
+            finally:
+                db.rollback(); db.close()
+
+        locker = threading.Thread(target=hold_lock); locker.start(); self.assertTrue(locked.wait(timeout=1))
+        def serve():
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    _serve_loop(self.pool, stopped, heartbeat_interval=0.01)
+            except Exception as exc:
+                failures.append(exc)
+        runner = threading.Thread(target=serve); runner.start()
+        try:
+            time.sleep(1.25); release.set(); locker.join(timeout=1)
+            deadline = time.monotonic() + 3
+            while read_daemon_status(self.pool.db_path)["heartbeatAt"] <= before["heartbeatAt"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            after = read_daemon_status(self.pool.db_path)
+            self.assertGreater(after["heartbeatAt"], before["heartbeatAt"])
+            self.assertEqual(after["observedEpoch"], before["observedEpoch"])
+            self.assertFalse(self.pool.maintenance_status()["acknowledged"])
+        finally:
+            stopped.set(); release.set(); locker.join(timeout=1); runner.join(timeout=3)
+        self.assertFalse(runner.is_alive(), "serve loop did not stop after lock retry")
+        self.assertEqual(failures, [])
+
     def test_begin_apply_requires_registered_observing_daemon_and_deduplicates(self):
         revision = "A" * 24
         self.pool.request_maintenance(revision, 0)
