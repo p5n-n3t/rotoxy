@@ -1,5 +1,9 @@
 import hashlib
+import json
+import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -106,6 +110,37 @@ class WorkspaceDeliveryTests(unittest.TestCase):
                                  guidance_event_id=event, worker="worker-a", message_hash=self.message_hash())
         self.assertEqual((result["state"], result["outcomeCode"], result["maySend"]),
                          ("rejected", "guidance_event_binding_incomplete", False))
+
+    def test_prepare_by_event_derives_owner_and_worker_without_caller_identity(self):
+        event = self.event()
+        result = self.service.prepare_by_event(project="project-a", workspace_message_id="workspace-message-a",
+                                               guidance_event_id=event, message_hash=self.message_hash(), now=20)
+        self.assertEqual((result["owner"], result["worker"], result["accountId"], result["sessionId"], result["model"]),
+                         ("client-a", "worker-a", "account-a", "session-a", "claude-opus-5-5"))
+        replay = self.service.prepare_by_event(project="project-a", workspace_message_id="workspace-message-a",
+                                               guidance_event_id=event, message_hash=self.message_hash(), now=21)
+        self.assertEqual(replay, result)
+        with self.assertRaisesRegex(WorkspaceDeliveryError, "guidance_event_not_owned"):
+            self.service.prepare_by_event(project="project-b", workspace_message_id="workspace-message-a",
+                                          guidance_event_id=event, message_hash=self.message_hash())
+
+    def test_prepare_by_event_rejects_native_approval_and_cli_has_no_identity_fields(self):
+        event = self.event(approval=True)
+        result = self.service.prepare_by_event(project="project-a", workspace_message_id="workspace-message-a",
+                                               guidance_event_id=event, message_hash=self.message_hash())
+        self.assertEqual((result["state"], result["outcomeCode"], result["maySend"]),
+                         ("rejected", "native_approval_requires_operator", False))
+        payload = {"command": "prepare-by-event", "project": "project-a", "workspaceMessageId": "workspace-message-b",
+                   "guidanceEventId": event, "messageHash": self.message_hash()}
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+        command = [sys.executable, "-m", "snooze.workspace_delivery", "--ledger", str(self.root / "cli.sqlite3"), "--inbox", str(self.inbox_path)]
+        complete = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=8)
+        self.assertEqual(complete.returncode, 0, complete.stderr)
+        self.assertEqual(json.loads(complete.stdout)["outcomeCode"], "native_approval_requires_operator")
+        payload["owner"] = "client-a"
+        invalid = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=8)
+        self.assertEqual(invalid.returncode, 2)
+        self.assertEqual(json.loads(invalid.stdout), {"error": "invalid_request"})
 
 
 if __name__ == "__main__":

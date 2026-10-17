@@ -13,11 +13,14 @@ operator-only rejections; this bridge never attempts to answer them.
 from __future__ import annotations
 
 from contextlib import closing
+import argparse
 from hashlib import sha256
+import json
 import os
 import re
 import sqlite3
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -27,6 +30,7 @@ from .guidance import identity
 HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 OUTCOMES = {"accepted", "rejected", "ambiguous"}
 MAX_REASON = 128
+MAX_CLI_INPUT_BYTES = 8 * 1024
 
 
 class WorkspaceDeliveryError(ValueError):
@@ -167,6 +171,35 @@ class WorkspaceDelivery:
             result["eventBindingComplete"] = True
         return result
 
+    def _read_binding_by_event(self, *, project: str, guidance_event_id: int) -> tuple[str, str, dict]:
+        """Resolve the owner and worker only from the durable GuidanceInbox rows."""
+        uri = "file:" + self.inbox_path.as_posix() + "?mode=ro"
+        try:
+            with closing(sqlite3.connect(uri, uri=True, timeout=10)) as db:
+                db.row_factory = sqlite3.Row
+                rows = db.execute(
+                    "SELECT e.worker,e.owner,e.kind,e.account_id AS event_account_id,e.session_id AS event_session_id,"
+                    "r.project,r.owner AS registered_owner,r.account_id,r.session_id,r.model "
+                    "FROM guidance_events e JOIN monitor_registrations r "
+                    "ON r.id=e.worker AND r.project=e.job AND r.owner=e.owner "
+                    "WHERE e.id=? AND e.job=?",
+                    (guidance_event_id, project),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise WorkspaceDeliveryError("guidance_inbox_unavailable") from error
+        if len(rows) != 1:
+            raise WorkspaceDeliveryError("guidance_event_not_owned")
+        row = rows[0]
+        if row["registered_owner"] != row["owner"] or row["project"] != project:
+            raise WorkspaceDeliveryError("guidance_event_not_owned")
+        binding = {
+            "project": row["project"], "owner": row["owner"], "account_id": row["account_id"],
+            "session_id": row["session_id"], "model": row["model"],
+            "nativeApproval": row["kind"] == "needs_approval",
+            "eventBindingComplete": row["event_account_id"] == row["account_id"] and row["event_session_id"] == row["session_id"],
+        }
+        return row["owner"], row["worker"], binding
+
     @staticmethod
     def _row_view(row: sqlite3.Row, *, may_send: bool = False) -> dict:
         return {
@@ -210,6 +243,51 @@ class WorkspaceDelivery:
             event_id=guidance_event_id, worker=worker, message_hash=message_hash,
         )
         binding = self._read_binding(project=project, owner=owner, worker=worker, guidance_event_id=guidance_event_id)
+        return self._prepare_bound(
+            project=project, owner=owner, workspace_message_id=workspace_message_id,
+            guidance_event_id=guidance_event_id, worker=worker, message_hash=message_hash,
+            request_hash=request_hash, binding=binding, now=now,
+        )
+
+    def prepare_by_event(
+        self,
+        *,
+        project: str,
+        workspace_message_id: str,
+        guidance_event_id: int,
+        message_hash: str,
+        now: float | None = None,
+    ) -> dict:
+        """Prepare a delivery without accepting owner, worker, account, or session input."""
+        project, workspace_message_id = map(identity, (project, workspace_message_id))
+        guidance_event_id, message_hash = _event_id(guidance_event_id), _message_hash(message_hash)
+        now = time.time() if now is None else now
+        if type(now) not in {int, float}:
+            raise WorkspaceDeliveryError("invalid_time")
+        owner, worker, binding = self._read_binding_by_event(project=project, guidance_event_id=guidance_event_id)
+        request_hash = self._request_hash(
+            project=project, owner=owner, message_id=workspace_message_id,
+            event_id=guidance_event_id, worker=worker, message_hash=message_hash,
+        )
+        return self._prepare_bound(
+            project=project, owner=owner, workspace_message_id=workspace_message_id,
+            guidance_event_id=guidance_event_id, worker=worker, message_hash=message_hash,
+            request_hash=request_hash, binding=binding, now=now,
+        )
+
+    def _prepare_bound(
+        self,
+        *,
+        project: str,
+        owner: str,
+        workspace_message_id: str,
+        guidance_event_id: int,
+        worker: str,
+        message_hash: str,
+        request_hash: str,
+        binding: dict,
+        now: float,
+    ) -> dict:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
@@ -360,3 +438,44 @@ class WorkspaceDelivery:
                 (project, owner, workspace_message_id),
             ).fetchone()
         return self._row_view(row) if row else None
+
+
+def _cli_request() -> dict:
+    raw = sys.stdin.buffer.read(MAX_CLI_INPUT_BYTES + 1)
+    if len(raw) > MAX_CLI_INPUT_BYTES:
+        raise WorkspaceDeliveryError("invalid_request")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WorkspaceDeliveryError("invalid_request") from error
+    if not isinstance(value, dict):
+        raise WorkspaceDeliveryError("invalid_request")
+    return value
+
+
+def main() -> int:
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--inbox", required=True)
+    args = parser.parse_args()
+    try:
+        request = _cli_request()
+        if set(request) != {"command", "project", "workspaceMessageId", "guidanceEventId", "messageHash"} or request.get("command") != "prepare-by-event":
+            raise WorkspaceDeliveryError("invalid_request")
+        result = WorkspaceDelivery(args.ledger, args.inbox).prepare_by_event(
+            project=request["project"], workspace_message_id=request["workspaceMessageId"],
+            guidance_event_id=request["guidanceEventId"], message_hash=request["messageHash"],
+        )
+        print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+        return 0
+    except WorkspaceDeliveryError as error:
+        print(json.dumps({"error": str(error)}, separators=(",", ":")))
+        return 2
+    except Exception:
+        print('{"error":"workspace_delivery_failed"}')
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
