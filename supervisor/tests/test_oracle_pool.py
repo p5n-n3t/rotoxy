@@ -619,6 +619,22 @@ class OraclePoolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "maintenance_unavailable"):
             read_maintenance_status(self.pool.db_path)
 
+    def test_maintenance_transitions_have_one_durable_sanitized_audit_event(self):
+        token = "E" * 24
+        self.pool.request_maintenance(token, 0)
+        self.pool.request_maintenance(token, 0)
+        self.pool._claim()
+        self.pool._claim()
+        self.pool.release_maintenance(expected_epoch=1, config_revision=token)
+        with self.pool._connect() as db:
+            rows = db.execute("SELECT kind,data FROM pool_events WHERE kind LIKE 'maintenance_%' ORDER BY id").fetchall()
+        self.assertEqual([r["kind"] for r in rows], ["maintenance_requested", "maintenance_acknowledged", "maintenance_released"])
+        data = [json.loads(r["data"]) for r in rows]
+        self.assertEqual([x["epoch"] for x in data], [1, 1, 2])
+        self.assertTrue(data[1]["acknowledged"])
+        self.assertFalse(data[-1]["paused"])
+        self.assertTrue(all(set(x) == {"epoch", "config_revision", "paused", "acknowledged"} for x in data))
+
 
 if __name__ == "__main__":
     unittest.main()

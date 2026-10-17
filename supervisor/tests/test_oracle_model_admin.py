@@ -169,5 +169,26 @@ class OracleModelAdminTests(unittest.TestCase):
         self.assertFalse(resumed["maintenance"]["paused"])
         self.assertEqual(resumed["maintenance"]["epoch"], 2)
 
+    def test_abort_after_fleet_edit_releases_original_fence_without_applying_config(self):
+        from snooze.oracle_pool import OraclePool
+        db_path = self.root / "edited-fleet.sqlite3"
+        pool = OraclePool(self.config, db_path)
+        initial = models.snapshot(self.config, db_path, self.cache)
+        models.apply_request(self.config, db_path, self.cache,
+            {"action": "maintenance-request", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 0})
+        config = json.loads(self.config.read_text())
+        config["hosts"][0]["enabled"] = False
+        self.config.write_text(json.dumps(config))
+        edited = models.snapshot(self.config, db_path, self.cache)
+        self.assertNotEqual(initial["configRevision"], edited["configRevision"])
+        with self.assertRaisesRegex(ValueError, "maintenance_revision_conflict"):
+            models.apply_request(self.config, db_path, self.cache,
+                {"action": "maintenance-release", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 1})
+        resumed = models.apply_request(self.config, db_path, self.cache,
+            {"action": "maintenance-release", "expectedConfigRevision": edited["configRevision"], "expectedEpoch": 1})
+        self.assertFalse(resumed["maintenance"]["paused"])
+        self.assertEqual(resumed["maintenance"]["epoch"], 2)
+        self.assertTrue(pool.host_by_id["ora1"]["enabled"], "Abort must not apply edited config to existing daemon")
+
 
 if __name__ == "__main__": unittest.main()

@@ -222,7 +222,20 @@ def _maintenance_action(config_path: Path, db_path: Path, cache_path: Path, acti
         method = getattr(pool, "request_maintenance" if action == "maintenance-request" else "release_maintenance", None)
         if not callable(method):
             raise ValueError("maintenance_api_unavailable")
-        result = _maintenance_value(method(config_revision=expected_revision, expected_epoch=expected_epoch))
+        fence_revision = expected_revision
+        if action == "maintenance-release":
+            # Abort the pinned pause even if the operator has since edited the fleet.
+            # The displayed current config revision is still checked above; release
+            # does not reload that configuration into the running daemon.
+            fence = _maintenance_readonly(db_path)
+            if fence is None:
+                raise ValueError("maintenance_unavailable")
+            if fence["epoch"] != expected_epoch:
+                raise ValueError("maintenance_epoch_conflict")
+            if not fence["paused"] or fence["configRevision"] is None:
+                raise ValueError("maintenance_revision_conflict")
+            fence_revision = fence["configRevision"]
+        result = _maintenance_value(method(config_revision=fence_revision, expected_epoch=expected_epoch))
         if result is None:
             raise ValueError("maintenance_response_invalid")
     view = snapshot(config_path, db_path, cache_path)

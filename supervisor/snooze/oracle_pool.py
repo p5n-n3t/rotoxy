@@ -459,6 +459,9 @@ class OraclePool:
             db.execute("UPDATE pool_maintenance SET epoch=epoch+1,paused=1,config_revision=?,acknowledged=0,requested_at=? WHERE id=1 AND epoch=? AND paused=0",
                        (config_revision, time.time(), expected_epoch))
             updated = self._maintenance_row(db)
+            self._event(db, None, "maintenance_requested", {"epoch": updated["epoch"],
+                        "config_revision": updated["config_revision"], "paused": bool(updated["paused"]),
+                        "acknowledged": bool(updated["acknowledged"])}, time.time())
             result = self._maintenance_dto(updated, self._maintenance_blockers(db)); db.commit(); return result
 
     def release_maintenance(self, *, expected_epoch: int, config_revision: str) -> dict[str, Any]:
@@ -476,13 +479,16 @@ class OraclePool:
             db.execute("UPDATE pool_maintenance SET epoch=epoch+1,paused=0,config_revision=NULL,acknowledged=0,requested_at=NULL WHERE id=1 AND epoch=? AND paused=1 AND config_revision=?",
                        (expected_epoch, config_revision))
             updated = self._maintenance_row(db)
+            self._event(db, None, "maintenance_released", {"epoch": updated["epoch"],
+                        "config_revision": updated["config_revision"], "paused": bool(updated["paused"]),
+                        "acknowledged": bool(updated["acknowledged"])}, time.time())
             result = self._maintenance_dto(updated, self._maintenance_blockers(db)); db.commit(); return result
 
     @staticmethod
     def _event(db: sqlite3.Connection, task_id: str | None, kind: str, data: dict[str, Any], now: float):
         safe = {key: data[key] for key in (
             "status", "model", "host", "actual_model", "error_code", "prompt_tokens",
-            "eval_tokens", "remote_seconds", "elapsed_seconds", "source"
+            "eval_tokens", "remote_seconds", "elapsed_seconds", "source", "epoch", "config_revision", "paused", "acknowledged"
         ) if key in data}
         db.execute("INSERT INTO pool_events(task_id,kind,at,data) VALUES(?,?,?,?)",
                    (task_id, kind, now, json.dumps(safe, separators=(",", ":"))))
@@ -677,6 +683,9 @@ class OraclePool:
                 acknowledged = int(not any(blockers.values()))
                 if maintenance["acknowledged"] != acknowledged:
                     db.execute("UPDATE pool_maintenance SET acknowledged=? WHERE id=1", (acknowledged,))
+                    self._event(db, None, "maintenance_acknowledged" if acknowledged else "maintenance_ack_revoked",
+                                {"epoch": maintenance["epoch"], "config_revision": maintenance["config_revision"],
+                                 "paused": True, "acknowledged": bool(acknowledged)}, now)
                 db.commit()
                 return []
             running = db.execute("SELECT COUNT(*) FROM pool_tasks WHERE status='running'").fetchone()[0]
