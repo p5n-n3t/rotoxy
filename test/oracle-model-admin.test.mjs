@@ -38,18 +38,20 @@ test("Oracle model page is authenticated, explicit-refresh and preview-only unde
   const server = createServer(app), address = await listen(server);
   await store.setConfig("publicBaseUrl", `http://127.0.0.1:${address.port}/oracle`);
   const base = `http://127.0.0.1:${address.port}/oracle`, cookie = `t2o_admin=${encodeURIComponent(session)}`, csrf = sessions.csrfToken(session);
-  const post = (fields, withCsrf = true) => fetch(`${base}/admin/oracle/models`, { method: "POST", redirect: "manual", headers: { cookie, origin: `http://127.0.0.1:${address.port}`, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ...fields, ...(withCsrf ? { _csrf: csrf } : {}) }) });
+  const post = (fields, { withCsrf = true, origin = `http://127.0.0.1:${address.port}` } = {}) => fetch(`${base}/admin/oracle/models`, { method: "POST", redirect: "manual", headers: { cookie, origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ...fields, ...(withCsrf ? { _csrf: csrf } : {}) }) });
   t.after(async () => { await close(server); await rm(root, { recursive: true, force: true }); if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; if (oldConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = oldConfig; });
 
   assert.equal((await fetch(`${base}/admin/oracle/models`, { redirect: "manual" })).status, 302);
   assert.equal(calls.length, 0);
-  const denied = await post({ action: "refresh", revision }, false); assert.equal(denied.status, 403); assert.equal(calls.length, 0);
+  const denied = await post({ action: "refresh", revision }, { withCsrf: false }); assert.equal(denied.status, 403); assert.equal(calls.length, 0);
   const response = await fetch(`${base}/admin/oracle/models`, { headers: { cookie } });
   assert.equal(response.status, 200); const html = await response.text();
   assert.match(html, /Installed model names come from the last explicit/); assert.match(html, /shared maintenance fence/); assert.match(html, /name="_csrf"/);
   assert.equal(calls.length, 1); assert.deepEqual(JSON.parse(calls[0].input), { action: "read" });
-  const wrongOrigin = await post({ action: "refresh", revision }, true);
-  assert.equal(wrongOrigin.status, 303); // origin is valid and refresh stays behind the fixed bridge.
+  const badOrigin = await post({ action: "refresh", revision }, { origin: "https://attacker.invalid" });
+  assert.equal(badOrigin.status, 403); assert.equal(calls.length, 1);
+  const refreshed = await post({ action: "refresh", revision });
+  assert.equal(refreshed.status, 303);
   assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "refresh", expectedCacheRevision: revision });
   const preview = await post({ action: "apply", revision: configRevision });
   assert.equal(preview.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "apply", expectedConfigRevision: configRevision });
