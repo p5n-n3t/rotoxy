@@ -8,6 +8,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from snooze.agent_workspace import AgentWorkspace, WorkspaceError
+
 SUPERVISOR = Path(__file__).resolve().parents[1]
 
 
@@ -89,6 +91,28 @@ class AgentWorkspaceProcessTests(unittest.TestCase):
         self.assertEqual(self.snapshot("p2", "client:alice")["participants"], [])
         self.assertEqual(self.snapshot("p2", "client:alice")["messages"], [])
         self.expect_error("client:alice", {"action": "message_ack", "messageId": "msg-secret"}, "participant_required", project="p2")
+
+    def test_read_message_is_exact_private_and_not_limited_by_snapshot_page(self):
+        self.participant("client:alice")
+        self.participant("client:bob")
+        self.update("client:alice", {"action": "message_send", "messageId": "direct", "to": "client:bob", "text": "Direct bounded message"})
+        self.update("client:alice", {"action": "message_send", "messageId": "shared", "to": "all", "text": "Shared bounded message"})
+        workspace = AgentWorkspace(self.db)
+        direct = workspace.read_message("p1", "client:bob", "direct")
+        self.assertEqual(direct, {"id": "direct", "sender": "client:alice", "recipient": "client:bob", "taskId": None,
+                                  "text": "Direct bounded message", "createdAt": direct["createdAt"], "acknowledged": False})
+        self.assertEqual(workspace.read_message("p1", "client:alice", "direct")["id"], "direct")
+        self.assertEqual(workspace.read_message("p1", "admin:local", "direct")["recipient"], "client:bob")
+        self.assertEqual(workspace.read_message("p1", "client:bob", "shared")["text"], "Shared bounded message")
+        with self.assertRaisesRegex(WorkspaceError, "message_not_found"):
+            workspace.read_message("p1", "client:bob", "missing")
+        with self.assertRaisesRegex(WorkspaceError, "message_not_found"):
+            workspace.read_message("p1", "client:bob", "direct-other-project")
+        with self.assertRaisesRegex(WorkspaceError, "message_not_found"):
+            workspace.read_message("p1", "client:outsider", "shared")
+        self.assertEqual(self.snapshot("p2", "client:alice")["messages"], [])
+        with self.assertRaisesRegex(WorkspaceError, "message_not_found"):
+            workspace.read_message("p2", "client:alice", "direct")
 
     def test_dependency_claim_is_atomic_and_requires_completion(self):
         self.participant("client:alice")

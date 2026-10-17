@@ -196,6 +196,37 @@ class AgentWorkspace:
                     "messages": messages, "artifacts": artifacts, "reviews": reviews, "events": events,
                     "nextCursor": next_cursor}
 
+    def read_message(self, project_id: str, actor: str, message_id: str) -> dict:
+        """Return one immutable message without turning snapshot pagination into an authority boundary."""
+        project, actor, message_id = _id(project_id, "project_id"), _actor(actor), _id(message_id, "message_id")
+        with self._connect() as db:
+            admin = actor == ADMIN
+            participant = self._participant(db, project, actor)
+            if not admin and not participant:
+                # Do not disclose whether the project or its messages exist.
+                raise WorkspaceError("message_not_found")
+            if admin:
+                row = db.execute(
+                    "SELECT m.*, EXISTS(SELECT 1 FROM receipts r WHERE r.project_id=m.project_id AND r.message_id=m.id AND r.actor=?) AS acknowledged "
+                    "FROM messages m WHERE m.project_id=? AND m.id=?",
+                    (actor, project, message_id),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT m.*, EXISTS(SELECT 1 FROM receipts r WHERE r.project_id=m.project_id AND r.message_id=m.id AND r.actor=?) AS acknowledged "
+                    "FROM messages m WHERE m.project_id=? AND m.id=? AND (m.sender=? OR m.recipient='all' OR m.recipient=?)",
+                    (actor, project, message_id, actor, actor),
+                ).fetchone()
+            if row is None:
+                raise WorkspaceError("message_not_found")
+            # Messages are sanitized and bounded during message_send.  Treat a
+            # malformed legacy row as absent instead of returning unbounded data.
+            if not isinstance(row["text"], str) or not row["text"] or len(row["text"]) > MAX_TEXT:
+                raise WorkspaceError("message_not_found")
+            return {"id": row["id"], "sender": row["sender"], "recipient": row["recipient"],
+                    "taskId": row["task_id"], "text": row["text"], "createdAt": row["created_at"],
+                    "acknowledged": bool(row["acknowledged"])}
+
     @staticmethod
     def _artifact(row):
         return {"id": row["id"], "taskId": row["task_id"], "submitter": row["submitter"], "kind": row["kind"],
