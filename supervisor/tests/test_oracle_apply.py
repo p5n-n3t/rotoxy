@@ -226,7 +226,10 @@ class OracleApplyTests(unittest.TestCase):
             "previousInstance": "old-instance", "status": "prepared", "error": None}
         self.healthy_restart()
         calls = []
-        result = self.controller(lambda: calls.append("restart"), wait=0).apply(self.revision, self.epoch)
+        controller = self.controller(lambda: calls.append("restart"), wait=0)
+        self.assertTrue(controller.status()["ready"])
+        self.assertEqual(controller.status()["reason"], "reconcile_ready")
+        result = controller.apply(self.revision, self.epoch)
         self.assertEqual(result["reason"], "apply_complete")
         self.assertEqual(calls, [])
         self.assertEqual(self.api.complete_calls, 1)

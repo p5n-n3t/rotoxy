@@ -73,7 +73,7 @@ class OracleModelAdminTests(unittest.TestCase):
         self.assertEqual(first["queue"]["hosts"]["ora1"]["assigned"], 1)
         preview = models.apply_preview(self.config, self.db, self.cache, first["configRevision"])
         self.assertEqual(preview["apply"]["mode"], "previewOnly")
-        self.assertIn("Apply coordinator unavailable", preview["apply"]["blockedReason"])
+        self.assertIn("Readiness check is read-only", preview["apply"]["blockedReason"])
         with self.assertRaisesRegex(ValueError, "config_revision_conflict"):
             models.apply_preview(self.config, self.db, self.cache, "A" * 24)
         active_db = sqlite3.connect(self.db); active_db.execute("INSERT INTO pool_tasks VALUES('run','running','ora3')"); active_db.commit(); active_db.close()

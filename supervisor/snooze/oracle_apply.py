@@ -192,7 +192,7 @@ class OracleApplyController:
             if (active_operation is not None and active_operation["status"] == "complete" and
                     maintenance is not None and active_operation["epoch"] < maintenance["epoch"]):
                 active_operation = None
-            if active_operation is not None and active_operation["status"] == "failed" and revision is not None and maintenance is not None and active_operation["epoch"] == maintenance["epoch"] and active_operation["targetRevision"] == revision and maintenance["paused"] and maintenance["acknowledged"] and not any(maintenance["blockers"].values()) and _healthy_new_daemon(daemon, active_operation):
+            if active_operation is not None and active_operation["status"] in {"prepared", "failed"} and revision is not None and maintenance is not None and active_operation["epoch"] == maintenance["epoch"] and active_operation["targetRevision"] == revision and maintenance["paused"] and maintenance["acknowledged"] and not any(maintenance["blockers"].values()) and _healthy_new_daemon(daemon, active_operation):
                 ready, reason = True, "reconcile_ready"
             elif active_operation is not None:
                 reason = "apply_complete" if active_operation["status"] == "complete" else "recovery_required"
