@@ -82,11 +82,13 @@ class HeadlessCodexTests(unittest.TestCase):
                 self.assertEqual(result["state"], "rejected")
                 self.assertFalse(self.capture.exists())
 
-    def test_timeout_and_nonzero_exit_are_ambiguous(self):
+    def test_timeout_is_ambiguous(self):
         runner = self.runner("time.sleep(2)", timeout=0.1)
         self.assertEqual(runner(self.context(), 1)["state"], "ambiguous")
-        runner = self.runner("sys.exit(3)")
-        result = runner(self.context(), 1)
+
+    def test_nonzero_exit_is_ambiguous_without_hitting_the_timeout_boundary(self):
+        runner = self.runner("sys.exit(3)", timeout=5)
+        result = runner(self.context(), 5)
         self.assertEqual(result["state"], "ambiguous")
         self.assertEqual(result["receipt"]["exit_code"], 3)
 

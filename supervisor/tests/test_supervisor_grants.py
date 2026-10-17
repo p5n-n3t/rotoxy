@@ -17,7 +17,8 @@ class SupervisorGrantStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name) / "private" / "grants.sqlite3"
+        self.root = Path(self.temp.name)
+        self.path = self.root / "private" / "grants.sqlite3"
         self.clock = Clock()
         self.store = SupervisorGrantStore(self.path, clock=self.clock)
 
@@ -111,6 +112,19 @@ class SupervisorGrantStoreTests(unittest.TestCase):
             self.issue(authorization={"quota": "unknown", "mode": "owner-controlled-batch", "reference": "approval-42", "budgetUsd": 1})
         with self.assertRaisesRegex(GrantError, "invalid_max_invocations"):
             self.issue(max_invocations=2)
+
+    def test_existing_symlink_or_nonprivate_grant_path_is_rejected_before_sqlite_opens_it(self):
+        target = self.root / "target.sqlite3"
+        target.touch(mode=0o600)
+        link = self.root / "private" / "linked.sqlite3"
+        link.symlink_to(target)
+        with self.assertRaisesRegex(GrantError, "unsafe_grant_path"):
+            SupervisorGrantStore(link, clock=self.clock)
+        unsafe = self.root / "private" / "unsafe.sqlite3"
+        unsafe.touch(mode=0o600)
+        unsafe.chmod(0o640)
+        with self.assertRaisesRegex(GrantError, "unsafe_grant_path"):
+            SupervisorGrantStore(unsafe, clock=self.clock)
 
 
 if __name__ == "__main__":

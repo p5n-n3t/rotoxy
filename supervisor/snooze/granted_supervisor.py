@@ -8,6 +8,7 @@ an account, remote session, executor, executable, or local Codex session.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -44,14 +45,16 @@ def _event_id(value):
 def _private_directory(path, *, create=False):
     if create:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    info = path.stat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    info = path.lstat()
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or
+            info.st_uid != os.geteuid() or info.st_mode & 0o077):
         raise GrantedSupervisorError("private_directory_required")
 
 
 def _private_file(path):
-    info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    info = path.lstat()
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or
+            info.st_uid != os.geteuid() or info.st_mode & 0o077):
         raise GrantedSupervisorError("private_config_required")
 
 
@@ -80,6 +83,7 @@ class GrantedSupervisor:
         self.grants = SupervisorGrantStore(grants_path, clock=clock)
         self.results_path = Path(results_path).absolute()
         _private_directory(self.results_path.parent, create=True)
+        self._prepare_result_path()
         self.clock = clock
         if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300:
             raise GrantedSupervisorError("invalid_timeout")
@@ -108,12 +112,40 @@ class GrantedSupervisor:
                     created_at REAL NOT NULL
                 );
             """)
-        self.results_path.chmod(0o600)
 
+    def _prepare_result_path(self):
+        """Create a private result database or reject an unsafe path before SQLite opens it."""
+        try:
+            info = self.results_path.lstat()
+        except FileNotFoundError:
+            fd = os.open(self.results_path, os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                info = os.fstat(fd)
+            finally:
+                os.close(fd)
+        else:
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                    info.st_mode & 0o077):
+                raise GrantedSupervisorError("unsafe_result_path")
+            fd = os.open(self.results_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(fd)
+                if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid() or opened.st_mode & 0o077):
+                    raise GrantedSupervisorError("unsafe_result_path")
+            finally:
+                os.close(fd)
+            return
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise GrantedSupervisorError("unsafe_result_path")
+
+    @contextmanager
     def connection(self):
         db = sqlite3.connect(self.results_path, timeout=10, isolation_level=None)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            yield db
+        finally:
+            db.close()
 
     @staticmethod
     def _mappings(raw):

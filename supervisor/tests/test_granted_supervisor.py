@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from snooze.granted_supervisor import GrantedSupervisor
+from snooze.granted_supervisor import GrantedSupervisor, GrantedSupervisorError
 from snooze.guidance import GuidanceInbox
 from snooze.supervisor_grants import SupervisorGrantStore
 
@@ -117,6 +117,18 @@ class GrantedSupervisorTests(unittest.TestCase):
         captured = self.capture.read_text()
         self.assertNotIn("Deploy production now?", captured)
         self.assertNotIn("q-1", captured)
+
+    def test_existing_symlink_or_nonprivate_result_path_is_rejected_before_sqlite_opens_it(self):
+        target = self.root / "result-target.sqlite3"
+        target.touch(mode=0o600)
+        self.results_path.symlink_to(target)
+        with self.assertRaisesRegex(GrantedSupervisorError, "unsafe_result_path"):
+            self.supervisor()
+        self.results_path.unlink()
+        self.results_path.touch(mode=0o600)
+        self.results_path.chmod(0o640)
+        with self.assertRaisesRegex(GrantedSupervisorError, "unsafe_result_path"):
+            self.supervisor()
 
 
 if __name__ == "__main__":

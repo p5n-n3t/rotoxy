@@ -8,6 +8,7 @@ returned to ``issued`` automatically.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -97,10 +98,12 @@ class SupervisorGrantStore:
     def __init__(self, path, *, clock=time.time, id_factory=lambda: str(uuid.uuid4())):
         requested = Path(path).absolute()
         requested.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        parent = requested.parent.stat()
-        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or parent.st_mode & 0o077:
+        parent = requested.parent.lstat()
+        if (stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode) or
+                parent.st_uid != os.geteuid() or parent.st_mode & 0o077):
             raise GrantError("unsafe_grant_directory")
         self.path = requested
+        self._prepare_private_path()
         self.clock = clock
         self.id_factory = id_factory
         with self.connection() as db:
@@ -128,12 +131,40 @@ class SupervisorGrantStore:
                 CREATE INDEX IF NOT EXISTS supervisor_grants_scope
                     ON supervisor_grants(project,owner,remote_session,executor,executor_session,state);
             """)
-        self.path.chmod(0o600)
 
+    def _prepare_private_path(self):
+        """Create a private DB or reject an unsafe existing path before SQLite opens it."""
+        try:
+            info = self.path.lstat()
+        except FileNotFoundError:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                info = os.fstat(fd)
+            finally:
+                os.close(fd)
+        else:
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                    info.st_mode & 0o077):
+                raise GrantError("unsafe_grant_path")
+            fd = os.open(self.path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(fd)
+                if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid() or opened.st_mode & 0o077):
+                    raise GrantError("unsafe_grant_path")
+            finally:
+                os.close(fd)
+            return
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise GrantError("unsafe_grant_path")
+
+    @contextmanager
     def connection(self):
         db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            yield db
+        finally:
+            db.close()
 
     def issue(self, *, project, owner, remote_session, executor, executor_session, allowed_event_types,
               expires_at, max_runtime_seconds, max_invocations, authorization):
