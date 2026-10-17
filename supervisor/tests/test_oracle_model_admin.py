@@ -23,7 +23,8 @@ class OracleModelAdminTests(unittest.TestCase):
         self.config.write_text(json.dumps(fleet)); os.chmod(self.config, 0o600)
         conn = sqlite3.connect(self.db)
         conn.executescript("""CREATE TABLE pool_tasks(id TEXT PRIMARY KEY,status TEXT,assigned_host TEXT);
-        CREATE TABLE pool_hosts(id TEXT PRIMARY KEY,assigned INTEGER);""")
+        CREATE TABLE pool_hosts(id TEXT PRIMARY KEY,assigned INTEGER);
+        CREATE TABLE pool_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);""")
         conn.executemany("INSERT INTO pool_hosts VALUES(?,0)", [(h["id"],) for h in HOSTS])
         conn.execute("INSERT INTO pool_tasks VALUES('queued-one','queued',NULL)")
         conn.execute("INSERT INTO pool_tasks VALUES('done-one','complete','ora1')")
@@ -84,6 +85,9 @@ class OracleModelAdminTests(unittest.TestCase):
         self.assertFalse(view["queue"]["available"])
         blocked = models.apply_preview(self.config, self.root / "missing.sqlite", self.cache, view["configRevision"])
         self.assertEqual(blocked["apply"]["blockedReason"], "queue_state_unavailable")
+        legacy_db = self.root / "legacy.sqlite"
+        conn = sqlite3.connect(legacy_db); conn.execute("CREATE TABLE old_schema(id INTEGER)"); conn.commit(); conn.close(); os.chmod(legacy_db, 0o600)
+        self.assertIsNone(models._maintenance_readonly(legacy_db))
         with self.assertRaisesRegex(ValueError, "request_invalid"):
             models.apply_request(self.config, self.db, self.cache, {"action": "run", "command": "systemctl restart"})
 
@@ -94,6 +98,43 @@ class OracleModelAdminTests(unittest.TestCase):
         self.assertEqual(view["queue"]["reason"], "queue_state_unknown")
         preview = models.apply_preview(self.config, self.db, self.cache, view["configRevision"])
         self.assertEqual(preview["apply"]["blockedReason"], "queue_state_unknown")
+
+    def test_maintenance_status_read_is_readonly_and_actions_use_config_and_epoch_cas(self):
+        initial = models.snapshot(self.config, self.db, self.cache)
+        self.assertIsNone(initial["maintenance"])  # Old DB: no fence means unavailable, never an assumed epoch zero.
+        state = {"epoch": 4, "paused": True, "configRevision": initial["configRevision"], "acknowledged": False,
+                 "blockers": {"running": 2, "ambiguous": 0, "dispatching": 0}, "reason": "draining"}
+        conn = sqlite3.connect(self.db); conn.execute("INSERT INTO pool_meta VALUES('maintenance_state',?)", (json.dumps(state),)); conn.commit(); conn.close()
+        loaded = models.snapshot(self.config, self.db, self.cache)
+        self.assertEqual(loaded["maintenance"], state)
+        calls = []
+        class FakePool:
+            def request_maintenance(self, config_revision, epoch):
+                calls.append(("request", config_revision, epoch))
+                return {**state, "epoch": epoch + 1, "paused": True, "acknowledged": False, "reason": "draining"}
+            def release_maintenance(self, config_revision, epoch):
+                calls.append(("release", config_revision, epoch))
+                return {**state, "epoch": epoch + 1, "paused": False, "acknowledged": True, "blockers": {"running": 0, "ambiguous": 0, "dispatching": 0}, "reason": None}
+        factory = lambda _path: FakePool()
+        requested = models.apply_request(self.config, self.db, self.cache,
+            {"action": "maintenance-request", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 4}, pool_factory=factory)
+        self.assertEqual(requested["maintenance"]["epoch"], 5)
+        resumed = models.apply_request(self.config, self.db, self.cache,
+            {"action": "maintenance-release", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 5}, pool_factory=factory)
+        self.assertFalse(resumed["maintenance"]["paused"])
+        self.assertEqual(calls, [("request", initial["configRevision"], 4), ("release", initial["configRevision"], 5)])
+
+    def test_maintenance_stale_revision_or_epoch_never_calls_core(self):
+        view = models.snapshot(self.config, self.db, self.cache)
+        calls = []
+        class FakePool:
+            def request_maintenance(self, *_): calls.append("request"); raise ValueError("maintenance_epoch_conflict")
+        factory = lambda _path: FakePool()
+        with self.assertRaisesRegex(ValueError, "maintenance_revision_conflict"):
+            models.apply_request(self.config, self.db, self.cache, {"action": "maintenance-request", "expectedConfigRevision": "Z" * 24, "expectedEpoch": 0}, pool_factory=factory)
+        with self.assertRaisesRegex(ValueError, "maintenance_epoch_conflict"):
+            models.apply_request(self.config, self.db, self.cache, {"action": "maintenance-request", "expectedConfigRevision": view["configRevision"], "expectedEpoch": 0}, pool_factory=factory)
+        self.assertEqual(calls, ["request"])
 
 
 if __name__ == "__main__": unittest.main()

@@ -1,0 +1,9 @@
+# Oracle model-admin maintenance controls
+
+Branch `codex/rotoxy-oracle-maintenance-admin-20261017` is based on `origin/main` at `6703461229667b1bd6feb711748b9db12970bc46`.
+
+This change extends `createOracleModelAdminRouter` with explicit owner-authenticated Pause dispatch and drain / Abort maintenance and resume actions. POSTs require same-origin and session CSRF, carry the displayed fleet config revision and exact expected integer epoch, and call only the fixed local Python bridge. The bridge holds the Oracle fleet config lock while checking its revision and invoking `OraclePool.request_maintenance(config_revision, expected_epoch)` or `release_maintenance(...)`. It does not change pool config, run systemctl, restart a service, or call any provider.
+
+GET remains read-only: it never constructs `OraclePool` (whose constructor recovers stale claims). It reads optional JSON fence state from the existing private SQLite `pool_meta` table at key `maintenance_state`. The JSON object must have exactly `epoch`, `paused`, `configRevision`, `acknowledged`, `blockers` (`running`, `ambiguous`, `dispatching`), and `reason`; missing/old-schema/malformed state is returned as unavailable, never as epoch zero. The core worker should persist its exact `maintenance_status()` result under this key in the same database transaction as its maintenance methods. If its implementation uses another schema, root must adapt the read-only extractor without constructing the pool.
+
+The previous model APPLY remains preview-only. A shared dispatch fence still must be validated before any restart or config apply can be offered. The focused Python tests use temporary SQLite and fake maintenance callbacks; no live systemd action or host refresh is performed. The Node HTTP test covers authentication, CSRF/origin, maintenance form rendering and exact bridge arguments; it requires the built output and installed dependencies to execute.

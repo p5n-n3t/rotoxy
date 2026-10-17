@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .oracle_fleet_config import _read as _read_fleet
+from .oracle_fleet_config import _locked as _fleet_lock, _read as _read_fleet
 from .oracle_pool import MODEL_NAME_RE, PoolError, SSHOllamaTransport
 
 MAX_INPUT = 8 * 1024
@@ -174,6 +174,73 @@ def _queue_state(db_path: Path, host_ids: list[str]) -> dict[str, Any]:
         return unknown
 
 
+def _maintenance_value(value: Any) -> dict[str, Any] | None:
+    required = {"epoch", "paused", "configRevision", "acknowledged", "blockers", "reason"}
+    if type(value) is not dict or set(value) != required:
+        return None
+    blockers = value["blockers"]
+    if (type(value["epoch"]) is not int or value["epoch"] < 0 or type(value["paused"]) is not bool or
+            not (value["configRevision"] is None or isinstance(value["configRevision"], str) and len(value["configRevision"]) <= 64) or
+            type(value["acknowledged"]) is not bool or type(blockers) is not dict or set(blockers) != {"running", "ambiguous", "dispatching"} or
+            any(type(blockers[key]) is not int or blockers[key] < 0 for key in blockers) or
+            not (value["reason"] is None or isinstance(value["reason"], str) and len(value["reason"]) <= 200)):
+        return None
+    return {key: (dict(blockers) if key == "blockers" else value[key]) for key in required}
+
+
+def _maintenance_readonly(db_path: Path) -> dict[str, Any] | None:
+    """Read the core's pool_meta maintenance_state JSON without constructing OraclePool."""
+    try:
+        info = db_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_mode & 0o077 or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            return None
+        from urllib.parse import quote
+        db = sqlite3.connect("file:" + quote(str(db_path), safe="/") + "?mode=ro", uri=True, timeout=2)
+        db.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "pool_meta" not in tables:
+            db.close(); return None
+        columns = {row[1] for row in db.execute("PRAGMA table_info(pool_meta)")}
+        if not {"key", "value"}.issubset(columns):
+            db.close(); return None
+        row = db.execute("SELECT value FROM pool_meta WHERE key='maintenance_state'").fetchone()
+        db.close()
+        if not row:
+            return None
+        return _maintenance_value(json.loads(row[0]))
+    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _core_pool(db_path: Path):
+    # Avoid OraclePool.__init__: GET must not create state or recover stale claims.
+    from .oracle_pool import OraclePool
+    pool = OraclePool.__new__(OraclePool)
+    pool.db_path = db_path
+    return pool
+
+
+def _maintenance_action(config_path: Path, db_path: Path, cache_path: Path, action: str,
+                        expected_revision: str, expected_epoch: int,
+                        pool_factory: Callable[[Path], Any] = _core_pool) -> dict[str, Any]:
+    if type(expected_epoch) is not int or expected_epoch < 0:
+        raise ValueError("maintenance_epoch_invalid")
+    with _fleet_lock(config_path):
+        fleet_raw, _hosts = _fleet(config_path)
+        if revision(fleet_raw) != expected_revision:
+            raise ValueError("maintenance_revision_conflict")
+        pool = pool_factory(db_path)
+        method = getattr(pool, "request_maintenance" if action == "maintenance-request" else "release_maintenance", None)
+        if not callable(method):
+            raise ValueError("maintenance_api_unavailable")
+        result = _maintenance_value(method(expected_revision, expected_epoch))
+        if result is None:
+            raise ValueError("maintenance_response_invalid")
+    view = snapshot(config_path, db_path, cache_path)
+    view["maintenance"] = result
+    return view
+
+
 def snapshot(config_path: Path, db_path: Path, cache_path: Path) -> dict[str, Any]:
     fleet_raw, hosts = _fleet(config_path)
     cache_raw, cache = _read_cache(cache_path)
@@ -188,7 +255,7 @@ def snapshot(config_path: Path, db_path: Path, cache_path: Path) -> dict[str, An
                      "hostStatus": saved.get("status", "unknown"), "models": installed,
                      "observedAt": saved.get("observedAt"), "load": queue["hosts"].get(host["id"]) if queue["available"] else None})
     return {"cacheRevision": revision(cache_raw), "configRevision": revision(fleet_raw), "cacheUpdatedAt": cache.get("updatedAt"),
-            "hosts": rows, "queue": queue,
+            "hosts": rows, "queue": queue, "maintenance": _maintenance_readonly(db_path),
             "apply": {"mode": "previewOnly", "blockedReason": "Pool dispatch has no shared maintenance fence; queue state can change after this snapshot."}}
 
 
@@ -232,7 +299,8 @@ def apply_preview(config_path: Path, db_path: Path, cache_path: Path, expected_c
 
 
 def apply_request(config_path: Path, db_path: Path, cache_path: Path, request: Any,
-                  ssh_probe: Callable[[dict[str, Any], str], Any] | None = None) -> dict[str, Any]:
+                  ssh_probe: Callable[[dict[str, Any], str], Any] | None = None,
+                  pool_factory: Callable[[Path], Any] = _core_pool) -> dict[str, Any]:
     if type(request) is not dict or not isinstance(request.get("action"), str): raise ValueError("request_invalid")
     if request["action"] == "read" and set(request) == {"action"}: return snapshot(config_path, db_path, cache_path)
     if request["action"] == "refresh" and set(request) == {"action", "expectedCacheRevision"}:
@@ -243,6 +311,11 @@ def apply_request(config_path: Path, db_path: Path, cache_path: Path, request: A
         token = request["expectedConfigRevision"]
         if not isinstance(token, str) or len(token) != 24: raise ValueError("revision_invalid")
         return apply_preview(config_path, db_path, cache_path, token)
+    if request["action"] in {"maintenance-request", "maintenance-release"} and set(request) == {"action", "expectedConfigRevision", "expectedEpoch"}:
+        token, epoch = request["expectedConfigRevision"], request["expectedEpoch"]
+        if not isinstance(token, str) or len(token) != 24: raise ValueError("maintenance_revision_invalid")
+        if type(epoch) is not int or epoch < 0: raise ValueError("maintenance_epoch_invalid")
+        return _maintenance_action(config_path, db_path, cache_path, request["action"], token, epoch, pool_factory)
     raise ValueError("request_invalid")
 
 
@@ -258,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         if len(encoded.encode()) > MAX_CACHE: raise ValueError("response_too_large")
         print(encoded); return 0
     except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError, PoolError) as exc:
-        known = {"request_invalid", "request_too_large", "revision_invalid", "cache_revision_conflict", "config_revision_conflict", "cache_locked", "cache_invalid", "cache_too_large", "cache_permissions_invalid", "private_directory_invalid", "invalid_private_path", "backup_collision", "queue_state_unavailable", "fleet_config_unavailable"}
+        known = {"request_invalid", "request_too_large", "revision_invalid", "cache_revision_conflict", "config_revision_conflict", "maintenance_revision_invalid", "maintenance_epoch_invalid", "maintenance_epoch_conflict", "maintenance_revision_conflict", "maintenance_api_unavailable", "maintenance_response_invalid", "cache_locked", "cache_invalid", "cache_too_large", "cache_permissions_invalid", "private_directory_invalid", "invalid_private_path", "backup_collision", "queue_state_unavailable", "fleet_config_unavailable"}
         msg = str(exc)
         print(json.dumps({"error": msg if msg in known else "oracle_model_inventory_failed"}, separators=(",", ":")))
         return 2
