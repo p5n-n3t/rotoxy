@@ -12,7 +12,7 @@ import { createOracleModelAdminRouter } from "../dist/oracle-model-admin.js";
 const listen = (server) => new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => resolve(server.address())); });
 const close = (server) => new Promise((resolve) => server.close(resolve));
 
-test("Oracle model page is authenticated, explicit-refresh and preview-only under CSRF", async (t) => {
+test("Oracle model page uses CSRF and epoch-fenced explicit apply controls", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "rotoxy-oracle-model-admin-"));
   const oldHome = process.env.HOME, oldConfig = process.env.TOKEN2OAUTH_CONFIG_DIR;
   process.env.HOME = join(root, "home"); process.env.TOKEN2OAUTH_CONFIG_DIR = join(root, "gateway");
@@ -53,10 +53,10 @@ test("Oracle model page is authenticated, explicit-refresh and preview-only unde
   view.applyStatus.ready = false; view.applyStatus.reason = "apply_prepared"; view.applyStatus.operation = { applyId: "apply-1", epoch: 8, targetRevision: configRevision, previousInstance: "worker-1", status: "prepared", error: null };
   const fencedHtml = await (await fetch(`${base}/admin/oracle/models`, { headers: { cookie } })).text();
   assert.match(fencedHtml, /apply_prepared/); assert.match(fencedHtml, /Resume is disabled while apply reservation state is unavailable or prepared\/failed/);
-  assert.match(fencedHtml, /action="apply-config"[\s\S]*?<button disabled>Apply this configuration/);
+  assert.match(fencedHtml, /name="action" value="apply-config"[\s\S]*?<button disabled>Apply this configuration/);
   view.applyStatus.ready = true; view.applyStatus.reason = null; view.applyStatus.operation = null;
   const badOrigin = await post({ action: "refresh", revision }, { origin: "https://attacker.invalid" });
-  assert.equal(badOrigin.status, 403); assert.equal(calls.length, 1);
+  assert.equal(badOrigin.status, 403); assert.equal(calls.length, 2);
   const refreshed = await post({ action: "refresh", revision });
   assert.equal(refreshed.status, 303);
   assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "refresh", expectedCacheRevision: revision });

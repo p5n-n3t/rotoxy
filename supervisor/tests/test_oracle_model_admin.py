@@ -107,6 +107,12 @@ class OracleModelAdminTests(unittest.TestCase):
             models.apply_request(self.config, self.db, self.cache,
                 {"action": "apply-config", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 3}, controller_factory=factory)
         self.assertEqual(calls.count((initial["configRevision"], 4)), 1)
+        not_ready = {**expected, "ready": False, "reason": "daemon_not_live"}
+        class NotReadyController(FakeController):
+            def status(self): return not_ready
+        with self.assertRaisesRegex(ValueError, "apply_not_ready"):
+            models.apply_request(self.config, self.db, self.cache,
+                {"action": "apply-config", "expectedConfigRevision": initial["configRevision"], "expectedEpoch": 4}, controller_factory=lambda *_: NotReadyController())
 
     def test_apply_config_closed_schema_and_missing_coordinator_fail_closed(self):
         view = models.snapshot(self.config, self.db, self.cache, controller_factory=lambda *_: None)

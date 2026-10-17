@@ -370,6 +370,10 @@ def apply_request(config_path: Path, db_path: Path, cache_path: Path, request: A
         if current["configRevision"] != token: raise ValueError("apply_revision_conflict")
         controller = controller_factory(config_path, db_path)
         if controller is None: raise ValueError("apply_coordinator_unavailable")
+        before = _apply_status_value(controller.status())
+        if before is None: raise ValueError("apply_coordinator_unavailable")
+        if not before["ready"]: raise ValueError("apply_not_ready")
+        if before["daemon"]["observedEpoch"] != epoch: raise ValueError("apply_epoch_conflict")
         status = _apply_status_value(controller.apply(expected_config_revision=token, expected_epoch=epoch))
         if status is None: raise ValueError("apply_status_invalid")
         current["applyStatus"] = status
