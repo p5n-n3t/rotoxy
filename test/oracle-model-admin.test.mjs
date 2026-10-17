@@ -24,12 +24,13 @@ test("Oracle model page is authenticated, explicit-refresh and preview-only unde
     hosts: [{ id: "ora3", enabled: true, allowedModels: ["qwen3.5:9b"], hostStatus: "unknown", models: [], observedAt: null, load: { running: 0, assigned: 1 } }],
     queue: { available: true, reason: null, statuses: { queued: 1 }, hosts: { ora3: { running: 0, assigned: 1 } } },
     apply: { mode: "previewOnly", blockedReason: "Restart/reload protocol is not yet validated; changes remain preview-only." },
+    applyStatus: { daemon: { available: true, instanceId: "worker-1", loadedRevision: "older-revision", heartbeatAt: 1_797_000_000, observedEpoch: 8, alive: true }, operation: null, maintenance: null, ready: true, reason: null },
     maintenance: { epoch: 7, paused: true, configRevision, acknowledged: false, blockers: { running: 1, ambiguous: 0, dispatching: 0 }, reason: "draining" } };
   const calls = [];
   const runner = async (command, args, request, input) => {
     calls.push({ command, args, request, input });
     assert.equal(command, "/usr/bin/python3"); assert.deepEqual(args.slice(0, 2), ["-m", "snooze.oracle_model_admin"]);
-    assert.equal(request.cwd, join(root, "supervisor")); assert.equal(request.timeoutMs, 10_000);
+    assert.equal(request.cwd, join(root, "supervisor")); assert.equal(request.timeoutMs, 40_000);
     return JSON.stringify(view);
   };
   const app = express();
@@ -47,8 +48,13 @@ test("Oracle model page is authenticated, explicit-refresh and preview-only unde
   const denied = await post({ action: "refresh", revision }, { withCsrf: false }); assert.equal(denied.status, 403); assert.equal(calls.length, 0);
   const response = await fetch(`${base}/admin/oracle/models`, { headers: { cookie } });
   assert.equal(response.status, 200); const html = await response.text();
-  assert.match(html, /Installed model names come from the last explicit/); assert.match(html, /Paused; draining/); assert.match(html, /Pause prevents new claims/); assert.match(html, /without applying changes/); assert.match(html, /Restart\/reload protocol is not yet validated/); assert.match(html, /Pause dispatch and drain/); assert.match(html, /Abort maintenance and resume dispatch/); assert.match(html, /epoch 7/); assert.match(html, /name="_csrf"/);
+  assert.match(html, /Installed model names come from the last explicit/); assert.match(html, /Paused; draining/); assert.match(html, /Pause prevents new claims/); assert.match(html, /without applying changes/); assert.match(html, /Restart\/reload protocol is not yet validated/); assert.match(html, /Apply this configuration/); assert.match(html, /older-revision/); assert.match(html, /worker-1/); assert.match(html, /Pause dispatch and drain/); assert.match(html, /Abort maintenance and resume dispatch/); assert.match(html, /epoch 7/); assert.match(html, /name="_csrf"/);
   assert.equal(calls.length, 1); assert.deepEqual(JSON.parse(calls[0].input), { action: "read" });
+  view.applyStatus.ready = false; view.applyStatus.reason = "apply_prepared"; view.applyStatus.operation = { applyId: "apply-1", epoch: 8, targetRevision: configRevision, previousInstance: "worker-1", status: "prepared", error: null };
+  const fencedHtml = await (await fetch(`${base}/admin/oracle/models`, { headers: { cookie } })).text();
+  assert.match(fencedHtml, /apply_prepared/); assert.match(fencedHtml, /Resume is disabled while apply reservation state is unavailable or prepared\/failed/);
+  assert.match(fencedHtml, /action="apply-config"[\s\S]*?<button disabled>Apply this configuration/);
+  view.applyStatus.ready = true; view.applyStatus.reason = null; view.applyStatus.operation = null;
   const badOrigin = await post({ action: "refresh", revision }, { origin: "https://attacker.invalid" });
   assert.equal(badOrigin.status, 403); assert.equal(calls.length, 1);
   const refreshed = await post({ action: "refresh", revision });
@@ -56,11 +62,13 @@ test("Oracle model page is authenticated, explicit-refresh and preview-only unde
   assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "refresh", expectedCacheRevision: revision });
   const preview = await post({ action: "apply", revision: configRevision });
   assert.equal(preview.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "apply", expectedConfigRevision: configRevision });
+  const applied = await post({ action: "apply-config", revision: configRevision, epoch: "8" });
+  assert.equal(applied.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "apply-config", expectedConfigRevision: configRevision, expectedEpoch: 8 });
   const pause = await post({ action: "maintenance-request", revision: configRevision, epoch: "7" });
   assert.equal(pause.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "maintenance-request", expectedConfigRevision: configRevision, expectedEpoch: 7 });
   const resume = await post({ action: "maintenance-release", revision: configRevision, epoch: "8" });
   assert.equal(resume.status, 303); assert.deepEqual(JSON.parse(calls.at(-1).input), { action: "maintenance-release", expectedConfigRevision: configRevision, expectedEpoch: 8 });
   const invalid = await post({ action: "exec", command: "/usr/bin/systemctl restart", revision });
-  assert.equal(invalid.status, 400); assert.equal(calls.length, 5);
+  assert.equal(invalid.status, 400); assert.equal(calls.length, 7);
   assert.ok(calls.every((c) => !c.input.includes("systemctl") && !c.input.includes("synthetic-admin-only")));
 });

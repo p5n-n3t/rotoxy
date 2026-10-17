@@ -243,7 +243,52 @@ def _maintenance_action(config_path: Path, db_path: Path, cache_path: Path, acti
     return view
 
 
-def snapshot(config_path: Path, db_path: Path, cache_path: Path) -> dict[str, Any]:
+def _apply_controller(config_path: Path, db_path: Path):
+    """Load the separately-owned coordinator only when its integration is installed."""
+    try:
+        from .oracle_apply import OracleApplyController
+    except (ImportError, AttributeError):
+        return None
+    return OracleApplyController(config_path, db_path, wait_seconds=15)
+
+
+def _apply_status_value(value: Any) -> dict[str, Any] | None:
+    required = {"daemon", "operation", "maintenance", "ready", "reason"}
+    if type(value) is not dict or set(value) != required or type(value["ready"]) is not bool or not (value["reason"] is None or isinstance(value["reason"], str) and len(value["reason"]) <= 200):
+        return None
+    daemon = value["daemon"]
+    daemon_fields = {"available", "instanceId", "loadedRevision", "heartbeatAt", "observedEpoch", "alive"}
+    if (type(daemon) is not dict or set(daemon) != daemon_fields or type(daemon["available"]) is not bool or type(daemon["alive"]) is not bool or
+            not (daemon["instanceId"] is None or isinstance(daemon["instanceId"], str) and len(daemon["instanceId"]) <= 128) or
+            not (daemon["loadedRevision"] is None or isinstance(daemon["loadedRevision"], str) and len(daemon["loadedRevision"]) <= 64) or
+            not (daemon["heartbeatAt"] is None or type(daemon["heartbeatAt"]) in (int, float) and daemon["heartbeatAt"] >= 0) or
+            not (daemon["observedEpoch"] is None or type(daemon["observedEpoch"]) is int and daemon["observedEpoch"] >= 0)):
+        return None
+    operation = value["operation"]
+    if operation is not None:
+        fields = {"applyId", "epoch", "targetRevision", "previousInstance", "status", "error"}
+        if (type(operation) is not dict or set(operation) != fields or not isinstance(operation["applyId"], str) or len(operation["applyId"]) > 128 or
+                type(operation["epoch"]) is not int or operation["epoch"] < 0 or not isinstance(operation["targetRevision"], str) or len(operation["targetRevision"]) > 64 or
+                not (operation["previousInstance"] is None or isinstance(operation["previousInstance"], str) and len(operation["previousInstance"]) <= 128) or
+                operation["status"] not in {"prepared", "complete", "failed"} or not (operation["error"] is None or isinstance(operation["error"], str) and len(operation["error"]) <= 200)):
+            return None
+    if value["maintenance"] is not None and type(value["maintenance"]) is not dict:
+        return None
+    return value
+
+
+def _read_apply_status(config_path: Path, db_path: Path, controller_factory: Callable[[Path, Path], Any] = _apply_controller) -> dict[str, Any] | None:
+    try:
+        controller = controller_factory(config_path, db_path)
+        if controller is None:
+            return None
+        return _apply_status_value(controller.status())
+    except (ImportError, AttributeError, ValueError, OSError, sqlite3.Error):
+        return None
+
+
+def snapshot(config_path: Path, db_path: Path, cache_path: Path,
+             controller_factory: Callable[[Path, Path], Any] = _apply_controller) -> dict[str, Any]:
     fleet_raw, hosts = _fleet(config_path)
     cache_raw, cache = _read_cache(cache_path)
     stored = cache["hosts"] if type(cache.get("hosts")) is dict else {}
@@ -258,6 +303,7 @@ def snapshot(config_path: Path, db_path: Path, cache_path: Path) -> dict[str, An
                      "observedAt": saved.get("observedAt"), "load": queue["hosts"].get(host["id"]) if queue["available"] else None})
     return {"cacheRevision": revision(cache_raw), "configRevision": revision(fleet_raw), "cacheUpdatedAt": cache.get("updatedAt"),
             "hosts": rows, "queue": queue, "maintenance": _maintenance_readonly(db_path),
+            "applyStatus": _read_apply_status(config_path, db_path, controller_factory),
             "apply": {"mode": "previewOnly", "blockedReason": "Restart/reload protocol is not yet validated; changes remain preview-only."}}
 
 
@@ -302,9 +348,10 @@ def apply_preview(config_path: Path, db_path: Path, cache_path: Path, expected_c
 
 def apply_request(config_path: Path, db_path: Path, cache_path: Path, request: Any,
                   ssh_probe: Callable[[dict[str, Any], str], Any] | None = None,
-                  pool_factory: Callable[[Path], Any] = _core_pool) -> dict[str, Any]:
+                  pool_factory: Callable[[Path], Any] = _core_pool,
+                  controller_factory: Callable[[Path, Path], Any] = _apply_controller) -> dict[str, Any]:
     if type(request) is not dict or not isinstance(request.get("action"), str): raise ValueError("request_invalid")
-    if request["action"] == "read" and set(request) == {"action"}: return snapshot(config_path, db_path, cache_path)
+    if request["action"] == "read" and set(request) == {"action"}: return snapshot(config_path, db_path, cache_path, controller_factory)
     if request["action"] == "refresh" and set(request) == {"action", "expectedCacheRevision"}:
         token = request["expectedCacheRevision"]
         if not isinstance(token, str) or len(token) != 24: raise ValueError("revision_invalid")
@@ -312,7 +359,21 @@ def apply_request(config_path: Path, db_path: Path, cache_path: Path, request: A
     if request["action"] == "apply" and set(request) == {"action", "expectedConfigRevision"}:
         token = request["expectedConfigRevision"]
         if not isinstance(token, str) or len(token) != 24: raise ValueError("revision_invalid")
-        return apply_preview(config_path, db_path, cache_path, token)
+        current = apply_preview(config_path, db_path, cache_path, token)
+        current["applyStatus"] = _read_apply_status(config_path, db_path, controller_factory)
+        return current
+    if request["action"] == "apply-config" and set(request) == {"action", "expectedConfigRevision", "expectedEpoch"}:
+        token, epoch = request["expectedConfigRevision"], request["expectedEpoch"]
+        if not isinstance(token, str) or len(token) != 24: raise ValueError("apply_revision_invalid")
+        if type(epoch) is not int or epoch < 0: raise ValueError("apply_epoch_invalid")
+        current = snapshot(config_path, db_path, cache_path, controller_factory)
+        if current["configRevision"] != token: raise ValueError("apply_revision_conflict")
+        controller = controller_factory(config_path, db_path)
+        if controller is None: raise ValueError("apply_coordinator_unavailable")
+        status = _apply_status_value(controller.apply(expected_config_revision=token, expected_epoch=epoch))
+        if status is None: raise ValueError("apply_status_invalid")
+        current["applyStatus"] = status
+        return current
     if request["action"] in {"maintenance-request", "maintenance-release"} and set(request) == {"action", "expectedConfigRevision", "expectedEpoch"}:
         token, epoch = request["expectedConfigRevision"], request["expectedEpoch"]
         if not isinstance(token, str) or len(token) != 24: raise ValueError("maintenance_revision_invalid")
@@ -333,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
         if len(encoded.encode()) > MAX_CACHE: raise ValueError("response_too_large")
         print(encoded); return 0
     except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError, PoolError) as exc:
-        known = {"request_invalid", "request_too_large", "revision_invalid", "cache_revision_conflict", "config_revision_conflict", "maintenance_revision_invalid", "maintenance_epoch_invalid", "maintenance_epoch_conflict", "maintenance_revision_conflict", "maintenance_api_unavailable", "maintenance_response_invalid", "cache_locked", "cache_invalid", "cache_too_large", "cache_permissions_invalid", "private_directory_invalid", "invalid_private_path", "backup_collision", "queue_state_unavailable", "fleet_config_unavailable"}
+        known = {"request_invalid", "request_too_large", "revision_invalid", "cache_revision_conflict", "config_revision_conflict", "maintenance_revision_invalid", "maintenance_epoch_invalid", "maintenance_epoch_conflict", "maintenance_revision_conflict", "maintenance_api_unavailable", "maintenance_response_invalid", "apply_revision_invalid", "apply_epoch_invalid", "apply_revision_conflict", "apply_epoch_conflict", "apply_coordinator_unavailable", "apply_not_ready", "apply_status_invalid", "cache_locked", "cache_invalid", "cache_too_large", "cache_permissions_invalid", "private_directory_invalid", "invalid_private_path", "backup_collision", "queue_state_unavailable", "fleet_config_unavailable"}
         msg = str(exc)
         print(json.dumps({"error": msg if msg in known else "oracle_model_inventory_failed"}, separators=(",", ":")))
         return 2

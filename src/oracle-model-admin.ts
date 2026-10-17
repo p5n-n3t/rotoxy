@@ -8,7 +8,7 @@ import { runtimeStatePath } from "./supervisor-runtime.js";
 import type { StateStore } from "./store.js";
 import { page } from "./ui.js";
 
-const PYTHON = "/usr/bin/python3", MAX_TIMEOUT = 10_000, MAX_OUTPUT = 256 * 1024;
+const PYTHON = "/usr/bin/python3", MAX_TIMEOUT = 40_000, MAX_OUTPUT = 256 * 1024;
 const REV = /^[A-Za-z0-9_-]{24}$/;
 export interface OracleModelCommandRequest { cwd: string; timeoutMs: number; maxOutputBytes: number; signal: AbortSignal }
 export type OracleModelCommandRunner = (command: string, args: string[], request: OracleModelCommandRequest, input: string) => Promise<string>;
@@ -16,7 +16,10 @@ export interface OracleModelAdminOptions { configPath?: string; dbPath?: string;
 type Model = { name: string; size: number | null; modifiedAt: string | null };
 type Host = { id: string; enabled: boolean; allowedModels: string[]; hostStatus: string; models: Model[]; observedAt: number | null; load: { running: number; assigned: number } | null };
 type Maintenance = { epoch: number; paused: boolean; configRevision: string | null; acknowledged: boolean; blockers: { running: number; ambiguous: number; dispatching: number }; reason: string | null };
-type View = { cacheRevision: string; configRevision: string; cacheUpdatedAt: number | null; hosts: Host[]; queue: { available: boolean; reason?: string | null; statuses?: Record<string, number>; hosts?: Record<string, { running: number; assigned: number }> }; apply: { mode: "previewOnly"; blockedReason: string }; maintenance: Maintenance | null };
+type DaemonStatus = { available: boolean; instanceId: string | null; loadedRevision: string | null; heartbeatAt: number | null; observedEpoch: number | null; alive: boolean };
+type ApplyOperation = { applyId: string; epoch: number; targetRevision: string; previousInstance: string | null; status: "prepared" | "complete" | "failed"; error: string | null };
+type ApplyStatus = { daemon: DaemonStatus; operation: ApplyOperation | null; maintenance: unknown; ready: boolean; reason: string | null };
+type View = { cacheRevision: string; configRevision: string; cacheUpdatedAt: number | null; hosts: Host[]; queue: { available: boolean; reason?: string | null; statuses?: Record<string, number>; hosts?: Record<string, { running: number; assigned: number }> }; apply: { mode: "previewOnly"; blockedReason: string }; applyStatus: ApplyStatus | null; maintenance: Maintenance | null };
 function record(x: unknown): x is Record<string, unknown> { return typeof x === "object" && x !== null && !Array.isArray(x); }
 function defaultRunner(command: string, args: string[], req: OracleModelCommandRequest, input: string): Promise<string> {
   if (command !== PYTHON) return Promise.reject(new Error("command_not_allowed"));
@@ -49,10 +52,24 @@ function validate(value: unknown): View {
     maintenance = { epoch: Number(rawMaintenance.epoch), paused: rawMaintenance.paused, configRevision: rawMaintenance.configRevision as string | null,
       acknowledged: rawMaintenance.acknowledged, blockers: rawMaintenance.blockers as Maintenance["blockers"], reason: rawMaintenance.reason as string | null };
   }
+  let applyStatus: ApplyStatus | null = null;
+  if (value.applyStatus !== undefined && value.applyStatus !== null) {
+    const a = value.applyStatus;
+    if (!record(a) || !record(a.daemon) || typeof a.daemon.available !== "boolean" || !(a.daemon.instanceId === null || typeof a.daemon.instanceId === "string" && a.daemon.instanceId.length <= 128) ||
+        !(a.daemon.loadedRevision === null || typeof a.daemon.loadedRevision === "string" && a.daemon.loadedRevision.length <= 64) || !(a.daemon.heartbeatAt === null || typeof a.daemon.heartbeatAt === "number" && Number.isFinite(a.daemon.heartbeatAt)) ||
+        !(a.daemon.observedEpoch === null || Number.isSafeInteger(a.daemon.observedEpoch) && Number(a.daemon.observedEpoch) >= 0) || typeof a.daemon.alive !== "boolean" || typeof a.ready !== "boolean" || !(a.reason === null || typeof a.reason === "string" && a.reason.length <= 200)) throw new Error("invalid_oracle_apply_status");
+    let operation: ApplyOperation | null = null;
+    if (a.operation !== null) {
+      const o = a.operation;
+      if (!record(o) || typeof o.applyId !== "string" || o.applyId.length > 128 || !Number.isSafeInteger(o.epoch) || Number(o.epoch) < 0 || typeof o.targetRevision !== "string" || o.targetRevision.length > 64 || !(o.previousInstance === null || typeof o.previousInstance === "string" && o.previousInstance.length <= 128) || !["prepared", "complete", "failed"].includes(String(o.status)) || !(o.error === null || typeof o.error === "string" && o.error.length <= 200)) throw new Error("invalid_oracle_apply_status");
+      operation = o as ApplyOperation;
+    }
+    applyStatus = { daemon: a.daemon as unknown as DaemonStatus, operation, maintenance: a.maintenance ?? null, ready: a.ready, reason: a.reason as string | null };
+  }
   const q = value.queue;
   return { cacheRevision: value.cacheRevision, configRevision: value.configRevision, cacheUpdatedAt: value.cacheUpdatedAt as number | null, hosts,
     queue: { available: q.available === true, reason: typeof q.reason === "string" ? q.reason : null, statuses: record(q.statuses) ? q.statuses as Record<string, number> : undefined, hosts: record(q.hosts) ? q.hosts as View["queue"]["hosts"] : undefined },
-    apply: { mode: "previewOnly", blockedReason: value.apply.blockedReason }, maintenance };
+    apply: { mode: "previewOnly", blockedReason: value.apply.blockedReason }, applyStatus, maintenance };
 }
 function render(base: string, csrf: string, view: View, status: string): string {
   const groups: readonly NavGroup[] = NAV_GROUPS.map((g) => g.label === "Resources" ? { ...g, items: [...g.items, { key: "oracle-models", label: "Oracle models", href: "/admin/oracle/models" }] } : g);
@@ -67,8 +84,13 @@ function render(base: string, csrf: string, view: View, status: string): string 
   const maintenanceState = !m ? "Maintenance state unavailable" : m.paused
     ? m.blockers.ambiguous > 0 ? "Paused; unresolved ambiguous work" : maintenanceBlockers > 0 ? "Paused; draining" : m.acknowledged ? "Paused; drained and acknowledged" : "Paused; awaiting drain acknowledgement"
     : m.blockers.ambiguous > 0 ? "Dispatch enabled; unresolved ambiguous work" : "Dispatch enabled; no acknowledgement pending";
-  const maintenanceCard = m ? `<section class="card full"><h2>Pool dispatch maintenance</h2><p>State: <strong>${maintenanceState}</strong> · epoch ${m.epoch}${m.reason ? ` · ${esc(m.reason)}` : ""}</p><p>Blockers: ${m.blockers.running} running · ${m.blockers.ambiguous} ambiguous · ${m.blockers.dispatching} dispatching.</p><p>Pause prevents new claims; it does not stop queueing, cancel tasks, or stop running tasks. Resume aborts maintenance and resumes dispatch without applying changes.</p><div class="actions"><form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="maintenance-request"><input type="hidden" name="revision" value="${esc(view.configRevision)}"><input type="hidden" name="epoch" value="${m.epoch}"><button${m.paused ? " disabled" : ""}>Pause dispatch and drain</button></form><form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="maintenance-release"><input type="hidden" name="revision" value="${esc(view.configRevision)}"><input type="hidden" name="epoch" value="${m.epoch}"><button class="secondary"${m.paused ? "" : " disabled"}>Abort maintenance and resume dispatch</button></form></div></section>` : `<section class="card full"><h2>Pool dispatch maintenance</h2><p>Maintenance state unavailable. No epoch is assumed; controls remain disabled until the core fence state is readable.</p><button disabled>Pause dispatch and drain</button><button class="secondary" disabled>Abort maintenance and resume dispatch</button></section>`;
-  const body = `<main class="wrap">${adminNav(base, "oracle-models", groups)}<section class="grid"><section class="card full"><div class="eyebrow">ROTOXY · Private workers</div><h1>Oracle model inventory</h1><p>Installed model names come from the last explicit catalog refresh. Compare them with the fleet allowlist below.</p><p>Refresh reads each enabled host without installing or removing models. Opening this page uses the cached catalog.</p>${status ? `<p role="status">${esc(status)}</p>` : ""}<form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="refresh"><input type="hidden" name="revision" value="${esc(view.cacheRevision)}"><button>Refresh catalog</button></form><p class="muted">Cache refreshed ${view.cacheUpdatedAt === null ? "never" : esc(new Date(view.cacheUpdatedAt * 1000).toISOString())} · fleet config revision <code>${esc(view.configRevision)}</code></p></section>${maintenanceCard}${cards}<section class="card full"><h2>Apply to local pool</h2><p>This control is preview-only. ${esc(view.apply.blockedReason)} No service restart or fleet configuration write is available from this page.</p><p>Queue state: ${view.queue.available ? esc(Object.entries(view.queue.statuses ?? {}).map(([state,count]) => `${count} ${state}`).join(" · ")) : `Unavailable (${esc(view.queue.reason ?? "unknown")})`}</p><form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="apply"><input type="hidden" name="revision" value="${esc(view.configRevision)}"><button class="secondary">Check apply readiness</button></form></section></section></main>`;
+  const op = view.applyStatus?.operation;
+  const abortBlocked = !view.applyStatus || op?.status === "prepared" || op?.status === "failed";
+  const daemon = view.applyStatus?.daemon;
+  const applyCard = `<section class="card full oa-controls"><h2>Apply configuration to local pool</h2><p>Requested revision <code>${esc(view.configRevision)}</code> · daemon loaded revision <code>${esc(daemon?.loadedRevision ?? "unknown")}</code></p><p>Daemon ${!view.applyStatus ? "status unsupported" : daemon?.alive ? "live" : daemon?.available ? "not live" : "unavailable"}${daemon?.heartbeatAt == null ? " · heartbeat unknown" : ` · heartbeat ${esc(new Date(daemon.heartbeatAt * 1000).toISOString())}`} · instance ${esc(daemon?.instanceId ?? "unknown")}</p><p>Active operation ${op ? `${esc(op.applyId)} · ${esc(op.status)} · epoch ${op.epoch}${op.error ? ` · ${esc(op.error)}` : ""}` : "none reported"}${op?.status === "failed" ? " · recovery required" : ""}</p><p>Readiness: ${view.applyStatus ? view.applyStatus.ready ? "ready" : esc(view.applyStatus.reason ?? "not ready") : "Coordinator unsupported or unavailable; apply is disabled."}</p><p>Queue state: ${view.queue.available ? esc(Object.entries(view.queue.statuses ?? {}).map(([state,count]) => `${count} ${state}`).join(" · ")) : `Unavailable (${esc(view.queue.reason ?? "unknown")})`}</p><div class="actions"><form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="apply"><input type="hidden" name="revision" value="${esc(view.configRevision)}"><button class="secondary">Check apply readiness</button></form><form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="apply-config"><input type="hidden" name="revision" value="${esc(view.configRevision)}"><input type="hidden" name="epoch" value="${daemon?.observedEpoch ?? ""}"><button${view.applyStatus?.ready === true ? "" : " disabled"}>Apply this configuration</button></form></div></section>`;
+  const maintenanceCard = m ? `<section class="card full oa-controls"><h2>Pool dispatch maintenance</h2><p>State: <strong>${maintenanceState}</strong> · epoch ${m.epoch}${m.reason ? ` · ${esc(m.reason)}` : ""}</p><p>Blockers: ${m.blockers.running} running · ${m.blockers.ambiguous} ambiguous · ${m.blockers.dispatching} dispatching.</p><p>Pause prevents new claims; it does not stop queueing, cancel tasks, or stop running tasks. Resume aborts maintenance and resumes dispatch without applying changes.</p><div class="actions"><form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="maintenance-request"><input type="hidden" name="revision" value="${esc(view.configRevision)}"><input type="hidden" name="epoch" value="${m.epoch}"><button${m.paused ? " disabled" : ""}>Pause dispatch and drain</button></form><form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="maintenance-release"><input type="hidden" name="revision" value="${esc(view.configRevision)}"><input type="hidden" name="epoch" value="${m.epoch}"><button class="secondary"${m.paused && !abortBlocked ? "" : " disabled"}>Abort maintenance and resume dispatch</button></form></div>${abortBlocked && m.paused ? '<p class="muted">Resume is disabled while apply reservation state is unavailable or prepared/failed.</p>' : ""}</section>` : `<section class="card full"><h2>Pool dispatch maintenance</h2><p>Maintenance state unavailable. No epoch is assumed; controls remain disabled until the core fence state is readable.</p><button disabled>Pause dispatch and drain</button><button class="secondary" disabled>Abort maintenance and resume dispatch</button></section>`;
+  const style = `<style>.oa-controls .actions{display:flex;flex-wrap:wrap;gap:.75rem;margin-top:1rem}.oa-controls form{min-width:min(100%,14rem)}.oa-controls button{max-width:100%;white-space:normal;overflow-wrap:anywhere}@media(max-width:420px){.oa-controls .actions{display:grid;grid-template-columns:minmax(0,1fr)}.oa-controls form,.oa-controls button{width:100%;min-width:0}}</style>`;
+  const body = `<main class="wrap">${adminNav(base, "oracle-models", groups)}${style}<section class="grid"><section class="card full"><div class="eyebrow">ROTOXY · Private workers</div><h1>Oracle model inventory</h1><p>Installed model names come from the last explicit catalog refresh. Compare them with the fleet allowlist below.</p><p>Refresh reads each enabled host without installing or removing models. Opening this page uses the cached catalog.</p>${status ? `<p role="status">${esc(status)}</p>` : ""}<form method="post" action="${esc(base)}/admin/oracle/models"><input type="hidden" name="action" value="refresh"><input type="hidden" name="revision" value="${esc(view.cacheRevision)}"><button>Refresh catalog</button></form><p class="muted">Cache refreshed ${view.cacheUpdatedAt === null ? "never" : esc(new Date(view.cacheUpdatedAt * 1000).toISOString())} · fleet config revision <code>${esc(view.configRevision)}</code></p></section>${applyCard}${maintenanceCard}${cards}</section></main>`;
   return page("Oracle model inventory", withCsrf(body, csrf));
 }
 
@@ -110,19 +132,23 @@ export function createOracleModelAdminRouter(store: StateStore, sessions: AdminS
     if (!sessions.verifyCsrf(res.locals.token, req.body?._csrf)) return res.status(403).json({ error: "csrf_invalid" });
     const b = req.body as Record<string, unknown>;
     try {
-      if (typeof b.revision !== "string" || !REV.test(b.revision)) throw new Error("revision_invalid");
+      const fields = Object.keys(b).sort().join(",");
+      const expected = b.action === "maintenance-request" || b.action === "maintenance-release" || b.action === "apply-config" ? "_csrf,action,epoch,revision" : "_csrf,action,revision";
+      if (fields !== expected) throw new Error("request_invalid");
+      if (!record(b) || typeof b.revision !== "string" || !REV.test(b.revision)) throw new Error("revision_invalid");
       if (b.action === "refresh") await invoke({ action: "refresh", expectedCacheRevision: b.revision });
       else if (b.action === "apply") await invoke({ action: "apply", expectedConfigRevision: b.revision });
-      else if (b.action === "maintenance-request" || b.action === "maintenance-release") {
+      else if (b.action === "maintenance-request" || b.action === "maintenance-release" || b.action === "apply-config") {
         if (typeof b.epoch !== "string" || !/^(0|[1-9][0-9]{0,15})$/.test(b.epoch) || !Number.isSafeInteger(Number(b.epoch))) throw new Error("maintenance_epoch_invalid");
-        await invoke({ action: b.action, expectedConfigRevision: b.revision, expectedEpoch: Number(b.epoch) });
+        const action = b.action === "apply-config" ? "apply-config" : b.action;
+        await invoke({ action, expectedConfigRevision: b.revision, expectedEpoch: Number(b.epoch) });
       }
       else throw new Error("request_invalid");
       return res.redirect(303, `${res.locals.base}/admin/oracle/models?${b.action === "refresh" ? "refreshed=1" : "preview=1"}`);
     } catch (error) {
       const code = error instanceof Error ? error.message : "oracle_model_admin_failed";
-      const status = code === "cache_revision_conflict" || code === "config_revision_conflict" || code === "maintenance_epoch_conflict" || code === "maintenance_revision_conflict" ? 409 : code === "cache_locked" ? 423 : 400;
-      const safe = new Set(["request_invalid", "revision_invalid", "cache_revision_conflict", "config_revision_conflict", "maintenance_revision_invalid", "maintenance_epoch_invalid", "maintenance_epoch_conflict", "maintenance_revision_conflict", "maintenance_api_unavailable", "cache_locked", "queue_state_unavailable"]);
+      const status = code === "cache_revision_conflict" || code === "config_revision_conflict" || code === "maintenance_epoch_conflict" || code === "maintenance_revision_conflict" || code === "apply_epoch_conflict" ? 409 : code === "cache_locked" ? 423 : 400;
+      const safe = new Set(["request_invalid", "revision_invalid", "cache_revision_conflict", "config_revision_conflict", "maintenance_revision_invalid", "maintenance_epoch_invalid", "maintenance_epoch_conflict", "maintenance_revision_conflict", "maintenance_api_unavailable", "apply_coordinator_unavailable", "apply_not_ready", "apply_epoch_invalid", "apply_revision_invalid", "apply_revision_conflict", "apply_epoch_conflict", "cache_locked", "queue_state_unavailable"]);
       return res.status(status).type("text").send(safe.has(code) ? code : "oracle_model_operation_failed");
     }
   });
