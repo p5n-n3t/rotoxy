@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -141,6 +142,33 @@ class RecoveryTests(unittest.TestCase):
         self.engine.resource_verifier = None
         self.assertEqual(self.engine.run("incident-2")["decision"]["reason"], "resource_verifier_unavailable")
         self.assertEqual(self.calls, [])
+
+    def test_codex_headless_advisory_survives_the_durable_receipt_filter(self):
+        def headless(context, timeout):
+            return {"state": "accepted", "receipt": {
+                "adapter": "codex-exec-resume", "state": "turn-completed",
+                "advisory": "Check evidence. Bearer secret-value api_key=topsecret",
+                "advisoryOnly": True, "advisoryTruncated": False,
+                "rawTranscript": "must not persist",
+            }}
+        self.engine.adapters["headless"] = headless
+        self.engine.resource_verifier = lambda context: {
+            "verified": True, "quota": "available", "budgetVerified": True,
+            "project": context["project"], "job": context["job"], "account": context["account"],
+            "session": context["session"], "observedAt": self.clock.now, "availableBudgetUsd": 1,
+        }
+        self.policy(level="headless", permissions=["headless"], action_budget_usd=0.25,
+                    budget_ceiling_usd=1, headless_adapter_verified=True)
+        self.event()
+        self.assertEqual(self.engine.run("incident-1")["state"], "completed")
+        action = self.engine.get("incident-1")["action"]
+        receipt = json.loads(action["receipt"])
+        self.assertEqual(receipt["adapter"], "codex-exec-resume")
+        self.assertEqual(receipt["advisory"], "Check evidence. Bearer [REDACTED] api_key=[REDACTED]")
+        self.assertTrue(receipt["advisoryOnly"])
+        self.assertNotIn("rawTranscript", receipt)
+        self.assertNotIn("secret-value", json.dumps(receipt))
+        self.assertNotIn("topsecret", json.dumps(receipt))
 
     def test_chatgpt_target_and_human_level_remain_durable_handoffs(self):
         self.engine.adapters["headless"] = self.action

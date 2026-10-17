@@ -1,4 +1,15 @@
-"""Bounded Codex CLI resume adapter for explicitly allowlisted sessions."""
+"""Bounded Codex CLI resume adapter for explicitly allowlisted sessions.
+
+The only Codex ``exec --json`` stdout records retained by this adapter are the
+documented final-message shape used by the local fixtures::
+
+    {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+    {"type":"turn.completed"}
+
+All other JSONL records are execution telemetry and are deliberately discarded.
+Only the last well-formed agent message is kept, after secret redaction and a
+small display bound.  It is advisory text, never an instruction to execute.
+"""
 from __future__ import annotations
 
 import json
@@ -12,8 +23,40 @@ import time
 
 MAX_CONTEXT = 4096
 MAX_OUTPUT = 64 * 1024
+MAX_ADVISORY = 1200
 REMOTE_SESSION = re.compile(r"[A-Za-z0-9_.:@/-]{1,160}\Z")
 CODEX_SESSION = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
+
+
+def _sanitize_advisory(value):
+    """Return a redacted, bounded advisory and whether display was truncated."""
+    if not isinstance(value, str):
+        return None, False
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", value)
+    value = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", value)
+    value = re.sub(r"(?i)(api[_-]?key|token|secret|password)(\s*[:=]\s*)[^\s,;]+", r"\1\2[REDACTED]", value)
+    value = re.sub(r"(?i)\b(?:sk|ghp|gho|github_pat)_[A-Za-z0-9_]{12,}\b", "[REDACTED]", value)
+    value = " ".join(value.split())
+    if not value:
+        return None, False
+    if len(value) <= MAX_ADVISORY:
+        return value, False
+    return value[:MAX_ADVISORY - 1].rstrip() + "…", True
+
+
+def _agent_message(event):
+    """Read only the fixed agent-message payload from a Codex JSONL record.
+
+    Returns ``(present, advisory, truncated)``.  A present message without a
+    valid text field is an uncertain final advisory and must not be replayed.
+    """
+    if not isinstance(event, dict) or event.get("type") != "item.completed":
+        return False, None, False
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agent_message":
+        return False, None, False
+    advisory, truncated = _sanitize_advisory(item.get("text"))
+    return True, advisory, truncated
 
 
 class HeadlessCodex:
@@ -62,6 +105,9 @@ class HeadlessCodex:
         output_bytes = 0
         completed = False
         overflow = False
+        advisory = None
+        advisory_truncated = False
+        malformed_final_advisory = False
         line_buffer = bytearray()
         selector = selectors.DefaultSelector()
         try:
@@ -97,14 +143,24 @@ class HeadlessCodex:
                                 except (ValueError, UnicodeDecodeError):
                                     continue
                                 completed |= isinstance(event, dict) and event.get("type") == "turn.completed"
+                                present, candidate, truncated = _agent_message(event)
+                                if present:
+                                    # A later valid agent message is the final advisory.  A
+                                    # malformed final message leaves execution uncertain.
+                                    advisory = candidate
+                                    advisory_truncated = truncated
+                                    malformed_final_advisory = candidate is None
                 if overflow:
                     break
             timed_out = self.clock() >= deadline
             _kill_and_reap(proc, kill=overflow or timed_out)
-            if not selector.get_map() and proc.returncode == 0 and completed and not overflow and not timed_out:
-                return {"state": "accepted", "receipt": {"adapter": "codex-exec-resume",
-                        "state": "turn-completed", "exit_code": 0, "bytes": output_bytes,
-                        "elapsed_ms": int((self.clock() - started) * 1000)}}
+            if (not selector.get_map() and proc.returncode == 0 and completed and not overflow and
+                    not timed_out and not malformed_final_advisory):
+                receipt = {"adapter": "codex-exec-resume", "state": "turn-completed", "exit_code": 0,
+                           "bytes": output_bytes, "elapsed_ms": int((self.clock() - started) * 1000)}
+                if advisory is not None:
+                    receipt.update(advisory=advisory, advisoryOnly=True, advisoryTruncated=advisory_truncated)
+                return {"state": "accepted", "receipt": receipt}
             return {"state": "ambiguous", "receipt": {"adapter": "codex-exec-resume",
                     "state": "execution-ambiguous", "exit_code": proc.returncode if proc.returncode is not None else -1,
                     "bytes": min(output_bytes, MAX_OUTPUT), "elapsed_ms": int((self.clock() - started) * 1000)}}

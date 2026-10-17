@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+
+from snooze.headless import _sanitize_advisory
 from types import MappingProxyType
 
 LEVELS = {"observe", "notify", "rules", "cloud-supervisor", "headless", "human"}
@@ -440,6 +442,15 @@ class RecoveryEngine:
             value = raw.get(key)
             if type(value) is int and -255 <= value <= 2**31:
                 safe[key] = value
+        # A Codex resume may return one bounded advisory.  Re-sanitize here so
+        # a future adapter cannot persist raw model output through this receipt
+        # boundary.  Other adapters remain metadata-only.
+        if raw.get("adapter") == "codex-exec-resume":
+            advisory, truncated = _sanitize_advisory(raw.get("advisory"))
+            if advisory is not None:
+                safe["advisory"] = advisory
+                safe["advisoryOnly"] = True
+                safe["advisoryTruncated"] = bool(raw.get("advisoryTruncated") is True or truncated)
         return safe
 
     def request_advice(self, event_id):

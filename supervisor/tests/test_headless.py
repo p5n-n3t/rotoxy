@@ -20,7 +20,7 @@ class HeadlessCodexTests(unittest.TestCase):
         self.capture = self.root / "capture.json"
         self.executable = self.root / "fake-codex"
 
-    def runner(self, body, timeout=1):
+    def runner(self, body, timeout=2):
         source = "#!/usr/bin/python3\nimport json,os,sys,time,subprocess\n" + body
         self.executable.write_text(source)
         self.executable.chmod(0o700)
@@ -32,9 +32,10 @@ class HeadlessCodexTests(unittest.TestCase):
                 "session": "remote-session-a", "job": "job-a", "kind": "failed", "severity": "failed"}
 
     def test_resume_is_fixed_read_only_and_passes_bounded_metadata_on_stdin(self):
-        runner = self.runner("open(%r,'w').write(json.dumps({'argv':sys.argv,'env':dict(os.environ),'stdin':sys.stdin.read()}))\nprint(json.dumps({'type':'turn.completed'}))\n" % str(self.capture))
+        runner = self.runner("open(%r,'w').write(json.dumps({'argv':sys.argv,'env':dict(os.environ),'stdin':sys.stdin.read()}))\nprint(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Check the durable inbox and assign a reviewer.'}}))\nprint(json.dumps({'type':'turn.completed'}))\n" % str(self.capture))
         result = runner(self.context(), 2)
         self.assertEqual(result["state"], "accepted")
+        self.assertEqual(result["receipt"]["advisory"], "Check the durable inbox and assign a reviewer.")
         captured = json.loads(self.capture.read_text())
         args = captured["argv"]
         self.assertEqual(args, [str(self.executable), "--ask-for-approval", "never", "exec",
@@ -44,6 +45,34 @@ class HeadlessCodexTests(unittest.TestCase):
         self.assertIn("Do not modify files", captured["stdin"])
         self.assertIn('"event_id":"guidance-23"', captured["stdin"])
         self.assertIn('"job":"job-a"', captured["stdin"])
+
+    def test_final_completed_agent_message_is_retained_as_bounded_advisory(self):
+        runner = self.runner("print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'First advisory.'}}))\nprint(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Final advisory: inspect the durable event ledger.'}}))\nprint(json.dumps({'type':'turn.completed'}))")
+        result = runner(self.context(), 2)
+        self.assertEqual(result["state"], "accepted")
+        self.assertEqual(result["receipt"]["advisory"], "Final advisory: inspect the durable event ledger.")
+        self.assertTrue(result["receipt"]["advisoryOnly"])
+
+    def test_malformed_agent_message_is_ambiguous_and_not_retained(self):
+        runner = self.runner("print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':23}}))\nprint(json.dumps({'type':'turn.completed'}))")
+        result = runner(self.context(), 2)
+        self.assertEqual(result["state"], "ambiguous")
+        self.assertNotIn("advisory", result["receipt"])
+
+    def test_advisory_is_redacted_and_bounded_before_receipt(self):
+        text = "Bearer secret-value api_key=topsecret password: hidden " + ("x" * 5000)
+        runner = self.runner("print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':%r}}))\nprint(json.dumps({'type':'turn.completed'}))" % text)
+        result = runner(self.context(), 2)
+        self.assertEqual(result["state"], "accepted")
+        advisory = result["receipt"]["advisory"]
+        self.assertLessEqual(len(advisory), 1200)
+        self.assertIn("Bearer [REDACTED]", advisory)
+        self.assertIn("api_key=[REDACTED]", advisory)
+        self.assertIn("password: [REDACTED]", advisory)
+        self.assertNotIn("secret-value", advisory)
+        self.assertNotIn("topsecret", advisory)
+        self.assertNotIn("hidden", advisory)
+        self.assertTrue(result["receipt"]["advisoryTruncated"])
 
     def test_unallowlisted_session_never_starts_process(self):
         runner = self.runner("open(%r,'w').write('started')" % str(self.capture))
