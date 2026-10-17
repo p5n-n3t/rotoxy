@@ -1,4 +1,6 @@
 import json
+import contextlib
+import io
 import sqlite3
 import subprocess
 import sys
@@ -21,6 +23,7 @@ from snooze.oracle_pool import (
     SSHOllamaTransport,
     _config_revision,
     APPLY_SCHEMA_MARKER,
+    _serve_loop,
     read_daemon_status,
     read_config_apply_status,
 )
@@ -672,6 +675,53 @@ class OraclePoolTests(unittest.TestCase):
         self.assertLessEqual(after["heartbeatAt"], time.time())
         self.assertGreaterEqual(after["heartbeatAt"], before["heartbeatAt"])
 
+    def test_heartbeat_refresh_does_not_acknowledge_or_observe_paused_epoch(self):
+        self.pool.register_daemon()
+        self.pool.request_maintenance("J" * 24, 0)
+        before = read_daemon_status(self.pool.db_path)
+        time.sleep(0.002)
+        heartbeat_at = self.pool.heartbeat_daemon()
+        after = read_daemon_status(self.pool.db_path)
+        self.assertGreaterEqual(heartbeat_at, before["heartbeatAt"])
+        self.assertEqual(after["observedEpoch"], before["observedEpoch"])
+        self.assertFalse(self.pool.maintenance_status()["acknowledged"])
+
+    def test_serve_loop_heartbeats_during_blocked_execution_and_joins(self):
+        self.pool.register_daemon()
+        self.pool.catalog(refresh=True)
+        self.pool.transport.gate = threading.Event()
+        self.pool.submit("blocked fake inference", job_id="heartbeat-running")
+        before = read_daemon_status(self.pool.db_path)["heartbeatAt"]
+        stopped = threading.Event()
+        failures = []
+
+        def serve():
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    _serve_loop(self.pool, stopped, heartbeat_interval=0.02)
+            except Exception as exc:
+                failures.append(exc)
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 2
+            while not self.transport.calls and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(self.transport.calls, "fake inference did not start")
+            deadline = time.monotonic() + 2
+            while read_daemon_status(self.pool.db_path)["heartbeatAt"] <= before and time.monotonic() < deadline:
+                time.sleep(0.005)
+            during = read_daemon_status(self.pool.db_path)
+            self.assertGreater(during["heartbeatAt"], before)
+            self.assertEqual(self.pool.status("heartbeat-running")["status"], "running")
+        finally:
+            stopped.set()
+            self.pool.transport.gate.set()
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive(), "serve loop did not join its heartbeat thread")
+        self.assertEqual(failures, [])
+
     def test_begin_apply_requires_registered_observing_daemon_and_deduplicates(self):
         revision = "A" * 24
         self.pool.request_maintenance(revision, 0)
@@ -708,6 +758,8 @@ class OraclePoolTests(unittest.TestCase):
         self.assertEqual(replacement.loaded_revision, target)
         with patch("snooze.oracle_pool._identity_alive", return_value=False):
             replacement.register_daemon()
+        with self.assertRaisesRegex(ValueError, "daemon_replaced"):
+            self.pool.heartbeat_daemon()
         with self.assertRaisesRegex(ValueError, "daemon_replaced"):
             self.pool._claim()
         replacement._claim()
