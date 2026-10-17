@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import ipaddress
+import math
 import json
 import os
 import re
@@ -51,6 +52,9 @@ INFERENCE_TIMEOUT = 240
 CATALOG_TIMEOUT = 20
 TASK_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 SOURCE_RE = re.compile(r"[A-Za-z0-9_.:@/-]{1,128}\Z")
+MAINTENANCE_REVISION_RE = re.compile(r"[A-Za-z0-9_-]{24}\Z")
+MAINTENANCE_TABLE_COLUMNS = ("id", "epoch", "paused", "config_revision", "acknowledged", "requested_at")
+KNOWN_TASK_STATUSES = {"queued", "running", "dispatching", "complete", "failed", "ambiguous", "cancelled"}
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 
 
@@ -345,14 +349,107 @@ class OraclePool:
               id TEXT PRIMARY KEY, models TEXT NOT NULL DEFAULT '[]',
               updated REAL, error_code TEXT, assigned INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS pool_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS pool_maintenance(
+              id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL,
+              paused INTEGER NOT NULL, config_revision TEXT,
+              acknowledged INTEGER NOT NULL, requested_at REAL);
             CREATE TABLE IF NOT EXISTS pool_events(
               id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, kind TEXT NOT NULL,
               at REAL NOT NULL, data TEXT NOT NULL);
             """)
             db.execute("PRAGMA journal_mode=DELETE")
+            db.execute("INSERT OR IGNORE INTO pool_maintenance(id,epoch,paused,config_revision,acknowledged,requested_at) VALUES(1,0,0,NULL,0,NULL)")
             for host in self.hosts:
                 db.execute("INSERT OR IGNORE INTO pool_hosts(id) VALUES(?)", (host["id"],))
+            self._maintenance_row(db)
         os.chmod(self.db_path, 0o600)
+
+    @staticmethod
+    def _maintenance_row(db: sqlite3.Connection) -> sqlite3.Row:
+        try:
+            columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_maintenance)"))
+            if columns != MAINTENANCE_TABLE_COLUMNS:
+                raise ValueError("maintenance_unavailable")
+            rows = db.execute("SELECT id,epoch,paused,config_revision,acknowledged,requested_at FROM pool_maintenance").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("maintenance_unavailable") from exc
+        if len(rows) != 1 or rows[0]["id"] != 1:
+            raise ValueError("maintenance_unavailable")
+        row = rows[0]
+        if (type(row["epoch"]) is not int or row["epoch"] < 0 or type(row["paused"]) is not int or row["paused"] not in (0, 1)
+                or type(row["acknowledged"]) is not int or row["acknowledged"] not in (0, 1)
+                or (row["config_revision"] is not None and (not isinstance(row["config_revision"], str) or not MAINTENANCE_REVISION_RE.fullmatch(row["config_revision"])) )
+                or (row["requested_at"] is not None and (not isinstance(row["requested_at"], (int, float)) or not math.isfinite(row["requested_at"]) or row["requested_at"] < 0))
+                or (row["paused"] == 0 and (row["config_revision"] is not None or row["acknowledged"] != 0 or row["requested_at"] is not None))
+                or (row["paused"] == 1 and (row["config_revision"] is None or row["requested_at"] is None))):
+            raise ValueError("maintenance_unavailable")
+        return row
+
+    @staticmethod
+    def _maintenance_blockers(db: sqlite3.Connection) -> dict[str, int]:
+        try:
+            rows = db.execute("SELECT status,COUNT(*) AS n FROM pool_tasks GROUP BY status").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("maintenance_unavailable") from exc
+        counts = {row["status"]: row["n"] for row in rows}
+        unknown = sum(n for status, n in counts.items() if status not in KNOWN_TASK_STATUSES)
+        return {"running": counts.get("running", 0), "ambiguous": counts.get("ambiguous", 0),
+                "dispatching": counts.get("dispatching", 0) + unknown}
+
+    @staticmethod
+    def _maintenance_dto(row: sqlite3.Row, blockers: dict[str, int]) -> dict[str, Any]:
+        paused = bool(row["paused"])
+        acknowledged = bool(row["acknowledged"]) and not any(blockers.values())
+        reason = None if not paused else ("draining" if any(blockers.values()) else "paused" if acknowledged else "awaiting_daemon_ack")
+        return {"epoch": row["epoch"], "paused": paused, "configRevision": row["config_revision"],
+                "acknowledged": acknowledged, "blockers": blockers, "reason": reason}
+
+    def maintenance_status(self) -> dict[str, Any]:
+        """Read the durable fence without acknowledging or changing it."""
+        with self._connect() as db:
+            db.execute("BEGIN")
+            row = self._maintenance_row(db)
+            result = self._maintenance_dto(row, self._maintenance_blockers(db))
+            db.commit()
+            return result
+
+    def request_maintenance(self, config_revision: str, expected_epoch: int) -> dict[str, Any]:
+        if not isinstance(config_revision, str) or not MAINTENANCE_REVISION_RE.fullmatch(config_revision):
+            raise ValueError("maintenance_revision_conflict")
+        if type(expected_epoch) is not int or expected_epoch < 0:
+            raise ValueError("maintenance_epoch_conflict")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._maintenance_row(db)
+            if row["paused"]:
+                if row["config_revision"] == config_revision and expected_epoch == row["epoch"] - 1:
+                    result = self._maintenance_dto(row, self._maintenance_blockers(db)); db.commit(); return result
+                if row["config_revision"] != config_revision and expected_epoch == row["epoch"]:
+                    raise ValueError("maintenance_revision_conflict")
+                raise ValueError("maintenance_epoch_conflict")
+            if row["epoch"] != expected_epoch:
+                raise ValueError("maintenance_epoch_conflict")
+            db.execute("UPDATE pool_maintenance SET epoch=epoch+1,paused=1,config_revision=?,acknowledged=0,requested_at=? WHERE id=1 AND epoch=? AND paused=0",
+                       (config_revision, time.time(), expected_epoch))
+            updated = self._maintenance_row(db)
+            result = self._maintenance_dto(updated, self._maintenance_blockers(db)); db.commit(); return result
+
+    def release_maintenance(self, expected_epoch: int, config_revision: str) -> dict[str, Any]:
+        if type(expected_epoch) is not int or expected_epoch < 0:
+            raise ValueError("maintenance_epoch_conflict")
+        if not isinstance(config_revision, str) or not MAINTENANCE_REVISION_RE.fullmatch(config_revision):
+            raise ValueError("maintenance_revision_conflict")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._maintenance_row(db)
+            if row["epoch"] != expected_epoch:
+                raise ValueError("maintenance_epoch_conflict")
+            if not row["paused"] or row["config_revision"] != config_revision:
+                raise ValueError("maintenance_revision_conflict")
+            db.execute("UPDATE pool_maintenance SET epoch=epoch+1,paused=0,config_revision=NULL,acknowledged=0,requested_at=NULL WHERE id=1 AND epoch=? AND paused=1 AND config_revision=?",
+                       (expected_epoch, config_revision))
+            updated = self._maintenance_row(db)
+            result = self._maintenance_dto(updated, self._maintenance_blockers(db)); db.commit(); return result
 
     @staticmethod
     def _event(db: sqlite3.Connection, task_id: str | None, kind: str, data: dict[str, Any], now: float):
@@ -547,6 +644,14 @@ class OraclePool:
         now = time.time()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            maintenance = self._maintenance_row(db)
+            if maintenance["paused"]:
+                blockers = self._maintenance_blockers(db)
+                acknowledged = int(not any(blockers.values()))
+                if maintenance["acknowledged"] != acknowledged:
+                    db.execute("UPDATE pool_maintenance SET acknowledged=? WHERE id=1", (acknowledged,))
+                db.commit()
+                return []
             running = db.execute("SELECT COUNT(*) FROM pool_tasks WHERE status='running'").fetchone()[0]
             enabled_hosts = [host for host in self.hosts if host["enabled"]]
             maximum = min(self.config["max_total_running"], len(enabled_hosts))
@@ -668,6 +773,39 @@ class OraclePool:
         return {"tasks_deleted": len(ids), "events_deleted": old_events}
 
 
+def read_maintenance_status(db_path: str | Path) -> dict[str, Any]:
+    """Read existing private maintenance state without initializing or acknowledging it."""
+    path = Path(db_path)
+    try:
+        if not path.is_absolute() or "\x00" in str(path) or any(part.is_symlink() for part in (path, *path.parents)):
+            raise ValueError("maintenance_unavailable")
+        info = path.lstat()
+        parent = path.parent.lstat()
+        if (not path.is_file() or info.st_uid != os.getuid() or info.st_mode & 0o077
+                or not path.parent.is_dir() or path.parent.is_symlink() or parent.st_uid != os.getuid() or parent.st_mode & 0o077):
+            raise ValueError("maintenance_unavailable")
+        uri = path.as_uri() + "?mode=ro"
+        db = sqlite3.connect(uri, uri=True, timeout=5)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA query_only=ON")
+        try:
+            db.execute("BEGIN")
+            columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_maintenance)"))
+            task_columns = tuple(row[1] for row in db.execute("PRAGMA table_info(pool_tasks)"))
+            if columns != MAINTENANCE_TABLE_COLUMNS or "status" not in task_columns:
+                raise ValueError("maintenance_unavailable")
+            row = OraclePool._maintenance_row(db)
+            result = OraclePool._maintenance_dto(row, OraclePool._maintenance_blockers(db))
+            db.commit()
+            return result
+        finally:
+            db.close()
+    except ValueError:
+        raise
+    except (OSError, sqlite3.DatabaseError, RuntimeError) as exc:
+        raise ValueError("maintenance_unavailable") from exc
+
+
 def _json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
@@ -697,6 +835,13 @@ def main(argv: list[str] | None = None) -> int:
     events = sub.add_parser("events", help="read the bounded safe event inbox")
     events.add_argument("--after", type=int, default=0)
     events.add_argument("--limit", type=int, default=100)
+    maintenance_request = sub.add_parser("maintenance-request", help="pause new claims and request a drain acknowledgement")
+    maintenance_request.add_argument("--revision", required=True)
+    maintenance_request.add_argument("--epoch", required=True, type=int)
+    maintenance_release = sub.add_parser("maintenance-release", help="abort maintenance and resume claims without restarting")
+    maintenance_release.add_argument("--revision", required=True)
+    maintenance_release.add_argument("--epoch", required=True, type=int)
+    sub.add_parser("maintenance-status", help="read the current maintenance fence")
     sub.add_parser("run-once", help="run up to three queued jobs; requires a refreshed model catalog")
     sub.add_parser("serve", help="run a local polling worker; no inference occurs while the queue is empty")
     cleanup = sub.add_parser("cleanup", help="remove terminal tasks and events older than the retention age")
@@ -725,6 +870,12 @@ def main(argv: list[str] | None = None) -> int:
             _json(pool.results(args.id))
         elif args.command == "events":
             _json(pool.events(after=args.after, limit=args.limit))
+        elif args.command == "maintenance-status":
+            _json(pool.maintenance_status())
+        elif args.command == "maintenance-request":
+            _json(pool.request_maintenance(args.revision, args.epoch))
+        elif args.command == "maintenance-release":
+            _json(pool.release_maintenance(args.epoch, args.revision))
         elif args.command == "run-once":
             _json(pool.run_once())
         elif args.command == "cleanup":
