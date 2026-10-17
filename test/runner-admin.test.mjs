@@ -1,0 +1,33 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import express from "express";
+import { createServer } from "node:http";
+import { mkdtemp, rm, mkdir, writeFile, chmod } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { StateStore } from "../dist/store.js";
+import { AdminSessions, adminEpoch } from "../dist/admin-session.js";
+import { createRunnerAdminRouter } from "../dist/runner-admin.js";
+const listen=s=>new Promise((resolve,reject)=>{s.once("error",reject);s.listen(0,"127.0.0.1",()=>resolve(s.address()))});
+const close=s=>new Promise(resolve=>s.close(resolve));
+test("runner admin protects changes and only forwards trusted executable profiles",async t=>{
+ const root=await mkdtemp(join(tmpdir(),"rotoxy-runner-admin-")),oldHome=process.env.HOME,oldConfig=process.env.TOKEN2OAUTH_CONFIG_DIR;
+ process.env.HOME=join(root,"home");process.env.TOKEN2OAUTH_CONFIG_DIR=join(root,"gateway");const cwd=join(root,"work"),binary=join(root,"bin","claude");await mkdir(cwd,{recursive:true});await mkdir(join(root,"bin"),{recursive:true});await writeFile(binary,"#!/bin/sh\nexit 0\n");await chmod(binary,0o700);
+ const store=new StateStore();await store.init({adminPassword:"test-only-password",publicBaseUrl:"http://127.0.0.1/base"});const sessions=new AdminSessions(),sid=sessions.create(60000,adminEpoch(await store.load())),csrf=sessions.csrfToken(sid);let revision="A".repeat(24);const profiles=[];const calls=[];
+ const runner=async(command,args,request,input)=>{calls.push({command,args,request,input});assert.equal(command,"/usr/bin/python3");assert.deepEqual(args.slice(0,2),["-m","snooze.runner_registry"]);const payload=JSON.parse(input);assert.deepEqual(payload.trustedExecutables.claude,[binary]);if(payload.request.action==="read")return JSON.stringify({revision,profiles,trustedExecutables:payload.trustedExecutables});if(payload.request.revision!==revision)return JSON.stringify({error:"revision_conflict"});if(payload.request.action==="add"){profiles.push({...payload.request.profile,probeState:"unverified",probeCheck:null,probeAt:null,probeOutput:""});revision=String.fromCharCode(revision.charCodeAt(0)+1).repeat(24)}return JSON.stringify({revision,profiles,trustedExecutables:payload.trustedExecutables})};
+ const app=express();app.use(createRunnerAdminRouter(store,sessions,{configPath:join(root,"private","registry.json"),supervisorCwd:root,trustedExecutables:{claude:[binary]},commandRunner:runner}).router);const server=createServer(app),address=await listen(server);await store.setConfig("publicBaseUrl",`http://127.0.0.1:${address.port}`);const base=`http://127.0.0.1:${address.port}`,cookie=`t2o_admin=${encodeURIComponent(sid)}`;
+ t.after(async()=>{await close(server);await rm(root,{recursive:true,force:true});if(oldHome===undefined)delete process.env.HOME;else process.env.HOME=oldHome;if(oldConfig===undefined)delete process.env.TOKEN2OAUTH_CONFIG_DIR;else process.env.TOKEN2OAUTH_CONFIG_DIR=oldConfig});
+ assert.equal((await fetch(`${base}/admin/runners`,{redirect:"manual"})).status,302);const before=calls.length;
+ const send=(fields,{origin=`http://127.0.0.1:${address.port}`,token=csrf}={})=>fetch(`${base}/admin/runners`,{method:"POST",redirect:"manual",headers:{cookie,origin,"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({...fields,...(token?{_csrf:token}:{})})});
+ assert.equal((await send({action:"add",revision},{token:""})).status,403);assert.equal(calls.length,before);
+ assert.equal((await send({action:"add",revision},{origin:"https://attacker.invalid"})).status,403);assert.equal(calls.length,before);
+ const page=await fetch(`${base}/admin/runners`,{headers:{cookie}}),html=await page.text();assert.equal(page.status,200);assert.match(html,/not confirm account entitlement, quota, or working inference/);assert.match(html,/Unknown \/ not configured/);assert.match(html,/name="_csrf"/);
+ const result=await send({action:"add",revision,kind:"claude",label:"Local Claude",cwd,binary,enabled:"1",allowedModels:""});assert.equal(result.status,303);const payload=JSON.parse(calls.at(-1).input);assert.equal(payload.request.action,"add");assert.equal(payload.request.profile.binary,binary);assert.deepEqual(payload.request.profile.allowedModels,[]);
+ const count=calls.length;const untrusted=await send({action:"add",revision,kind:"claude",label:"bad",cwd,binary:"/tmp/attacker",enabled:"1",allowedModels:"model"});assert.equal(untrusted.status,400);assert.equal(calls.length,count);
+ const injection=await send({action:"add",revision,kind:"claude",label:"bad",cwd,binary,enabled:"1",allowedModels:"model",extra:"--version;id"});assert.equal(injection.status,400);assert.equal(calls.length,count);
+});
+test("runner registry bridge deadline returns unavailable without hanging",async t=>{
+ const root=await mkdtemp(join(tmpdir(),"rotoxy-runner-bounds-")),oldHome=process.env.HOME,oldConfig=process.env.TOKEN2OAUTH_CONFIG_DIR;process.env.HOME=join(root,"home");process.env.TOKEN2OAUTH_CONFIG_DIR=join(root,"gateway");
+ const store=new StateStore();await store.init({adminPassword:"test-only-password",publicBaseUrl:"http://127.0.0.1"});const sessions=new AdminSessions(),sid=sessions.create(60000,adminEpoch(await store.load())),app=express();app.use(createRunnerAdminRouter(store,sessions,{configPath:join(root,"registry.json"),supervisorCwd:root,timeoutMs:100,commandRunner:async()=>new Promise(()=>{})}).router);const server=createServer(app),address=await listen(server);await store.setConfig("publicBaseUrl",`http://127.0.0.1:${address.port}`);t.after(async()=>{await close(server);await rm(root,{recursive:true,force:true});if(oldHome===undefined)delete process.env.HOME;else process.env.HOME=oldHome;if(oldConfig===undefined)delete process.env.TOKEN2OAUTH_CONFIG_DIR;else process.env.TOKEN2OAUTH_CONFIG_DIR=oldConfig});
+ const response=await fetch(`http://127.0.0.1:${address.port}/admin/runners`,{headers:{cookie:`t2o_admin=${encodeURIComponent(sid)}`}});assert.equal(response.status,503);
+});
