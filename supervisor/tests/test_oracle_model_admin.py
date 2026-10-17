@@ -39,16 +39,17 @@ class OracleModelAdminTests(unittest.TestCase):
             self.assertIn("NoRedirect", script)
             self.assertIn("http://127.0.0.1:11434/api/tags", script)
             self.assertNotIn("POST", script)
-            return {"status": "healthy", "body": {"models": [
+            payload = [
                 {"name": "qwen3.5:9b", "size": 12345, "modified_at": "2026-10-01T00:00:00Z"},
                 {"name": "gpt-oss:20b", "size": 9876, "modified_at": "2026-10-02T00:00:00Z"},
                 {"name": "bad model", "size": 1, "modified_at": "later"},
                 {"name": "x" * 500, "size": 2**80, "modified_at": "later"},
-            ]}}
+            ] + [{"name": f"extra-{index}:1", "size": index, "modified_at": None} for index in range(300)]
+            return {"status": "healthy", "body": {"models": payload}}
         refreshed = models.refresh(self.config, self.db, self.cache, initial["cacheRevision"], probe)
         self.assertEqual([call[0] for call in calls], [host["id"] for host in HOSTS])
         self.assertEqual(refreshed["hosts"][0]["hostStatus"], "healthy")
-        self.assertEqual([m["name"] for m in refreshed["hosts"][0]["models"]], ["qwen3.5:9b", "gpt-oss:20b"])
+        self.assertEqual([m["name"] for m in refreshed["hosts"][0]["models"]], ["qwen3.5:9b", "gpt-oss:20b"] + [f"extra-{i}:1" for i in range(252)])
         self.assertEqual(refreshed["hosts"][0]["models"][0]["size"], 12345)
         self.assertTrue(refreshed["hosts"][0]["observedAt"])
         self.assertEqual(self.cache.stat().st_mode & 0o777, 0o600)
@@ -85,6 +86,14 @@ class OracleModelAdminTests(unittest.TestCase):
         self.assertEqual(blocked["apply"]["blockedReason"], "queue_state_unavailable")
         with self.assertRaisesRegex(ValueError, "request_invalid"):
             models.apply_request(self.config, self.db, self.cache, {"action": "run", "command": "systemctl restart"})
+
+    def test_unknown_queue_status_is_not_treated_as_safe(self):
+        conn = sqlite3.connect(self.db); conn.execute("INSERT INTO pool_tasks VALUES('future','future-state',NULL)"); conn.commit(); conn.close()
+        view = models.snapshot(self.config, self.db, self.cache)
+        self.assertFalse(view["queue"]["available"])
+        self.assertEqual(view["queue"]["reason"], "queue_state_unknown")
+        preview = models.apply_preview(self.config, self.db, self.cache, view["configRevision"])
+        self.assertEqual(preview["apply"]["blockedReason"], "queue_state_unknown")
 
 
 if __name__ == "__main__": unittest.main()
