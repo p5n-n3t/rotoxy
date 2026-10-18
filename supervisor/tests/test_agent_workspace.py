@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -100,7 +101,9 @@ class AgentWorkspaceProcessTests(unittest.TestCase):
         workspace = AgentWorkspace(self.db)
         direct = workspace.read_message("p1", "client:bob", "direct")
         self.assertEqual(direct, {"id": "direct", "sender": "client:alice", "recipient": "client:bob", "taskId": None,
-                                  "text": "Direct bounded message", "createdAt": direct["createdAt"], "acknowledged": False})
+                                  "text": "Direct bounded message", "createdAt": direct["createdAt"], "acknowledged": False,
+                                  "senderContext": {"provider": "reported", "model": None, "accountId": None,
+                                                    "label": "client:alice", "source": "participant_reported"}})
         self.assertEqual(workspace.read_message("p1", "client:alice", "direct")["id"], "direct")
         self.assertEqual(workspace.read_message("p1", "admin:local", "direct")["recipient"], "client:bob")
         self.assertEqual(workspace.read_message("p1", "client:bob", "shared")["text"], "Shared bounded message")
@@ -113,6 +116,39 @@ class AgentWorkspaceProcessTests(unittest.TestCase):
         self.assertEqual(self.snapshot("p2", "client:alice")["messages"], [])
         with self.assertRaisesRegex(WorkspaceError, "message_not_found"):
             workspace.read_message("p2", "client:alice", "direct")
+
+    def test_sender_context_is_a_send_time_snapshot_and_idempotent_replay_is_unchanged(self):
+        self.update("client:alice", {"action": "participant_upsert", "label": "Alice", "provider": "openai",
+                                      "model": "gpt-5", "accountId": "acct-first"})
+        sent = {"action": "message_send", "messageId": "attributed", "to": "all", "text": "Hello"}
+        first = self.update("client:alice", sent, key="send-attributed")
+        original = {"provider": "openai", "model": "gpt-5", "accountId": "acct-first", "label": "Alice",
+                    "source": "participant_reported"}
+        self.assertEqual(self.snapshot("p1", "client:bob")["messages"][0]["senderContext"], original)
+
+        self.update("client:alice", {"action": "participant_upsert", "label": "Alice renamed", "provider": "anthropic",
+                                      "model": "claude-current", "accountId": "acct-current"})
+        replay = self.update("client:alice", sent, key="send-attributed", expected=1)
+        self.assertEqual(replay, first)
+        message = self.snapshot("p1", "client:alice")["messages"][0]
+        self.assertEqual(message["senderContext"], original)
+        self.assertEqual(message["text"], "Hello")
+
+    def test_legacy_message_migration_preserves_row_and_leaves_context_unknown(self):
+        self.db.parent.mkdir(parents=True, mode=0o700)
+        with sqlite3.connect(self.db) as db:
+            db.execute("CREATE TABLE messages(project_id TEXT NOT NULL, id TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, task_id TEXT, text TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(project_id,id))")
+            db.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?)", ("p1", "legacy", "client:alice", "all", None, "Before migration", 1234))
+
+        workspace = AgentWorkspace(self.db)
+        result = workspace.snapshot("p1", "admin:local")
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertEqual(result["messages"][0]["text"], "Before migration")
+        self.assertIsNone(result["messages"][0]["senderContext"])
+        self.assertIsNone(workspace.read_message("p1", "admin:local", "legacy")["senderContext"])
+        # Reopening applies the same migration safely and does not alter the record.
+        AgentWorkspace(self.db)
+        self.assertEqual(workspace.snapshot("p1", "admin:local")["messages"][0]["id"], "legacy")
 
     def test_dependency_claim_is_atomic_and_requires_completion(self):
         self.participant("client:alice")

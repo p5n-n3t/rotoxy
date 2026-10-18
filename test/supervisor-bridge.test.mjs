@@ -275,6 +275,49 @@ test("does not touch a pre-existing socket path and reports child startup failur
   }
 });
 
+test("removes only a same-user stale private socket before starting", async () => {
+  const f = await fixture();
+  try {
+    const staleSocketScript = "import os,socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1],0o600); s.close()";
+    await new Promise((resolve, reject) => {
+      const child = spawn("python3", ["-c", staleSocketScript, f.bridge.socketPath], { stdio: "ignore" });
+      child.once("error", reject);
+      child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`stale socket fixture exited ${code}`)));
+    });
+    const staleSocket = await lstat(f.bridge.socketPath);
+    assert.equal(staleSocket.isSocket(), true);
+
+    await f.bridge.start();
+    assert.equal(f.bridge.status().state, "running");
+    assert.equal((await lstat(f.bridge.socketPath)).isSocket(), true);
+    // Filesystems may reuse an inode immediately; successful bridge startup
+    // proves the formerly unconnectable pathname was replaced by a listener.
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("preserves an active private socket and refuses to replace it", async () => {
+  const f = await fixture();
+  const activeServer = createServer();
+  try {
+    await new Promise((resolve, reject) => {
+      activeServer.once("error", reject);
+      activeServer.listen(f.bridge.socketPath, resolve);
+    });
+    await chmod(f.bridge.socketPath, 0o600);
+    const activeSocket = await lstat(f.bridge.socketPath);
+    await assert.rejects(f.bridge.start(), { code: "socket_path_exists" });
+    const preserved = await lstat(f.bridge.socketPath);
+    assert.equal(preserved.isSocket(), true);
+    assert.equal(preserved.ino, activeSocket.ino);
+    assert.equal(f.child, undefined);
+  } finally {
+    if (activeServer.listening) await new Promise((resolve) => activeServer.close(resolve));
+    await f.cleanup();
+  }
+});
+
 test("marks an unexpected child crash failed and removes only its recorded socket", async () => {
   const f = await fixture();
   try {

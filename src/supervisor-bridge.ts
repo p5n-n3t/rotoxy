@@ -466,8 +466,45 @@ export class SupervisorBridge {
 
   async #assertSocketAbsent(): Promise<void> {
     try {
-      await lstat(this.socketPath);
-      throw new SupervisorBridgeError("socket_path_exists");
+      const existing = await lstat(this.socketPath);
+      const uid = currentUid();
+      // A previous unclean process exit can leave its private Unix socket
+      // pathname behind. Remove only a socket owned by this user, with the
+      // expected permissions, which refuses a connection. Active sockets and
+      // every untrusted path remain fail-closed.
+      if (!existing.isSocket() || (uid !== undefined && existing.uid !== uid) ||
+          (existing.mode & 0o777) !== SOCKET_MODE) {
+        throw new SupervisorBridgeError("socket_path_exists");
+      }
+      const probe = await new Promise<"active" | "stale" | "gone" | "unknown">((resolvePromise) => {
+        const socket = createConnection({ path: this.socketPath });
+        let settled = false;
+        const finish = (result: "active" | "stale" | "gone" | "unknown") => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          socket.destroy();
+          resolvePromise(result);
+        };
+        const timer = setTimeout(() => finish("unknown"), 200);
+        socket.once("connect", () => finish("active"));
+        socket.once("error", (error: NodeJS.ErrnoException) => {
+          if (error.code === "ECONNREFUSED") finish("stale");
+          else if (error.code === "ENOENT") finish("gone");
+          else finish("unknown");
+        });
+      });
+      if (probe === "active" || probe === "unknown") {
+        throw new SupervisorBridgeError("socket_path_exists");
+      }
+      if (probe === "stale") {
+        const current = await lstat(this.socketPath).catch(() => undefined);
+        if (!current || !current.isSocket() || current.dev !== existing.dev || current.ino !== existing.ino ||
+            current.uid !== existing.uid || (current.mode & 0o777) !== SOCKET_MODE) {
+          throw new SupervisorBridgeError("socket_path_exists");
+        }
+        await unlink(this.socketPath).catch(() => { throw new SupervisorBridgeError("socket_path_exists"); });
+      }
     } catch (error) {
       if (error instanceof SupervisorBridgeError) throw error;
       if (!isMissing(error)) throw new SupervisorBridgeError("socket_path_unavailable");

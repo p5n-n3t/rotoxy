@@ -41,6 +41,9 @@ test("renders AW records in the shared page shell with real workflow columns and
   assert.match(html, /artifact_submit/);
   assert.match(html, /review_decide/);
   assert.match(html, /message_send/);
+  assert.match(html, /Conversation/);
+  assert.match(html, /data-conversation-feed/);
+  assert.match(html, /Saved workspace messages are ledger records/);
   assert.match(html, /task_create/);
   assert.match(html, /participant_upsert/);
   assert.match(html, /Pending workspace review/);
@@ -58,6 +61,8 @@ test("renders AW records in the shared page shell with real workflow columns and
 test("posts native bounded forms to the project update route with CSRF, revision, and idempotency", () => {
   const html = renderAgentWorkspace({ ...snapshot, projectId: "project:a" }, { ...options, projectId: "project:a", projects: ["project:a"] });
   assert.match(html, /action="\/token2oauth\/admin\/api\/v1\/agent-workspace\/project%3Aa\/update"/);
+  assert.match(html, /name="messageId" value="[0-9a-f-]{36}"/);
+  assert.doesNotMatch(html, /<label[^>]*>Message ID/);
   assert.match(html, /name="_csrf" value="csrf&lt;&amp;"/);
   assert.match(html, /name="expectedRevision" value="7"/);
   assert.match(html, /name="idempotencyKey" value="[0-9a-f-]{36}"/);
@@ -91,7 +96,7 @@ test("project mismatch and empty snapshots show honest empty states without fore
   const empty = renderAgentWorkspace({ projectId: "project-a", revision: 0 }, options);
   assert.match(empty, /No participants registered yet/);
   assert.match(empty, /No queued, working, blocked, or review tasks reported/);
-  assert.match(empty, /No messages in this project snapshot/);
+  assert.match(empty, /No messages or activity in this project snapshot/);
   assert.match(empty, /No artifacts submitted in this project/);
   assert.match(empty, /Participants<\/dt><dd>0/);
   assert.match(empty, /Execution rows were not included in this snapshot/);
@@ -127,7 +132,7 @@ test("sparse review-only boards use a compact four-state bar and a two-column ta
   assert.equal((html.match(/class="aw-task"/g) ?? []).length, 4);
   assert.doesNotMatch(html, /class="aw-column"/);
   assert.match(html, /<details class="aw-task-description"><summary>Task description<\/summary>/);
-  assert.match(html, /<details class="aw-work-disclosure"><summary>Inbox/);
+  assert.match(html, /<section class="aw-conversation"/);
   assert.match(html, /<details class="aw-work-disclosure"><summary>Activity/);
   assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
   assert.doesNotMatch(html, /<script\b/i);
@@ -165,7 +170,42 @@ test("keeps the nonce-protected refresh poll and explicit unknown execution fiel
   assert.match(html, /Provider unknown/);
   assert.match(html, /<dt>Tasks<\/dt><dd>Unknown<\/dd>/);
   assert.match(html, /location\.reload\(\)/);
-  assert.match(html, /\.closest\("form"\)/);
+  assert.match(html, /data-workspace-feed/);
+});
+
+test("conversation combines persisted messages and activity chronologically with honest sender provenance", () => {
+  const data = structuredClone(snapshot);
+  data.messages[0].text = "Implementation ready for review";
+  data.messages[0].senderContext = { label: "Runner A", provider: "Codex", model: "reported-model", accountId: "acct-a", source: "participant_reported" };
+  data.messages.push({ id: "msg-legacy", from: "client:worker-a", to: "all", text: "legacy message", createdAt: "2026-10-16T10:02:30Z" });
+  data.events = [
+    { seq: 2, revision: 8, actor: "client:worker-a", kind: "task_claimed", entityId: "task-w", at: "2026-10-16T10:03:00Z" },
+    { seq: 1, revision: 7, actor: "client:worker-a", kind: "project_opened", entityId: "task-w", at: "2026-10-16T10:01:00Z" },
+  ];
+  const html = renderAgentWorkspace(data, options);
+  const earlier = html.indexOf("project opened");
+  const message = html.indexOf("Implementation ready for review");
+  const later = html.indexOf("task claimed");
+  assert.ok(earlier < message && message < later, "persisted feed entries are chronological");
+  assert.match(html, /Runner A · Codex · reported-model \(reported\) · Account acct-a/);
+  assert.match(html, /Sender context unknown/);
+  assert.match(html, /data-task-id="task-w"/);
+  assert.match(html, /data-feed-filter/);
+  assert.match(html, /Guide live workers in Supervisor/);
+  assert.doesNotMatch(html, /project opened[^<]*task-w/);
+});
+
+test("live refresh uses text nodes, updates only the feed, and preserves compose drafts and scroll", () => {
+  const html = renderAgentWorkspace(snapshot, { ...options, nonce: "0123456789abcdef" });
+  assert.match(html, /document\.createElement\(tag\)/);
+  assert.match(html, /node\.textContent = typeof value === "string" \? value : ""/);
+  assert.match(html, /feed\.replaceChildren\(fragment\)/);
+  assert.match(html, /feed\.scrollTop = scrollTop/);
+  assert.match(html, /AbortSignal\.timeout\(7500\)/);
+  assert.match(html, /setTimeout\(poll, 5000\)/);
+  assert.match(html, /Math\.min\(30000/);
+  assert.match(html, /data-pause-live/);
+  assert.doesNotMatch(html, /innerHTML/);
 });
 
 test("bounds optional execution and configured-resource metadata to fifty rows", () => {

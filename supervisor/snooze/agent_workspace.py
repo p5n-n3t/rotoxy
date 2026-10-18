@@ -121,6 +121,8 @@ class AgentWorkspace:
                 CREATE TABLE IF NOT EXISTS messages(
                     project_id TEXT NOT NULL, id TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
                     task_id TEXT, text TEXT NOT NULL, created_at INTEGER NOT NULL,
+                    sender_provider TEXT, sender_model TEXT, sender_account_id TEXT, sender_label TEXT,
+                    sender_context_source TEXT,
                     PRIMARY KEY(project_id,id));
                 CREATE TABLE IF NOT EXISTS receipts(
                     project_id TEXT NOT NULL, message_id TEXT NOT NULL, actor TEXT NOT NULL, acked_at INTEGER NOT NULL,
@@ -139,6 +141,12 @@ class AgentWorkspace:
                     digest TEXT NOT NULL, result TEXT NOT NULL,
                     PRIMARY KEY(project_id,actor,idem_key));
             """)
+            # Keep existing workspace databases usable without rewriting or
+            # guessing provenance for messages sent before this schema existed.
+            message_columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
+            for name in ("sender_provider", "sender_model", "sender_account_id", "sender_label", "sender_context_source"):
+                if name not in message_columns:
+                    db.execute(f"ALTER TABLE messages ADD COLUMN {name} TEXT")
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
@@ -183,7 +191,8 @@ class AgentWorkspace:
                 message_sql = "SELECT m.*, EXISTS(SELECT 1 FROM receipts r WHERE r.project_id=m.project_id AND r.message_id=m.id AND r.actor=?) AS acknowledged FROM messages m WHERE m.project_id=?"
                 msg_params = [actor, project]
             messages = [{"id": r["id"], "sender": r["sender"], "recipient": r["recipient"], "taskId": r["task_id"],
-                         "text": r["text"], "createdAt": r["created_at"], "acknowledged": bool(r["acknowledged"])}
+                         "text": r["text"], "createdAt": r["created_at"], "acknowledged": bool(r["acknowledged"]),
+                         "senderContext": self._sender_context(r)}
                         for r in db.execute(message_sql + " ORDER BY created_at DESC,id LIMIT ?", (*msg_params, MAX_PAGE))]
             artifacts = [self._artifact(r) for r in db.execute(
                 "SELECT * FROM artifacts WHERE project_id=? ORDER BY created_at DESC,id LIMIT ?", (project, MAX_PAGE))]
@@ -225,7 +234,16 @@ class AgentWorkspace:
                 raise WorkspaceError("message_not_found")
             return {"id": row["id"], "sender": row["sender"], "recipient": row["recipient"],
                     "taskId": row["task_id"], "text": row["text"], "createdAt": row["created_at"],
-                    "acknowledged": bool(row["acknowledged"])}
+                    "acknowledged": bool(row["acknowledged"]), "senderContext": self._sender_context(row)}
+
+    @staticmethod
+    def _sender_context(row):
+        """Return only send-time reported sender metadata, or None for unknown history."""
+        if not row["sender_context_source"]:
+            return None
+        return {"provider": row["sender_provider"], "model": row["sender_model"],
+                "accountId": row["sender_account_id"], "label": row["sender_label"],
+                "source": row["sender_context_source"]}
 
     @staticmethod
     def _artifact(row):
@@ -374,8 +392,11 @@ class AgentWorkspace:
             if task_id and not db.execute("SELECT 1 FROM tasks WHERE project_id=? AND id=?", (project, task_id)).fetchone():
                 raise WorkspaceError("task_not_found")
             text = _clean_text(_text(value["text"], MAX_TEXT), MAX_TEXT)
-            db.execute("INSERT INTO messages(project_id,id,sender,recipient,task_id,text,created_at) VALUES(?,?,?,?,?,?,?)",
-                       (project, message_id, actor, to, task_id, text, now))
+            sender = db.execute("SELECT label,provider,model,account_id FROM participants WHERE project_id=? AND id=?",
+                                (project, actor)).fetchone()
+            context = (sender["provider"], sender["model"], sender["account_id"], sender["label"], "participant_reported") if sender else (None, None, None, None, None)
+            db.execute("INSERT INTO messages(project_id,id,sender,recipient,task_id,text,created_at,sender_provider,sender_model,sender_account_id,sender_label,sender_context_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (project, message_id, actor, to, task_id, text, now, *context))
             return {"messageId": message_id, "recipient": to}, message_id
         if action == "message_ack":
             message_id = _id(value["messageId"], "message_id")
