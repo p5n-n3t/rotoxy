@@ -2,6 +2,7 @@ import express, { type Request, type Response, type Router } from "express";
 import { AnthropicBedrock, AnthropicBedrockMantle } from "@anthropic-ai/bedrock-sdk";
 import type { StateStore } from "./store.js";
 import { ModelCredentialStore } from "./model-credentials.js";
+import { loadBedrockSettings, type BedrockSettings } from "./bedrock-catalog.js";
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const HARD_MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -61,11 +62,18 @@ function normalizeModels(value: string | string[] | undefined): string[] {
   return models;
 }
 
+function validModelsInput(value: string | string[] | undefined): boolean {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  const models = [...new Set(values.map(model => model.trim()).filter(Boolean))];
+  return models.length <= 100 && models.every(model => model.length <= 160 && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(model));
+}
+
 export function resolveBedrockMessagesConfiguration(options: BedrockMessagesOptions = {}): BedrockMessagesConfiguration | undefined {
   const region = options.region ?? process.env.ROTOXY_BEDROCK_REGION;
-  const models = normalizeModels(options.models ?? process.env.ROTOXY_BEDROCK_MODELS);
+  const modelInput = options.models ?? process.env.ROTOXY_BEDROCK_MODELS;
+  const models = normalizeModels(modelInput);
   const transportValue: unknown = options.transport ?? process.env.ROTOXY_BEDROCK_TRANSPORT ?? "mantle";
-  if (!validRegion(region) || !models.length || (transportValue !== "mantle" && transportValue !== "invoke")) return undefined;
+  if (!validRegion(region) || !validModelsInput(modelInput) || (transportValue !== "mantle" && transportValue !== "invoke")) return undefined;
   const transport = transportValue;
   // Never honor an environment URL override or caller-supplied host. Each
   // official SDK receives the fixed AWS host for its selected transport.
@@ -160,14 +168,52 @@ export function createBedrockMessagesRouter(store: StateStore, options: BedrockM
   const timeoutMs = boundedInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS, 100, HARD_MAX_TIMEOUT_MS);
   const now = options.now ?? Date.now;
   let inFlight = 0;
-  const configuration = resolveBedrockMessagesConfiguration(options);
-  const client = configuration && !process.env[AWS_BEARER_ENV] ? (options.clientFactory ?? ((config) => createBedrockMessagesClient(configuration, config.timeoutMs)))({
-    transport: configuration.transport,
-    region: configuration.region, baseURL: configuration.baseURL, timeoutMs, maxRetries: 0,
-  }) : undefined;
+  const clients = new Map<string, MessageClient>();
+  const effectiveConfiguration = async (): Promise<{ configuration?: BedrockMessagesConfiguration; source: "admin" | "environment" }> => {
+    let configured: BedrockSettings | undefined;
+    try { configured = await loadBedrockSettings(store); }
+    catch { return { configuration: undefined, source: "admin" }; }
+    const source = configured ? "admin" as const : "environment" as const;
+    const input = configured ? { region: configured.region, models: configured.enabledModels, transport: configured.transport } : options;
+    const configuration = resolveBedrockMessagesConfiguration(input);
+    return { configuration, source };
+  };
+  const clientFor = (configuration: BedrockMessagesConfiguration): MessageClient => {
+    const key = `${configuration.transport}:${configuration.region}`;
+    let client = clients.get(key);
+    if (!client) {
+      client = (options.clientFactory ?? ((config) => createBedrockMessagesClient(configuration, config.timeoutMs)))({
+        transport: configuration.transport, region: configuration.region, baseURL: configuration.baseURL, timeoutMs, maxRetries: 0,
+      });
+      clients.set(key, client);
+      // Bound client retention if an operator cycles regions/transports. An
+      // evicted client can still be referenced by a request already in flight.
+      if (clients.size > 8) {
+        const oldest = clients.keys().next().value;
+        if (oldest !== undefined) clients.delete(oldest);
+      }
+    } else {
+      clients.delete(key); clients.set(key, client);
+    }
+    return client;
+  };
   // Both official SDK clients prefer AWS_BEARER_TOKEN_BEDROCK over SigV4.
   // This route permits the standard AWS credential chain only; fail closed.
   const unsafeCredentialMode = Boolean(process.env[AWS_BEARER_ENV]);
+
+  router.get("/providers/claude/v1/models", async (req, res) => {
+    const auth = requestCredential(req);
+    if (auth.conflict || !auth.token || !await credentials.authorizeToken(auth.token, "model:read", now())) {
+      res.setHeader("WWW-Authenticate", 'Bearer realm="rotoxy", scope="model:read"');
+      return jsonError(res, 401, "unauthorized");
+    }
+    const { configuration, source } = await effectiveConfiguration();
+    if (!configuration || unsafeCredentialMode) return jsonError(res, 503, "bedrock_not_configured");
+    return res.set("Cache-Control", "no-store").json({
+      data: configuration.models.map(id => ({ id, object: "model", source: source === "admin" ? "operator_enabled_allowlist" : "environment_enabled_allowlist" })),
+      object: "list", catalog: "configured_source", entitlement: "unknown",
+    });
+  });
 
   router.post("/providers/claude/v1/messages", async (req, res) => {
     const auth = requestCredential(req);
@@ -175,7 +221,8 @@ export function createBedrockMessagesRouter(store: StateStore, options: BedrockM
       res.setHeader("WWW-Authenticate", 'Bearer realm="rotoxy", scope="model:invoke"');
       return jsonError(res, 401, "unauthorized");
     }
-    if (!configuration || !client || unsafeCredentialMode) return jsonError(res, 503, "bedrock_not_configured");
+    const { configuration } = await effectiveConfiguration();
+    if (!configuration || !configuration.models.length || unsafeCredentialMode) return jsonError(res, 503, "bedrock_not_configured");
     if (inFlight >= maxConcurrency) return jsonError(res, 503, "bedrock_capacity_exhausted");
     // Reserve synchronously before body parsing so simultaneous requests cannot
     // all pass the capacity check while their bodies are being read.
@@ -229,7 +276,7 @@ export function createBedrockMessagesRouter(store: StateStore, options: BedrockM
       }
       if (body.stream !== undefined && typeof body.stream !== "boolean") { cleanup(); return jsonError(res, 400, "invalid_request"); }
       serving = true;
-      void serve(req, res, client!, body, controller, () => timedOut, cleanup);
+      void serve(req, res, clientFor(configuration), body, controller, () => timedOut, cleanup);
     });
   });
 

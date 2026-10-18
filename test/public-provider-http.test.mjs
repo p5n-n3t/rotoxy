@@ -58,6 +58,23 @@ test("transport does not follow redirects and bounds response with abort cleanup
   await assert.rejects(pending);
 });
 
+test("catalog GET is opt-in, bodyless, pinned, bounded, and still rejects private DNS", async () => {
+  const resolve = async () => [{ address: "1.1.1.1", family: 4 }];
+  const capture = {};
+  const defaultTransport = createPinnedPublicProviderFetch({ resolve, request: fakeRequest("ok", capture) });
+  await assert.rejects(defaultTransport("https://api.vendor.example/v1/models", { method: "GET" }), /method_invalid/);
+  const transport = createPinnedPublicProviderFetch({ allowGet: true, resolve, request: fakeRequest("ok", capture) });
+  const response = await transport("https://api.vendor.example/v1/models", { method: "GET", headers: { authorization: "Bearer synthetic", accept: "application/json" }, redirect: "error" });
+  assert.equal(response.status, 200);
+  assert.equal(capture.options.method, "GET");
+  await assert.rejects(transport("https://api.vendor.example/v1/models", { method: "GET", body: "{}" }), /method_invalid/);
+  await assert.rejects(transport("https://api.vendor.example/v1/models", { method: "GET", body: new Uint8Array([1]) }), /method_invalid/);
+  let requested = false;
+  const privateDns = createPinnedPublicProviderFetch({ allowGet: true, resolve: async () => [{ address: "127.0.0.1", family: 4 }], request: (...args) => { requested = true; return fakeRequest("ok", {})(...args); } });
+  await assert.rejects(privateDns("https://api.vendor.example/v1/models", { method: "GET" }), /not_public/);
+  assert.equal(requested, false);
+});
+
 
 test("DNS resolution observes abort and the absolute transport deadline", async () => {
   let called = false;

@@ -27,6 +27,7 @@ test('Cloudflare management requires admin and CSRF; inference requires independ
  assert.equal((await run('synthetic-admin')).status,401);assert.equal((await run(read.token)).status,401);assert.equal((await run(invoke.token)).status,403);assert.equal(calls,0);
  assert.equal((await post('update',{_csrf:csrf,id:account.id,label:'Renamed',accountId:account.accountId,enabled:'1',models:'@cf/meta/llama-3.1-8b-instruct'})).status,303);
  assert.equal((await run(invoke.token)).status,200);assert.equal(calls,1);assert.equal(adapter.snapshot().recent[0].accountId,account.id);
- const html=await (await request('/admin/cloudflare',{headers:{cookie:'t2o_admin='+session}})).text();assert.match(html,/Renamed/);assert.doesNotMatch(html,/synthetic-secret-token/);
+ const html=await (await request('/admin/cloudflare',{headers:{cookie:'t2o_admin='+session}})).text();assert.match(html,/Renamed/);assert.doesNotMatch(html,/synthetic-secret-token/);assert.match(html,/data-cf-search/);assert.match(html,/Clear selection/);assert.match(html,/data-cf-count/);assert.match(html,/script nonce=/);
+ assert.equal((await post('update',{_csrf:csrf,id:account.id,label:'Renamed',accountId:account.accountId,enabled:'1'})).status,303);assert.deepEqual((await credentials.listCredentials())[0].allowedModels,[]);assert.equal((await run(invoke.token)).status,403);assert.equal(calls,1);
  assert.equal((await post('remove',{_csrf:csrf,id:account.id})).status,303);assert.equal((await credentials.listCredentials()).length,0);
 });

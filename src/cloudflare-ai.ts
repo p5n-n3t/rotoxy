@@ -241,9 +241,9 @@ export class CloudflareAIAdapter {
     } catch (error) { release(); throw error; }
   }
 
-  private async request(account: { view: CloudflareCredentialView; token: string }, path: string, method: "GET" | "POST", body?: unknown, responseLimit = MAX_INFERENCE_BYTES): Promise<unknown> {
+  private async request(account: { view: CloudflareCredentialView; token: string }, path: string, method: "GET" | "POST", body?: unknown, responseLimit = MAX_INFERENCE_BYTES, timeoutMs = this.timeoutMs): Promise<unknown> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await this.fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${account.view.accountId}${path}`, {
         method, signal: controller.signal, redirect: "error",
@@ -284,7 +284,30 @@ export class CloudflareAIAdapter {
 
   async listModels(): Promise<unknown> {
     const account = await this.acquire();
-    try { return await this.request(account, "/ai/models/search", "GET", undefined, MAX_CATALOG_BYTES); }
+    const names = new Set<string>();
+    const deadline = Date.now() + this.timeoutMs;
+    let truncated = false, pages = 0;
+    try {
+      for (let page = 1; page <= 20; page++) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new CloudflareAIError("upstream_ambiguous");
+        const raw = await this.request(account, `/ai/models/search?page=${page}&per_page=100`, "GET", undefined, MAX_CATALOG_BYTES, remaining) as { result?: unknown; result_info?: { total_pages?: unknown } };
+        if (!raw || !Array.isArray(raw.result)) throw new CloudflareAIError("upstream_rejected");
+        pages++;
+        const before = names.size;
+        for (const row of raw.result) {
+          const name = row && typeof row === "object" ? (row as Record<string, unknown>).name : undefined;
+          if (typeof name === "string" && name.length <= 200 && MODEL.test(name)) names.add(name);
+        }
+        const totalPages = raw.result_info?.total_pages;
+        if (typeof totalPages === "number" && Number.isSafeInteger(totalPages) && totalPages >= 0) {
+          if (page >= totalPages) break;
+        } else if (raw.result.length < 100) break;
+        if (names.size >= 2000 || page === 20 || names.size === before) { truncated = true; break; }
+      }
+      truncated ||= names.size > 2000;
+      return { success: true, result: [...names].slice(0, 2000).map(name => ({ name })), result_info: { count: Math.min(names.size, 2000), pages, truncated } };
+    }
     finally { account.release(); }
   }
 

@@ -9,6 +9,7 @@ import { StateStore } from "../dist/store.js";
 import { ModelCredentialStore } from "../dist/model-credentials.js";
 import { AnthropicBedrock, AnthropicBedrockMantle } from "@anthropic-ai/bedrock-sdk";
 import { createBedrockMessagesRouter, createBedrockMessagesClient, resolveBedrockMessagesConfiguration } from "../dist/bedrock-messages.js";
+import { saveBedrockSettings } from "../dist/bedrock-catalog.js";
 
 async function harness(t, options = {}, fakeCreate = async () => ({ id: "msg_1", type: "message", role: "assistant", model: "anthropic.claude-sonnet-5", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } })) {
   const root = await mkdtemp(join(tmpdir(), "rotoxy-bedrock-messages-"));
@@ -67,7 +68,9 @@ test("resolves only an explicit region and model allowlist into the fixed AWS Be
     transport: "invoke", region: "eu-north-1", models: ["global.anthropic.claude-sonnet-4-6", "global.anthropic.claude-opus-4-6-v1", "global.anthropic.claude-haiku-4-5-20251001-v1:0"],
     baseURL: "https://bedrock-runtime.eu-north-1.amazonaws.com",
   });
-  assert.equal(resolveBedrockMessagesConfiguration({ region: "eu-north-1", models: [] }), undefined);
+  assert.deepEqual(resolveBedrockMessagesConfiguration({ region: "eu-north-1", models: [] }), {
+    transport: "mantle", region: "eu-north-1", models: [], baseURL: "https://bedrock-mantle.eu-north-1.api.aws/anthropic",
+  });
   assert.equal(resolveBedrockMessagesConfiguration({ region: "https://attacker.test", models: ["model"] }), undefined);
   assert.equal(resolveBedrockMessagesConfiguration({ region: "us-east-1", models: ["*", "bad value"] }), undefined);
   assert.equal(resolveBedrockMessagesConfiguration({ region: "eu-north-1", models: ["model"], transport: "other" }), undefined);
@@ -120,10 +123,11 @@ test("honors the exact configured model allowlist and passes tools content block
 test("legacy InvokeModel transport forwards exact documented global model IDs without suffix rewriting", async t => {
   const model = "global.anthropic.claude-sonnet-4-6";
   const h = await harness(t, { transport: "invoke", models: [model, "global.anthropic.claude-opus-4-6-v1", "global.anthropic.claude-haiku-4-5-20251001-v1:0"] }, async input => ({ id: "msg_legacy", model: input.model, type: "message", content: [] }));
-  assert.deepEqual(h.created, [{ transport: "invoke", region: "eu-north-1", baseURL: "https://bedrock-runtime.eu-north-1.amazonaws.com", timeoutMs: 120_000, maxRetries: 0 }]);
+  assert.deepEqual(h.created, []);
   const response = await fetch(h.base + path, { method: "POST", headers: { "x-api-key": h.invoke.token, "content-type": "application/json" }, body: JSON.stringify({ ...requestBody, model }) });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).model, model);
+  assert.deepEqual(h.created, [{ transport: "invoke", region: "eu-north-1", baseURL: "https://bedrock-runtime.eu-north-1.amazonaws.com", timeoutMs: 120_000, maxRetries: 0 }]);
 
   assert.equal(resolveBedrockMessagesConfiguration({ region: "eu-north-1", transport: "invoke", models: [model + "[1m]"] }), undefined,
     "client display suffixes are rejected instead of being silently rewritten to an AWS model ID");
@@ -132,9 +136,10 @@ test("legacy InvokeModel transport forwards exact documented global model IDs wi
 test("uses a bounded one-shot SDK call and sanitizes upstream errors", async t => {
   let calls = 0;
   const h = await harness(t, { timeoutMs: 2000 }, async () => { calls++; throw new Error("AWS secret/credentials/private-prompt must not leak"); });
-  assert.deepEqual(h.created, [{ transport: "mantle", region: "eu-north-1", baseURL: "https://bedrock-mantle.eu-north-1.api.aws/anthropic", timeoutMs: 2000, maxRetries: 0 }]);
+  assert.deepEqual(h.created, []);
   const response = await fetch(h.base + path, { method: "POST", headers: { authorization: `Bearer ${h.invoke.token}`, "content-type": "application/json" }, body: JSON.stringify(requestBody) });
   assert.equal(response.status, 502);
+  assert.deepEqual(h.created, [{ transport: "mantle", region: "eu-north-1", baseURL: "https://bedrock-mantle.eu-north-1.api.aws/anthropic", timeoutMs: 2000, maxRetries: 0 }]);
   const text = await response.text();
   assert.equal(calls, 1);
   assert.match(text, /upstream_failure/);
@@ -159,6 +164,31 @@ test("returns an explicit 503 when Bedrock is unconfigured or AWS bearer-token m
   const response2 = await fetch(`http://127.0.0.1:${server2.address().port}${path}`, { method: "POST", headers: { "x-api-key": h.invoke.token, "content-type": "application/json" }, body: JSON.stringify(requestBody) });
   assert.equal(response2.status, 503);
   assert.equal((await response2.json()).error.message, "bedrock_not_configured");
+});
+
+test("reads the operator allowlist on each request and exposes only that list to model:read", async t => {
+  const h = await harness(t);
+  await saveBedrockSettings(h.store, { region: "eu-north-1", transport: "mantle", enabledModels: ["operator.selected-model"] });
+  const oldModel = await fetch(h.base + path, { method: "POST", headers: { authorization: `Bearer ${h.invoke.token}`, "content-type": "application/json" }, body: JSON.stringify(requestBody) });
+  assert.equal(oldModel.status, 400);
+  assert.equal((await oldModel.json()).error.message, "model_not_allowed");
+  const selected = await fetch(h.base + path, { method: "POST", headers: { authorization: `Bearer ${h.invoke.token}`, "content-type": "application/json" }, body: JSON.stringify({ ...requestBody, model: "operator.selected-model" }) });
+  assert.equal(selected.status, 200);
+  const listed = await fetch(h.base + "/providers/claude/v1/models", { headers: { authorization: `Bearer ${h.readOnly.token}` } });
+  assert.equal(listed.status, 200);
+  assert.deepEqual((await listed.json()).data, [{ id: "operator.selected-model", object: "model", source: "operator_enabled_allowlist" }]);
+  const denied = await fetch(h.base + "/providers/claude/v1/models", { headers: { authorization: `Bearer ${h.invoke.token}` } });
+  assert.equal(denied.status, 401);
+});
+
+test("malformed persisted operator settings fail closed instead of falling back to environment models", async t => {
+  const h = await harness(t);
+  await h.store.update(state => { state.bedrock = { settings: { region: "invalid", transport: "mantle", enabledModels: ["operator.model"] } }; });
+  const listed = await fetch(h.base + "/providers/claude/v1/models", { headers: { authorization: `Bearer ${h.readOnly.token}` } });
+  assert.equal(listed.status, 503);
+  const invoke = await fetch(h.base + path, { method: "POST", headers: { authorization: `Bearer ${h.invoke.token}`, "content-type": "application/json" }, body: JSON.stringify(requestBody) });
+  assert.equal(invoke.status, 503);
+  assert.deepEqual(h.created, []);
 });
 
 test("streams native Anthropic SSE event names and cancels upstream when the client disconnects", async t => {

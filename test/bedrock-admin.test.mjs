@@ -1,0 +1,40 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import express from "express";
+import { createServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { StateStore } from "../dist/store.js";
+import { AdminSessions } from "../dist/admin-session.js";
+import { createBedrockAdminRouter } from "../dist/bedrock-admin.js";
+import { loadBedrockSettings } from "../dist/bedrock-catalog.js";
+
+test("Bedrock admin requires a secure session, same origin, and CSRF before persisting model selection", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "rotoxy-bedrock-admin-"));
+  const oldHome = process.env.HOME, oldConfig = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.HOME = join(dir, "home"); process.env.TOKEN2OAUTH_CONFIG_DIR = join(dir, "config");
+  const store = new StateStore(); await store.init({ adminPassword: "temporary-bedrock-admin-password" });
+  const sessions = new AdminSessions(), token = sessions.create();
+  const app = express(); app.use(createBedrockAdminRouter(store, sessions));
+  const server = createServer(app); await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve)); await rm(dir, { recursive: true, force: true });
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = oldConfig;
+  });
+  const headers = { cookie: `t2o_admin=${token}`, "content-type": "application/x-www-form-urlencoded", origin: "http://127.0.0.1:2030" };
+  const adminPage = await fetch(base + "/admin/bedrock", { headers: { cookie: `t2o_admin=${token}` } });
+  assert.equal(adminPage.headers.get("referrer-policy"), "same-origin");
+  const deniedOrigin = await fetch(base + "/admin/bedrock/save", { method: "POST", headers: { ...headers, origin: "https://attacker.invalid" }, body: "region=us-east-1&transport=mantle&enabledModels=anthropic.claude" });
+  assert.equal(deniedOrigin.status, 403);
+  const nullOrigin = await fetch(base + "/admin/bedrock/save", { method: "POST", headers: { ...headers, origin: "null" }, body: "region=us-east-1&transport=mantle&enabledModels=anthropic.claude" });
+  assert.equal(nullOrigin.status, 403);
+  const deniedCsrf = await fetch(base + "/admin/bedrock/save", { method: "POST", headers, body: "region=us-east-1&transport=mantle&enabledModels=anthropic.claude" });
+  assert.equal(deniedCsrf.status, 403);
+  const csrf = sessions.csrfToken(token);
+  const saved = await fetch(base + "/admin/bedrock/save", { method: "POST", redirect: "manual", headers, body: new URLSearchParams({ _csrf: csrf, region: "us-east-1", transport: "mantle", enabledModels: "anthropic.claude" }) });
+  assert.equal(saved.status, 303);
+  assert.deepEqual(await loadBedrockSettings(store), { region: "us-east-1", transport: "mantle", enabledModels: ["anthropic.claude"] });
+});

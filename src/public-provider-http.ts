@@ -33,6 +33,8 @@ export interface PublicProviderHttpOptions {
   resolve?: (host: string) => Promise<Array<{ address: string; family: number }>>;
   request?: typeof httpsRequest;
   timeoutMs?: number;
+  /** Opt in only for metadata-only catalog GETs; POST remains the default contract. */
+  allowGet?: boolean;
 }
 export function createPinnedPublicProviderFetch(options: PublicProviderHttpOptions = {}): typeof fetch {
   const resolve = options.resolve ?? (async host => dnsLookup(host, { all: true, verbatim: true }));
@@ -61,14 +63,16 @@ export function createPinnedPublicProviderFetch(options: PublicProviderHttpOptio
     const selected = records[0]!;
     const body = typeof init.body === "string" ? init.body : "";
     if (Buffer.byteLength(body, "utf8") > MAX_REQUEST_BYTES) throw new TypeError("request_too_large");
-    if ((init.method ?? "POST") !== "POST") throw new TypeError("method_invalid");
+    const method = init.method ?? "POST";
+    if (method !== "POST" && !(method === "GET" && options.allowGet === true)) throw new TypeError("method_invalid");
+    if (method === "GET" && init.body !== undefined && init.body !== null) throw new TypeError("method_invalid");
     if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
     const headers = new Headers(init.headers);
     if ([...headers.keys()].some(name => !["authorization", "content-type", "accept"].includes(name.toLowerCase()))) throw new TypeError("headers_invalid");
     const response = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }>((resolveResponse, reject) => {
       let request: ClientRequest;
       const requestOptions: RequestOptions = {
-        protocol: "https:", hostname: url.hostname, port: 443, method: init.method ?? "POST", path: `${url.pathname}${url.search}`,
+        protocol: "https:", hostname: url.hostname, port: 443, method, path: `${url.pathname}${url.search}`,
         headers: Object.fromEntries(headers.entries()), servername: url.hostname, rejectUnauthorized: true,
         lookup: ((_host: string, opts: { all?: boolean }, callback: (...args: any[]) => void) => opts?.all ? callback(null, [selected]) : callback(null, selected.address, selected.family)) as RequestOptions["lookup"],
       };

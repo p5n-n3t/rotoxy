@@ -6,6 +6,35 @@ import { join } from "node:path";
 import { StateStore } from "../dist/store.js";
 import { CloudflareAIAdapter, CloudflareAIError, CloudflareCredentialStore } from "../dist/cloudflare-ai.js";
 
+test("Cloudflare catalog pages read-only metadata, preserves selection, and stops repeated pages visibly", async t => {
+  const root = await mkdtemp(join(tmpdir(), "rx-cf-catalog-pages-"));
+  const previous = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.TOKEN2OAUTH_CONFIG_DIR = root;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  });
+  const store = new StateStore(); await store.init({ adminPassword: "synthetic-catalog-test-only" });
+  const credentials = new CloudflareCredentialStore(store);
+  const account = await credentials.addCredential({ label: "Catalog", accountId: "c".repeat(32), token: "synthetic-catalog-key", allowedModels: [] });
+  const rows = Array.from({ length: 100 }, (_, i) => ({ name: `@cf/test/model-${i}` }));
+  const calls = [];
+  const adapter = new CloudflareAIAdapter(credentials, { fetch: async (url, init) => {
+    assert.equal(init.method, "GET"); assert.equal(init.body, undefined);
+    const parsed = new URL(url); calls.push(parsed);
+    assert.equal(parsed.searchParams.get("per_page"), "100");
+    return Response.json({ success: true, result: parsed.searchParams.get("page") === "1" ? rows : [{ name: "@cf/test/last" }], result_info: { total_pages: 2 } });
+  } });
+  const catalog = await adapter.listModels();
+  assert.equal(catalog.result.length, 101); assert.equal(catalog.result_info.truncated, false);
+  assert.deepEqual(calls.map(u => u.searchParams.get("page")), ["1", "2"]);
+  assert.deepEqual((await credentials.listCredentials()).find(a => a.id === account.id).allowedModels, []);
+  let repeatedCalls = 0;
+  const repeated = new CloudflareAIAdapter(credentials, { fetch: async () => { repeatedCalls++; return Response.json({ success: true, result: rows }); } });
+  const partial = await repeated.listModels();
+  assert.equal(repeatedCalls, 2); assert.equal(partial.result.length, 100); assert.equal(partial.result_info.truncated, true);
+});
+
 test("Cloudflare credentials stay encrypted and account-pinned requests honor allowlists, caps, cooldowns, and fair concurrency", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "t2o-cloudflare-ai-"));
   const oldHome = process.env.HOME;
@@ -39,6 +68,7 @@ test("Cloudflare credentials stay encrypted and account-pinned requests honor al
   const calls = [];
   const fakeFetch = async (url, init) => {
     calls.push({ url, init });
+    if (init.method === "GET") return Response.json({ success: true, result: [] });
     if (calls.length === 1) await new Promise((resolve) => { releaseFirst = resolve; });
     return new Response(JSON.stringify({ success: true, result: { response: "ok" } }), { status: 200, headers: { "content-type": "application/json" } });
   };

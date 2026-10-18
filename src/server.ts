@@ -15,6 +15,7 @@ import { createCommandWorkspaceRouter } from "./command-workspace.js";
 import { createUnifiedModelApi } from "./unified-model-api.js";
 import { createProviderPathApi } from "./provider-paths.js";
 import { createBedrockMessagesRouter } from "./bedrock-messages.js";
+import { createBedrockAdminRouter } from "./bedrock-admin.js";
 import { createCloudflareRouter } from "./cloudflare-admin.js";
 import { OracleTools } from "./oracle-tools.js";
 import express from "express";
@@ -82,6 +83,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(modelGateway.router);
   router.use(cloudflare.router);
   router.use(createInferenceProviderAdminRouter(store, sessions).router);
+  router.use(createBedrockAdminRouter(store, sessions));
   router.use(createProviderHubRouter(store, sessions));
   router.use(createControlledBatchAdminRouter(store, sessions).router);
   router.use(createPrivateServiceAdminRouter(store, sessions).router);
