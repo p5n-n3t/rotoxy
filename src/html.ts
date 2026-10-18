@@ -23,21 +23,21 @@ export interface NavGroup { label: string; items: readonly NavItem[] }
  * rendered as unavailable text; never send an operator to a fabricated page.
  */
 export const NAV_GROUPS: readonly NavGroup[] = [
-  { label: "Command", items: [{ key: "agents", label: "Agent workspace", href: "/admin/agents" }, { key: "pool", label: "Overview", href: "/admin" }, { key: "jobs", label: "Jobs", href: "/admin/jobs" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
+  { label: "Command", items: [{ key: "pool", label: "Overview", href: "/admin" }, { key: "agents", label: "Agent workspace", href: "/admin/agents" }, { key: "jobs", label: "Jobs", href: "/admin/jobs" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
   { label: "Resources", items: [
-    { key: "accounts", label: "Agent providers", href: "/admin#accounts" },
+    { key: "accounts", label: "Workspace accounts", href: "/admin#accounts" },
     { key: "models", label: "Models & APIs", href: "/admin/providers" },
-    { key: "codex", label: "ChatGPT accounts", href: "/admin/codex" },
+    { key: "codex", label: "ChatGPT & Codex", href: "/admin/codex" },
     { key: "oracle", label: "Private workers", href: "/admin/oracle" },
     { key: "resources", label: "Search", href: "/admin/resources" },
     { key: "credits", label: "Usage & credits", href: "/admin/credits" },
   ] },
-  { label: "Settings", items: [{ key: "clients", label: "Clients", href: "/admin/models" }, { key: "tools", label: "Tools", href: "/admin/tools" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "routing", label: "Routing", href: "/admin/routing" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
+  { label: "Settings", items: [{ key: "tools", label: "Tools", href: "/admin/tools" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "routing", label: "Routing", href: "/admin/routing" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
 ];
 
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {
   const b = esc(base);
-  const navActive = active === "dispatch-approvals" ? "jobs" : active === "runners" ? "models" : ["cloudflare", "inference"].includes(active) ? "models" : active;
+  const navActive = active === "dispatch-approvals" ? "jobs" : active === "runners" ? "models" : active === "chatgpt-codex" ? "codex" : ["cloudflare", "inference"].includes(active) ? "models" : active;
   const labels: Record<string, string> = { "dispatch-approvals": "Dispatch approvals", runners: "CLI runner profiles", cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map" };
   const current = labels[active] ?? groups.flatMap((group) => group.items).find((item) => item.key === navActive)?.label ?? active;
   const link = (item: NavItem) => item.href

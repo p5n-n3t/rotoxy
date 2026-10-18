@@ -13,9 +13,7 @@ export function createResourceRoutingAdminRouter(store: StateStore, sessions: Ad
   const rulesStore = new ResourceRoutingRulesStore(store);
   const models = new ModelCredentialStore(store);
   const cloudflare = new CloudflareCredentialStore(store);
-  const navGroups = NAV_GROUPS.map((group) => group.label === "Resources"
-    ? { ...group, items: [...group.items, { key: "routing", label: "Routing", href: "/admin/routing" }] }
-    : group);
+  const navGroups = NAV_GROUPS;
 
   router.use("/admin/routing", async (req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
