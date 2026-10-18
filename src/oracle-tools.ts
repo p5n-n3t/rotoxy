@@ -12,7 +12,9 @@ export const ORACLE_MAX_BATCH_STDIN_BYTES = 512 * 1024;
 export const ORACLE_COMMAND_TIMEOUT_MS = 8_000;
 
 const PYTHON = "/usr/bin/python3";
-const HOST_IDS = new Set(["ora1", "ora3", "ora5"]);
+// Match the validated pool registry's IDs. These are returned metadata, never
+// caller-selected SSH destinations; adding a registered host needs no code edit.
+const HOST_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/;
 const TASK_STATES = new Set(["queued", "running", "complete", "failed", "ambiguous", "cancelled"]);
 const SAFE_ERRORS = new Set([
   "queue_full", "retention_full_run_cleanup", "worker_disappeared", "timeout", "transport_exit",
@@ -193,7 +195,7 @@ function safeTaskMetadata(task: Record<string, unknown>, ownedId: string, extern
   if (typeof task.status !== "string" || !TASK_STATES.has(task.status) || typeof task.model !== "string" || !ORACLE_MODELS.includes(task.model as typeof ORACLE_MODELS[number])) {
     throw new OracleToolError("invalid_pool_response");
   }
-  const host = typeof task.assigned_host === "string" && HOST_IDS.has(task.assigned_host) ? task.assigned_host : undefined;
+  const host = typeof task.assigned_host === "string" && HOST_ID.test(task.assigned_host) ? task.assigned_host : undefined;
   const actualModel = typeof task.actual_model === "string" && /^[A-Za-z0-9_.:-]{1,160}$/.test(task.actual_model) ? task.actual_model : undefined;
   const attempts = finiteNonnegative(task.attempts);
   const promptTokens = finiteNonnegative(task.prompt_tokens);
@@ -265,7 +267,7 @@ export class OracleTools {
       const catalog = await this.invoke(["catalog"]);
       if (!isObject(catalog) || !Array.isArray(catalog.hosts)) throw new OracleToolError("invalid_pool_response");
       const hosts = catalog.hosts.flatMap((item) => {
-        if (!isObject(item) || typeof item.id !== "string" || !HOST_IDS.has(item.id)) return [];
+        if (!isObject(item) || typeof item.id !== "string" || !HOST_ID.test(item.id)) return [];
         const models = Array.isArray(item.models) ? item.models.filter((model): model is string => typeof model === "string" && ORACLE_MODELS.includes(model as typeof ORACLE_MODELS[number])) : [];
         const updatedAt = finiteNonnegative(item.updated);
         const errorCode = safeTaskError(item.error_code);

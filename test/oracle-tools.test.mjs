@@ -78,19 +78,21 @@ test("submits prompt on stdin to fixed Python queue and returns safe queued meta
   assert.ok(!JSON.stringify(result).includes("private prompt"));
 });
 
-test("cached catalog never requests refresh and projects only approved models and fixed host IDs", async (t) => {
+test("cached catalog projects approved models and valid registry host IDs without a three-host ceiling", async (t) => {
   const calls = [];
   const tools = await isolatedTools(t, { commandRunner: async (command, args) => {
     calls.push([command, args]);
     return { exitCode: 0, stdout: JSON.stringify({ hosts: [
       { id: "ora1", ip: "private-ip", models: [ORACLE_MODELS[1], "unapproved-model"], updated: 20, assigned: 99 },
-      { id: "unexpected-host", models: [ORACLE_MODELS[0]] },
+      { id: "ora6", models: [ORACLE_MODELS[0]], updated: 21 },
+      { id: "future-worker", models: [ORACLE_MODELS[0]], updated: 22 },
+      { id: "../unexpected-host", models: [ORACLE_MODELS[0]] },
     ] }) };
   } });
   const result = await tools.call("oracle_catalog", {}, "oauth-client-a");
   assert.deepEqual(calls[0][1].slice(-1), ["catalog"]);
   assert.ok(!calls[0][1].includes("--refresh"));
-  assert.deepEqual(result, { hosts: [{ host: "ora1", models: [ORACLE_MODELS[1]], updatedAt: 20 }] });
+  assert.deepEqual(result, { hosts: [{ host: "ora1", models: [ORACLE_MODELS[1]], updatedAt: 20 }, { host: "ora6", models: [ORACLE_MODELS[0]], updatedAt: 21 }, { host: "future-worker", models: [ORACLE_MODELS[0]], updatedAt: 22 }] });
   assert.ok(!JSON.stringify(result).includes("private-ip"));
 });
 

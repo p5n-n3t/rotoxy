@@ -11,12 +11,16 @@ One gateway for authorized AI workspaces, model accounts, search tools and local
 
 The dashboard distinguishes reported values, historical snapshots and unknown metrics. Monitoring survives a closed chat while the service host remains online. Automatic recovery capabilities and client limitations are described in the [consolidation checkpoint](docs/implementation/2026-10-12-rotoxy-release.md) and the [actionable supervision update](docs/implementation/2026-10-12-actionable-supervision.md).
 
+## Connection modes
+
+Use `/mcp` for the agent workspace and orchestration tools, or a provider-specific API path to use one inference pool directly in another application. The [direct provider paths](docs/implementation/provider-paths.md) document OpenAI-compatible pool endpoints. The opt-in [Claude on Bedrock endpoint](docs/implementation/bedrock-messages.md) uses Anthropic Messages; it is separate from running Claude Code as an agent. Both modes share one server and public host. See the [connection contract](docs/architecture/connection-modes.md) for session resource selection and protocol boundaries.
+
 ## Architecture
 
 ~~~text
                               OAuth authorization code + PKCE
 ┌─────────────┐             ┌──────────────────────────────┐
-│ ChatGPT Web │────────────▶│         Token2OAuth          │
+│ MCP client  │────────────▶│            ROTOXY            │
 │             │◀────────────│  OAuth AS + MCP resource     │
 └─────────────┘             │                              │
                             │  adaptive credential pool    │
@@ -60,7 +64,7 @@ The dashboard distinguishes reported values, historical snapshots and unknown me
 Install Node.js 22+, Git, npm and an authenticated Tailscale client first, then run:
 
 ~~~bash
-curl -fsSL https://raw.githubusercontent.com/p5n-n3t/token2oauth/main/install-rotoxy.sh | bash
+curl -fsSL https://raw.githubusercontent.com/p5n-n3t/rotoxy/main/install-rotoxy.sh | bash
 rotoxy up
 ~~~
 

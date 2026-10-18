@@ -13,6 +13,8 @@ import { createInferenceProviderAdminRouter } from "./inference-provider-admin.j
 import { createResourceRoutingAdminRouter } from "./resource-routing-admin.js";
 import { createCommandWorkspaceRouter } from "./command-workspace.js";
 import { createUnifiedModelApi } from "./unified-model-api.js";
+import { createProviderPathApi } from "./provider-paths.js";
+import { createBedrockMessagesRouter } from "./bedrock-messages.js";
 import { createCloudflareRouter } from "./cloudflare-admin.js";
 import { OracleTools } from "./oracle-tools.js";
 import express from "express";
@@ -73,7 +75,10 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const router = express.Router();
   router.use(oauth.router);
   const cloudflare = createCloudflareRouter(store, sessions, modelGateway.credentials);
-  router.use(createUnifiedModelApi(store, { cloudflareAdapter: cloudflare.adapter }).router);
+  const unifiedModelApi = createUnifiedModelApi(store, { cloudflareAdapter: cloudflare.adapter });
+  router.use(createBedrockMessagesRouter(store));
+  router.use(createProviderPathApi(unifiedModelApi.router));
+  router.use(unifiedModelApi.router);
   router.use(modelGateway.router);
   router.use(cloudflare.router);
   router.use(createInferenceProviderAdminRouter(store, sessions).router);

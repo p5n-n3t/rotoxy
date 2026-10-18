@@ -58,6 +58,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "0.35.0",
     "commander": "^14.0.0",
     "express": "^5.1.0"
   },
