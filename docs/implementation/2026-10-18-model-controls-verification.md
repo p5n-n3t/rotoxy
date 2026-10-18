@@ -13,3 +13,5 @@ No paid inference, account-enablement agreement, IAM change, credit purchase, bi
 Remote evidence: `/tmp/rotoxy-direct-provider-apSSEScE/build-catalog-browser.log` and `node-tests-catalog-browser.log` on ORA5. These temporary logs are not a permanent release artifact; the acceptance counts and limitations are recorded here.
 
 Browser round-trips passed after the policy fix: Bedrock saved two selected IDs; OpenRouter saved two manually entered model IDs; Cloudflare cleared the old selection and saved exactly one different model. All used isolated synthetic accounts. Live provider entitlement and inference remain unverified by this milestone.
+
+Fresh package installation smoke passed on ORA5: 553 packaged files, both CLI entrypoints, bundled UI/licenses, private fresh state, Python bridge help, manual startup plan, loopback health, and clean owned-child shutdown.
