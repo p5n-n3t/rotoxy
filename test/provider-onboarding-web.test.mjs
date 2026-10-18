@@ -1,4 +1,5 @@
 import test from "node:test";
+import { Script } from "node:vm";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -79,6 +80,10 @@ test("model-only connection check returns precise redacted failures and never en
   assert.match(html, /Clear entire allowlist/);
   assert.match(html, /unverified until tested/);
   assert.doesNotMatch(html, /synthetic-vendor-token/);
+  // Parse the actual rendered nonce script; catches broken template escaping.
+  const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)];
+  assert.ok(scripts.length > 0);
+  for (const [, code] of scripts) assert.doesNotThrow(() => new Script(code));
   assert.equal((await post("update", { _csrf: csrf, id: account.id, label: "Vendor account", models: "", enabled: "1" })).status, 303);
   assert.deepEqual((await admin.accounts.listAccounts())[0].allowedModels, []);
   const adapter = new OpenAICompatibleInferenceAdapter(admin.accounts, { publicFetch: async () => { requests++; return Response.json({ choices: [] }); } });

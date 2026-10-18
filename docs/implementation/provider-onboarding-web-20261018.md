@@ -59,3 +59,36 @@ Remaining: live provider-specific chat compatibility and entitlement checks requ
 - Full bounded Node test suite (node --test --test-concurrency=3 test/*.test.mjs): 487 passed, 0 failed, 0 cancelled, 0 skipped, runtime 91.7 seconds. Log: /tmp/rotoxy-provider-onboarding-fulltests-bounded-20261018.log. An earlier default-unbounded attempt exhausted local concurrent runner capacity and was not used as acceptance evidence.
 - Real Google Chrome headless rendered the synthetic inference and Cloudflare admin pages at 1280x920 with isolated browser profiles and local temporary state. DOM assertions passed for account labels, model controls and the absence of synthetic secrets. Screenshots: /tmp/rotoxy-provider-inference-20261018.png and /tmp/rotoxy-provider-cloudflare-20261018.png. Manual pixel-level visual inspection was not performed; this is browser rendering/DOM smoke evidence, not a full interactive accessibility audit.
 - Git diff whitespace check: passed before commit. No live provider connections, real tokens or billable inference were used.
+
+## Independent PR review and final integration QA — 2026-10-18
+
+Scope: reviewed existing draft PR #12 in the isolated worktree. Fetched origin/main remained at `813c66fe3fcd1d1805396ba128e85ce5046bab07`; the integration checkout was at that same commit with only its previously existing untracked output images/package artifact. No integration agent files were modified. A non-destructive `git merge-tree --write-tree origin/main HEAD` generated a merge tree without conflicts; the local feature branch still must be reviewed/reconciled against any *future* concurrent changes before merge.
+
+### Findings, fixes and security review
+
+- **High-impact UI regression fixed:** the inference page's inline browser script contained an escaped slash regular expression that became a JavaScript comment when rendered by its TypeScript template string, producing `Unexpected token 'const'`. Consequently, catalog actions were inert despite passing HTTP tests. Replaced that expression with a path-slice based on the known admin route, avoiding string-template escape ambiguity. Added a Node VM regression that compiles the actual rendered inline script. A real Chrome interaction run now passes end to end.
+- **Model selection polish:** manually typed model IDs now redraw visible checkbox state; saved IDs absent from a refreshed Cloudflare catalog are explicitly marked unverified. Both pages have concise three-step mobile-friendly setup instructions and accessible expandable compatibility/billing details.
+- **Security audit:** the new metadata-only OpenAI-compatible checks still require admin session and valid CSRF, use the saved encrypted and origin-bound credentials, send a single bounded GET /models through the existing pinned/public-only HTTPS transport with strict TLS and no redirect, and return only safe status codes/counts. Native Cloudflare catalog discovery remains at the fixed Cloudflare API host with saved encrypted bearer references and no inference POST. Enforced model allowlists and scoped inference credentials are unchanged; test suites include forbidden-host rejection, model gating, CSRF, redaction, and edit/remove tests. No private/tailnet exemption was introduced.
+- **Integration boundaries:** changed files are provider-specific admin routes, the existing model metadata service, an additive optional Cloudflare adapter catalog selector, tests, and this document. No change to supervisor/Oracle/LightSprint/startup/agent workspace, shared navigation, global credentials or production configuration. No schema migration.
+
+### Live browser and build evidence
+
+Local synthetic-only QA used Chrome 155 in headless mode at **1360x900** and **390x844**, exercising:
+- OpenRouter /models discovery, price-backed free filter, select shown, clear entire selection, persistence after submission, and metadata-only connection result. Tested keyboard typing and focus on the mobile search input.
+- Cloudflare disabled-account catalog discovery, searchable model choices, select shown, manually typed model ID, enable/save persistence, and mobile keyboard search interaction.
+- Both routes rendered with **zero browser JavaScript exceptions, no document-level horizontal overflow, no offscreen buttons in view, and no nested vertical scroll traps** at both viewports. Visual screenshots were captured and preview-inspected; this is not an exhaustive assistive technology audit.
+
+Synthetic screenshot directory: `/tmp/rotoxy-provider-review-20261018/` (four full-page screenshots). Browser run details and geometry: `/tmp/rotoxy-provider-review-ui-20261018.json`.
+
+Fresh TypeScript build: PASS, `/tmp/rotoxy-provider-review-build-20261018.log`. Focused post-review tests: 9/9 PASS, `/tmp/rotoxy-provider-review-focused-20261018.log`. Complete Node suite with bounded concurrency 3: **487 passed, 0 failed, 0 cancelled, 0 skipped**, `/tmp/rotoxy-provider-review-fulltests-20261018.log`. All tests/QA used temporary synthetic state and stubbed provider metadata; no live provider API, billable inference, account balance, worker restart or deployment.
+
+Official documentation inspected on 2026-10-18: OpenAI list models, OpenRouter model list with pricing strings, and Cloudflare account-scoped Workers AI Model Search with Workers AI Read or Write bearer token permissions. Their URLs are listed above. Model metadata is not an entitlement or execution guarantee.
+
+### Exact Codex acceptance and remaining actions
+
+1. Fetch `origin/main` and `origin/codex/provider-onboarding-web-20261018` and review [draft PR #12](https://github.com/p5n-n3t/rotoxy/pull/12). Inspect the latest final head SHA on the PR rather than using the original `6747026` review baseline.
+2. Check for newly created uncommitted changes in the integration agent checkout; **do not overwrite them**. Re-run non-destructive conflict analysis before any merge. The review found no conflict at the 2026-10-18 fetched main, but cannot predict future agent edits.
+3. Integrate only after coordinated review. There is no data migration; model allowlists remain authoritative, catalog results remain process-local, and origin-bound credentials must be replaced when the URL changes.
+4. Optional *separately authorized* live metadata/authentication verification can use an operator-approved provider credential. Real model availability and paid inference are **not verified** here. Do not run billable inference, change billing, or consume other accounts during this task.
+
+This remains an isolated source change awaiting Codex merge coordination. Nothing was deployed, restarted, or merged to main.
