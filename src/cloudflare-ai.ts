@@ -282,8 +282,13 @@ export class CloudflareAIAdapter {
     } finally { clearTimeout(timer); }
   }
 
-  async listModels(): Promise<unknown> {
-    const account = await this.acquire();
+  async listModels(accountId?: string): Promise<unknown> {
+    // Explicit admin metadata discovery may inspect disabled accounts; it does not permit inference.
+    const account = accountId === undefined ? await this.acquire() : await (async () => {
+      const credential = await this.credentials.credentialForRequest(accountId);
+      if (!credential) throw new CloudflareAIError("no_eligible_account");
+      return { ...credential, release: () => {} };
+    })();
     const names = new Set<string>();
     const deadline = Date.now() + this.timeoutMs;
     let truncated = false, pages = 0;
