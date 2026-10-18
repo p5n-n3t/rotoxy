@@ -61,25 +61,42 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   catch { throw new TypeError("catalog_invalid"); }
 }
 
-export interface ProviderCatalogOptions { fetch?: typeof globalThis.fetch; timeoutMs?: number }
+export interface ProviderCatalogOptions { fetch?: typeof globalThis.fetch; timeoutMs?: number; allowDisabled?: boolean }
+export type ProviderCatalogFailure = "account_not_found" | "account_disabled" | "credential_replacement_required" |
+  "authentication_rejected" | "models_endpoint_missing" | "catalog_rejected" | "catalog_invalid" |
+  "catalog_too_large" | "catalog_unavailable";
+export class ProviderCatalogError extends Error {
+  constructor(readonly code: ProviderCatalogFailure) { super(code); this.name = "ProviderCatalogError"; }
+}
 
 /** Explicit metadata-only GET. Uses a fixed preset origin and the account's stored credential. */
 export async function fetchProviderModelCatalog(accounts: InferenceProviderStore, accountId: string, options: ProviderCatalogOptions = {}): Promise<ProviderCatalogModel[]> {
-  if (typeof accountId !== "string" || !/^[A-Za-z0-9_-]{8,80}$/.test(accountId)) throw new TypeError("account_not_found");
+  if (typeof accountId !== "string" || !/^[A-Za-z0-9_-]{8,80}$/.test(accountId)) throw new ProviderCatalogError("account_not_found");
   const credential = await accounts.credentialForRequest(accountId);
-  if (!credential || !credential.view.enabled) throw new TypeError("account_not_found");
+  if (!credential) {
+    // Endpoint edits intentionally invalidate origin-bound credentials until replaced.
+    const saved = (await accounts.listAccounts?.() ?? []).find(item => item.id === accountId);
+    throw new ProviderCatalogError(saved ? "credential_replacement_required" : "account_not_found");
+  }
+  if (!credential.view.enabled && !options.allowDisabled) throw new ProviderCatalogError("account_disabled");
   const origin = credential.origin ?? (credential.view.provider === "openai" || credential.view.provider === "openrouter" ? INFERENCE_PROVIDER_PRESETS[credential.view.provider].origin : undefined);
-  if (!origin) throw new TypeError("catalog_provider_unsupported");
+  if (!origin) throw new ProviderCatalogError("catalog_unavailable");
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 15_000);
   try {
-    const response = await (options.fetch ?? createPinnedPublicProviderFetch({ timeoutMs: options.timeoutMs ?? 15_000, allowGet: true }))(`${origin.replace(/\/$/, "")}/models`, {
+    // Custom provider discovery retains pinned DNS/public-IP/TLS controls; never follows redirects.
+    const response = await (options.fetch ?? createPinnedPublicProviderFetch({ timeoutMs: options.timeoutMs ?? 15_000, allowGet: true }))(origin.replace(/\/$/, "") + "/models", {
       method: "GET", redirect: "error", signal: controller.signal,
-      headers: { authorization: `Bearer ${credential.token}`, accept: "application/json" },
+      headers: { authorization: "Bearer " + credential.token, accept: "application/json" },
     });
-    if (!response.ok) { await response.body?.cancel().catch(() => undefined); throw new Error("catalog_upstream_rejected"); }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ProviderCatalogError(response.status === 401 || response.status === 403 ? "authentication_rejected" : response.status === 404 ? "models_endpoint_missing" : "catalog_rejected");
+    }
     return parseProviderModelCatalog(await readBoundedJson(response), credential.view.provider);
   } catch (error) {
-    if (error instanceof RangeError || error instanceof TypeError && error.message === "catalog_invalid") throw error;
-    throw new Error("catalog_unavailable");
+    if (error instanceof ProviderCatalogError) throw error;
+    if (error instanceof RangeError) throw new ProviderCatalogError("catalog_too_large");
+    if (error instanceof TypeError && error.message === "catalog_invalid") throw new ProviderCatalogError("catalog_invalid");
+    throw new ProviderCatalogError("catalog_unavailable");
   } finally { clearTimeout(timer); }
 }
