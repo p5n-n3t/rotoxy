@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore } from "../dist/store.js";
 import { ModelCredentialStore } from "../dist/model-credentials.js";
-import { createBedrockMessagesRouter, resolveBedrockMessagesConfiguration } from "../dist/bedrock-messages.js";
+import { AnthropicBedrock, AnthropicBedrockMantle } from "@anthropic-ai/bedrock-sdk";
+import { createBedrockMessagesRouter, createBedrockMessagesClient, resolveBedrockMessagesConfiguration } from "../dist/bedrock-messages.js";
 
 async function harness(t, options = {}, fakeCreate = async () => ({ id: "msg_1", type: "message", role: "assistant", model: "anthropic.claude-sonnet-5", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } })) {
   const root = await mkdtemp(join(tmpdir(), "rotoxy-bedrock-messages-"));
@@ -15,10 +16,12 @@ async function harness(t, options = {}, fakeCreate = async () => ({ id: "msg_1",
   const oldConfig = process.env.TOKEN2OAUTH_CONFIG_DIR;
   const oldBearer = process.env.AWS_BEARER_TOKEN_BEDROCK;
   const oldBase = process.env.ANTHROPIC_BEDROCK_MANTLE_BASE_URL;
+  const oldTransport = process.env.ROTOXY_BEDROCK_TRANSPORT;
   process.env.HOME = join(root, "home");
   process.env.TOKEN2OAUTH_CONFIG_DIR = join(root, "config");
   delete process.env.AWS_BEARER_TOKEN_BEDROCK;
   delete process.env.ANTHROPIC_BEDROCK_MANTLE_BASE_URL;
+  delete process.env.ROTOXY_BEDROCK_TRANSPORT;
   const store = new StateStore();
   await store.init({ adminPassword: "temporary-bedrock-test-admin-password" });
   const credentials = new ModelCredentialStore(store);
@@ -47,6 +50,7 @@ async function harness(t, options = {}, fakeCreate = async () => ({ id: "msg_1",
     if (oldConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = oldConfig;
     if (oldBearer === undefined) delete process.env.AWS_BEARER_TOKEN_BEDROCK; else process.env.AWS_BEARER_TOKEN_BEDROCK = oldBearer;
     if (oldBase === undefined) delete process.env.ANTHROPIC_BEDROCK_MANTLE_BASE_URL; else process.env.ANTHROPIC_BEDROCK_MANTLE_BASE_URL = oldBase;
+    if (oldTransport === undefined) delete process.env.ROTOXY_BEDROCK_TRANSPORT; else process.env.ROTOXY_BEDROCK_TRANSPORT = oldTransport;
   });
   return { base, store, credentials, invoke, readOnly, created };
 }
@@ -56,12 +60,29 @@ const requestBody = { model: "anthropic.claude-sonnet-5", max_tokens: 64, messag
 
 test("resolves only an explicit region and model allowlist into the fixed AWS Bedrock Mantle URL", () => {
   assert.deepEqual(resolveBedrockMessagesConfiguration({ region: "eu-north-1", models: "anthropic.claude-opus-5-5, anthropic.claude-haiku-5-5" }), {
-    region: "eu-north-1", models: ["anthropic.claude-opus-5-5", "anthropic.claude-haiku-5-5"],
+    transport: "mantle", region: "eu-north-1", models: ["anthropic.claude-opus-5-5", "anthropic.claude-haiku-5-5"],
     baseURL: "https://bedrock-mantle.eu-north-1.api.aws/anthropic",
+  });
+  assert.deepEqual(resolveBedrockMessagesConfiguration({ region: "eu-north-1", models: ["global.anthropic.claude-sonnet-4-6", "global.anthropic.claude-opus-4-6-v1", "global.anthropic.claude-haiku-4-5-20251001-v1:0"], transport: "invoke" }), {
+    transport: "invoke", region: "eu-north-1", models: ["global.anthropic.claude-sonnet-4-6", "global.anthropic.claude-opus-4-6-v1", "global.anthropic.claude-haiku-4-5-20251001-v1:0"],
+    baseURL: "https://bedrock-runtime.eu-north-1.amazonaws.com",
   });
   assert.equal(resolveBedrockMessagesConfiguration({ region: "eu-north-1", models: [] }), undefined);
   assert.equal(resolveBedrockMessagesConfiguration({ region: "https://attacker.test", models: ["model"] }), undefined);
   assert.equal(resolveBedrockMessagesConfiguration({ region: "us-east-1", models: ["*", "bad value"] }), undefined);
+  assert.equal(resolveBedrockMessagesConfiguration({ region: "eu-north-1", models: ["model"], transport: "other" }), undefined);
+  assert.equal(resolveBedrockMessagesConfiguration({ region: "eu-north-1", models: ["model"], transport: "invoke" }).baseURL, "https://bedrock-runtime.eu-north-1.amazonaws.com");
+});
+
+test("selects the Anthropic SDK client matching the configured Bedrock transport without sending a request", () => {
+  const mantle = createBedrockMessagesClient({ transport: "mantle", region: "eu-north-1", models: ["m"], baseURL: "https://bedrock-mantle.eu-north-1.api.aws/anthropic" }, 5000);
+  const invoke = createBedrockMessagesClient({ transport: "invoke", region: "eu-north-1", models: ["m"], baseURL: "https://bedrock-runtime.eu-north-1.amazonaws.com" }, 5000);
+  assert.ok(mantle instanceof AnthropicBedrockMantle);
+  assert.ok(invoke instanceof AnthropicBedrock);
+  assert.equal(mantle.maxRetries, 0);
+  assert.equal(invoke.maxRetries, 0);
+  assert.equal(mantle.baseURL, "https://bedrock-mantle.eu-north-1.api.aws/anthropic");
+  assert.equal(invoke.baseURL, "https://bedrock-runtime.eu-north-1.amazonaws.com");
 });
 
 test("accepts only scoped ROTOXY API key or bearer credentials; rejects conflicts and admin password", async t => {
@@ -96,10 +117,22 @@ test("honors the exact configured model allowlist and passes tools content block
   assert.equal((await denied.json()).error.message, "model_not_allowed");
 });
 
+test("legacy InvokeModel transport forwards exact documented global model IDs without suffix rewriting", async t => {
+  const model = "global.anthropic.claude-sonnet-4-6";
+  const h = await harness(t, { transport: "invoke", models: [model, "global.anthropic.claude-opus-4-6-v1", "global.anthropic.claude-haiku-4-5-20251001-v1:0"] }, async input => ({ id: "msg_legacy", model: input.model, type: "message", content: [] }));
+  assert.deepEqual(h.created, [{ transport: "invoke", region: "eu-north-1", baseURL: "https://bedrock-runtime.eu-north-1.amazonaws.com", timeoutMs: 120_000, maxRetries: 0 }]);
+  const response = await fetch(h.base + path, { method: "POST", headers: { "x-api-key": h.invoke.token, "content-type": "application/json" }, body: JSON.stringify({ ...requestBody, model }) });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).model, model);
+
+  assert.equal(resolveBedrockMessagesConfiguration({ region: "eu-north-1", transport: "invoke", models: [model + "[1m]"] }), undefined,
+    "client display suffixes are rejected instead of being silently rewritten to an AWS model ID");
+});
+
 test("uses a bounded one-shot SDK call and sanitizes upstream errors", async t => {
   let calls = 0;
   const h = await harness(t, { timeoutMs: 2000 }, async () => { calls++; throw new Error("AWS secret/credentials/private-prompt must not leak"); });
-  assert.deepEqual(h.created, [{ region: "eu-north-1", baseURL: "https://bedrock-mantle.eu-north-1.api.aws/anthropic", timeoutMs: 2000, maxRetries: 0 }]);
+  assert.deepEqual(h.created, [{ transport: "mantle", region: "eu-north-1", baseURL: "https://bedrock-mantle.eu-north-1.api.aws/anthropic", timeoutMs: 2000, maxRetries: 0 }]);
   const response = await fetch(h.base + path, { method: "POST", headers: { authorization: `Bearer ${h.invoke.token}`, "content-type": "application/json" }, body: JSON.stringify(requestBody) });
   assert.equal(response.status, 502);
   const text = await response.text();

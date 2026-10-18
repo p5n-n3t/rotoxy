@@ -1,5 +1,5 @@
 import express, { type Request, type Response, type Router } from "express";
-import { AnthropicBedrockMantle } from "@anthropic-ai/bedrock-sdk";
+import { AnthropicBedrock, AnthropicBedrockMantle } from "@anthropic-ai/bedrock-sdk";
 import type { StateStore } from "./store.js";
 import { ModelCredentialStore } from "./model-credentials.js";
 
@@ -12,6 +12,7 @@ const HARD_MAX_CONCURRENCY = 32;
 const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 const HARD_MAX_OUTPUT_TOKENS = 65_536;
 const AWS_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK";
+export type BedrockTransport = "mantle" | "invoke";
 
 type MessageClient = {
   messages: {
@@ -24,8 +25,10 @@ export interface BedrockMessagesOptions {
   region?: string;
   /** Trusted comma-separated or array allowlist. Defaults to ROTOXY_BEDROCK_MODELS. */
   models?: string | string[];
-  /** Tests may inject an SDK-compatible client. Production uses AnthropicBedrockMantle. */
-  clientFactory?: (config: { region: string; baseURL: string; timeoutMs: number; maxRetries: 0 }) => MessageClient;
+  /** Trusted operator-selected Anthropic SDK transport. Defaults to ROTOXY_BEDROCK_TRANSPORT or mantle. */
+  transport?: BedrockTransport;
+  /** Tests may inject an SDK-compatible client. Production selects the official transport client. */
+  clientFactory?: (config: { transport: BedrockTransport; region: string; baseURL: string; timeoutMs: number; maxRetries: 0 }) => MessageClient;
   maxBodyBytes?: number;
   maxConcurrency?: number;
   maxOutputTokens?: number;
@@ -34,6 +37,7 @@ export interface BedrockMessagesOptions {
 }
 
 export type BedrockMessagesConfiguration = {
+  transport: BedrockTransport;
   region: string;
   models: string[];
   baseURL: string;
@@ -60,10 +64,15 @@ function normalizeModels(value: string | string[] | undefined): string[] {
 export function resolveBedrockMessagesConfiguration(options: BedrockMessagesOptions = {}): BedrockMessagesConfiguration | undefined {
   const region = options.region ?? process.env.ROTOXY_BEDROCK_REGION;
   const models = normalizeModels(options.models ?? process.env.ROTOXY_BEDROCK_MODELS);
-  if (!validRegion(region) || !models.length) return undefined;
-  // Never honor an environment URL override or caller-supplied host. SDK client
-  // receives this fixed AWS host and operator-validated region only.
-  return { region, models, baseURL: `https://bedrock-mantle.${region}.api.aws/anthropic` };
+  const transportValue: unknown = options.transport ?? process.env.ROTOXY_BEDROCK_TRANSPORT ?? "mantle";
+  if (!validRegion(region) || !models.length || (transportValue !== "mantle" && transportValue !== "invoke")) return undefined;
+  const transport = transportValue;
+  // Never honor an environment URL override or caller-supplied host. Each
+  // official SDK receives the fixed AWS host for its selected transport.
+  const baseURL = transport === "mantle"
+    ? `https://bedrock-mantle.${region}.api.aws/anthropic`
+    : `https://bedrock-runtime.${region}.amazonaws.com`;
+  return { transport, region, models, baseURL };
 }
 
 function boundedInteger(value: number | undefined, fallback: number, min: number, max: number): number {
@@ -129,16 +138,19 @@ async function writeEvent(res: Response, event: unknown, signal: AbortSignal): P
   return !signal.aborted && !res.destroyed && !res.writableEnded;
 }
 
-function createClient(config: BedrockMessagesConfiguration, timeoutMs: number): MessageClient {
-  return new AnthropicBedrockMantle({
+export function createBedrockMessagesClient(config: BedrockMessagesConfiguration, timeoutMs: number): MessageClient {
+  const common = {
     awsRegion: config.region,
     baseURL: config.baseURL,
     timeout: timeoutMs,
     maxRetries: 0,
-  }) as unknown as MessageClient;
+  } as const;
+  return (config.transport === "invoke"
+    ? new AnthropicBedrock(common)
+    : new AnthropicBedrockMantle(common)) as unknown as MessageClient;
 }
 
-/** Native Anthropic Messages endpoint backed by Bedrock Mantle, gated by a ROTOXY model:invoke token. */
+/** Native Anthropic Messages endpoint backed by the selected Bedrock transport, gated by model:invoke. */
 export function createBedrockMessagesRouter(store: StateStore, options: BedrockMessagesOptions = {}): Router {
   const router = express.Router();
   const credentials = new ModelCredentialStore(store);
@@ -149,11 +161,12 @@ export function createBedrockMessagesRouter(store: StateStore, options: BedrockM
   const now = options.now ?? Date.now;
   let inFlight = 0;
   const configuration = resolveBedrockMessagesConfiguration(options);
-  const client = configuration && !process.env[AWS_BEARER_ENV] ? (options.clientFactory ?? ((config) => createClient(configuration, config.timeoutMs)))({
+  const client = configuration && !process.env[AWS_BEARER_ENV] ? (options.clientFactory ?? ((config) => createBedrockMessagesClient(configuration, config.timeoutMs)))({
+    transport: configuration.transport,
     region: configuration.region, baseURL: configuration.baseURL, timeoutMs, maxRetries: 0,
   }) : undefined;
-  // AnthropicBedrockMantle itself prefers AWS_BEARER_TOKEN_BEDROCK ahead of
-  // role credentials. Do not allow that alternate mode to silently activate.
+  // Both official SDK clients prefer AWS_BEARER_TOKEN_BEDROCK over SigV4.
+  // This route permits the standard AWS credential chain only; fail closed.
   const unsafeCredentialMode = Boolean(process.env[AWS_BEARER_ENV]);
 
   router.post("/providers/claude/v1/messages", async (req, res) => {
