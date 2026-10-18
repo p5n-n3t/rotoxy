@@ -1,5 +1,7 @@
 # Local Codex profile manager — implementation checkpoint
 
+**2026-10-18 update:** The historical delivery record below describes the original increment. Candidate IDs are now ranked by the largest reported usage percentage across the account's quota windows, with a stable ID tie-break. Ranking does not dispatch work or reserve quota. Existing threads remain bound to their original profile. See the [source reuse audit](../research/2026-10-18-codex-reuse-audit.md) for the upstream comparison and the remaining dispatch boundary. Current supported integration guidance is [Codex App Server and Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server); historical limitations below should not be treated as a current blanket prohibition on authorized plan inference.
+
 Branch `codex/rotoxy-codex-profiles-20261012`, based on fetched full commit `a7b7a30545d2fdd90d845a3a2003eaa973926927`. This increment adds a local-user-controlled App Server manager only. Root owns admin routes, UI wiring, profile-selection policy, and task dispatch. No paid turns, operator login, production configuration, or deployment was exercised.
 
 Delivery evidence: implementation commit `7357b3cf82cb2f19b8b64e816916d0a90fb5e0e2` was pushed to `origin/codex/rotoxy-codex-profiles-20261012`; Git confirmed the new remote branch and upstream tracking. This checkpoint is updated by a follow-up commit/push.

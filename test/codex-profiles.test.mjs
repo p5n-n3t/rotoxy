@@ -92,6 +92,32 @@ test("unknown quota, API-key auth, absent model, and stale snapshots are not can
 
 const hIds = {};
 
+test("ranks new-session candidates by the most-used window without changing existing ownership", async (t) => {
+  const usage = new Map();
+  const h = await harness(t, (id, method) => {
+    if (method === "account/read") return { account: { type: "chatgpt" } };
+    if (method === "model/list") return { data: [{ id: "model-a" }] };
+    if (method === "account/rateLimits/read") {
+      const [primary, secondary] = usage.get(id);
+      return { rateLimits: { primary: { usedPercent: primary }, secondary: { usedPercent: secondary } } };
+    }
+    return {};
+  });
+  const nearlyWeeklyLimited = await h.profiles.registerProfile("Low five-hour usage, high weekly usage");
+  const healthy = await h.profiles.registerProfile("More headroom");
+  const equallyHealthy = await h.profiles.registerProfile("Same headroom");
+  usage.set(nearlyWeeklyLimited.id, [1, 95]);
+  usage.set(healthy.id, [30, 40]);
+  usage.set(equallyHealthy.id, [40, 30]);
+  for (const p of [nearlyWeeklyLimited, healthy, equallyHealthy]) await h.profiles.refreshProfile(p.id);
+  await h.profiles.bindThread("existing-thread", nearlyWeeklyLimited.id);
+  assert.deepEqual(await h.profiles.eligibleProfiles("model-a"), [...[healthy.id, equallyHealthy.id].sort(), nearlyWeeklyLimited.id]);
+  assert.equal(await h.profiles.profileForThread("existing-thread"), nearlyWeeklyLimited.id);
+  assert.deepEqual(await h.profiles.eligibleProfiles("model-a", NaN), []);
+  assert.deepEqual(await h.profiles.eligibleProfiles("model-a", Infinity), []);
+  assert.equal(h.calls.some(c => c.method === "thread/start" || c.method === "turn/start"), false);
+});
+
 test("persists thread ownership and refuses cross-profile resume; never chooses a profile implicitly", async (t) => {
   const h = await harness(t); const first = await h.profiles.registerProfile("One"); const second = await h.profiles.registerProfile("Two");
   assert.deepEqual(await h.profiles.eligibleProfiles("any-model"), []);

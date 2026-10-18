@@ -506,10 +506,14 @@ export class CodexProfiles {
     });
   }
 
-  /** Returns candidates only. Caller/operator must explicitly choose the profile; unknown quota is ineligible. */
+  /** Ranks candidates by their most-used quota window. This neither reserves capacity nor dispatches a turn. */
   async eligibleProfiles(modelId: string, maxAgeMs = 5 * 60_000): Promise<string[]> {
     await this.ready(); const now = this.now();
-    return [...this.snapshots.values()].filter((s) => !this.removingProfiles.has(s.profileId) && s.authMode === "chatgpt" && now - s.capturedAt <= maxAgeMs && s.models.some((m) => m.id === modelId) && s.rateWindows.length > 0 && s.rateWindows.every((w) => w.usedPercent !== undefined) && !s.rateWindows.some((w) => w.exhausted)).map((s) => s.profileId);
+    if (!Number.isFinite(maxAgeMs) || maxAgeMs < 0) return [];
+    return [...this.snapshots.values()]
+      .filter((s) => !this.removingProfiles.has(s.profileId) && s.authMode === "chatgpt" && s.capturedAt <= now && now - s.capturedAt <= maxAgeMs && s.models.some((m) => m.id === modelId) && s.rateWindows.length > 0 && s.rateWindows.every((w) => w.usedPercent !== undefined) && !s.rateWindows.some((w) => w.exhausted))
+      .sort((a, b) => Math.max(...a.rateWindows.map(w => w.usedPercent!)) - Math.max(...b.rateWindows.map(w => w.usedPercent!)) || (a.profileId < b.profileId ? -1 : a.profileId > b.profileId ? 1 : 0))
+      .map((s) => s.profileId);
   }
 
   async bindThread(threadId: string, profileId: string): Promise<void> {
