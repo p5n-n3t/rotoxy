@@ -61,7 +61,8 @@ class DesktopAlarmTests(unittest.TestCase):
         result = self._run(alarm)
         self.assertEqual((result.submitted, result.failed, result.ambiguous), (1, 0, 0))
         first_call = json.loads(self.calls.read_text().splitlines()[0])
-        self.assertEqual(first_call[-2:], ["ROTOXY worker alert", "1 worker event need attention."])
+        self.assertEqual(first_call[-2:], ["ROTOXY worker alert", "1 new worker event: 1 failed. Review details in ROTOXY → Supervisor. Counts are events, not unique workers."])
+        self.assertIn("--urgency=critical", first_call)
         self.assertNotIn("secret-project", " ".join(first_call))
         self.assertNotIn("private-job", " ".join(first_call))
         restarted = self._run(self.alarm())
@@ -123,9 +124,21 @@ class DesktopAlarmTests(unittest.TestCase):
         self.assertEqual((second.scanned, second.submitted), (1, 1))
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
         lines = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        self.assertEqual([line[-1] for line in lines], [
-            "100 worker events need attention.", "1 worker event need attention."
-        ])
+        self.assertTrue(all("--urgency=normal" in line for line in lines))
+        self.assertTrue(all(line[-2] == "ROTOXY worker update" for line in lines))
+        self.assertIn("100 new worker events: 100 idle.", lines[0][-1])
+        self.assertIn("1 new worker event: 1 idle.", lines[1][-1])
+
+    def test_mixed_batch_preserves_critical_failure_and_reports_each_kind(self):
+        alarm = self.alarm()
+        self.add_event("idle-1", "idle")
+        self.add_event("failure-1", "failed")
+        self.add_event("approval-1", "needs_approval")
+        result = self._run(alarm)
+        self.assertEqual(result.submitted, 3)
+        call = json.loads(self.calls.read_text().splitlines()[0])
+        self.assertIn("--urgency=critical", call)
+        self.assertIn("1 failed; 1 idle; 1 needs approval", call[-1])
 
     def test_first_install_baselines_old_history_without_alert_storm(self):
         for index in range(2858):

@@ -7,6 +7,7 @@ awakened or that a person saw the notification.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -33,7 +34,6 @@ EVENT_TEXT = {
     "timed_out": "A supervised worker exceeded its time limit.",
     "completed": "A supervised worker completed its task.",
     "cancelled": "A supervised worker was cancelled.",
-    "idle": "A supervised worker is idle and may need attention.",
     "idle": "A supervised worker is idle and may need attention.",
     "instruction": "A supervised worker is waiting for instructions.",
     "approval": "A supervised worker needs approval.",
@@ -250,12 +250,16 @@ class DesktopAlarm:
         if not claimed:
             return AlarmResult(len(events), 0, 0, 0)
         count = len(claimed)
-        body = f"{count} worker event{'s' if count != 1 else ''} need attention."
+        kinds = Counter(event["kind"] for event in claimed)
+        urgent = set(kinds) - {"idle", "completed", "cancelled", "artifact_ready", "job_ready"}
+        summary = "; ".join(f"{number} {kind.replace('_', ' ')}" for kind, number in sorted(kinds.items()))
+        body = (f"{count} new worker event{'s' if count != 1 else ''}: {summary}. "
+                "Review details in ROTOXY → Supervisor. Counts are events, not unique workers.")
         try:
             env = _notification_environment(dict(os.environ))
             result = subprocess.run(
-                [self.executable, "--app-name=ROTOXY", "--urgency=critical",
-                 "ROTOXY worker alert", body],
+                [self.executable, "--app-name=ROTOXY", "--urgency=" + ("critical" if urgent else "normal"),
+                 "ROTOXY worker alert" if urgent else "ROTOXY worker update", body],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, timeout=5, check=False,
                 shell=False, close_fds=True,

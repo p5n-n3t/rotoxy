@@ -14,6 +14,7 @@
     "scripts/desktop-alarm-hook.mjs",
     "assets/brand/*.svg",
     "docs",
+    "skills",
     "supervisor/snooze/*.py",
     "supervisor/snooze/adapters/*.py",
     "supervisor/snooze/static/**",
