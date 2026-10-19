@@ -147,6 +147,8 @@ class RecoveryServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["project"], "project-a")
         self.assertEqual(snapshot["cursor"], 1)
         self.assertEqual(len(snapshot["decisions"]), 1)
+        self.assertEqual(snapshot["decisions"][0]["accountId"], "account-a")
+        self.assertEqual(snapshot["decisions"][0]["sessionId"], "session-a")
         encoded = json.dumps(snapshot)
         self.assertNotIn("project-b", encoded)
         self.assertNotIn("owner-b", encoded)

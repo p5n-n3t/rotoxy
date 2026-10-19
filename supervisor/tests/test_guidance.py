@@ -166,6 +166,9 @@ class GuidanceTests(unittest.TestCase):
         self.assertEqual(snapshot['workers'][0]['reportedModel'],'claude-opus-5-5')
         self.assertEqual(len(snapshot['events']),1)
         self.assertEqual(snapshot['events'][0]['errorCode'],'ACP_RELAY_DIED')
+        self.assertEqual(snapshot['events'][0]['accountId'],'acct-a')
+        self.assertEqual(snapshot['events'][0]['sessionId'],'session-a')
+        self.assertEqual(snapshot['events'][0]['reportedModel'],'claude-opus-5-5')
         self.assertNotIn('prompt', str(snapshot).lower())
         reopened.acknowledge(snapshot['events'][0]['id'],owner='client-a',job='job-a')
         self.assertIsNotNone(reopened.compact_summary(project='job-a',owners=['client-a'])['events'][0]['ackAt'])
@@ -176,6 +179,21 @@ class GuidanceTests(unittest.TestCase):
         self.assertEqual(event['state'],'needs_approval')
         self.assertEqual(self.inbox.inbox()[0]['guidance_state'],'inbox_only')
         self.assertEqual(self.inbox.dispatch_guidance(Pool(),now=2),0)
+
+    def test_summary_counts_distinct_sessions_without_leaking_other_owners(self):
+        for worker, owner, account, session in [
+            ('worker-a','client-a','acct-a','session-a'),
+            ('worker-b','client-b','acct-a','session-a'),
+            ('worker-c','client-c','private-account','private-session'),
+        ]:
+            self.inbox.register(worker=worker, project='job-a', owner=owner,
+                                account=account, session=session, model='gpt-6-luna')
+        snapshot = self.inbox.compact_summary(project='job-a', owners=['client-a','client-b'])
+        self.assertEqual(snapshot['counts']['registrations'], 2)
+        self.assertEqual(snapshot['counts']['distinctSessions'], 1)
+        self.assertEqual(snapshot['counts']['distinctAccounts'], 1)
+        self.assertNotIn('private-account', json.dumps(snapshot))
+        self.assertEqual(len(snapshot['workers']), 2, 'owner bindings remain separate')
 
     def test_error_code_only_stores_safe_class_and_summary_bounds(self):
         self.observe('idle',now=1,errorCode='api_key=private-value')

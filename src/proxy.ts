@@ -620,6 +620,7 @@ export class McpProxy {
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "ROTOXY", version: "0.2.0" },
+        instructions: "ROTOXY provides pooled tools and durable agent coordination. Discover tools/list and use only tools and projects authorized for this client. For delegated work, discover project resources, split useful independent tasks with explicit ownership and dependencies, then submit a bounded job using a stable idempotency key. Choose workers by demonstrated capability, available capacity and budget; do not launch workers simply to fill slots. Preserve account/session affinity and do not retry ambiguous mutations. Keep project/job IDs, read durable status, results and incident inbox, and validate artifacts before reporting completion. Idle does not mean completed; provider execution errors override idle. Workspace messages are ledger records, not proof of native provider delivery. Desktop alerts do not wake a dormant chat. Leave an actionable checkpoint when yielding. The optional rotoxy-orchestrate skill provides the fuller workflow.",
       } });
       return true;
     }

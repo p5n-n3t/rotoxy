@@ -138,6 +138,9 @@ test("job tools are scope-filtered and intercepted before upstream while ordinar
     assert.equal(initResult.protocolVersion, "2025-03-26");
     assert.deepEqual(initResult.capabilities, { tools: { listChanged: false } });
     assert.deepEqual(initResult.serverInfo, { name: "ROTOXY", version: "0.2.0" });
+    assert.match(initResult.instructions, /stable idempotency key/);
+    assert.match(initResult.instructions, /Idle does not mean completed/);
+    assert.match(initResult.instructions, /authorized for this client/);
     const initializedNotice = await mcp(base, readOnly, { jsonrpc: "2.0", method: "notifications/initialized" });
     assert.equal(initializedNotice.status, 204);
 

@@ -302,7 +302,8 @@ class GuidanceInbox:
         owners = list(dict.fromkeys(identity(owner) for owner in owners))
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 20:
             raise ValueError('invalid_page')
-        roster = self.project_workers(project=project, owners=owners)[:100]
+        all_workers = self.project_workers(project=project, owners=owners)
+        roster = all_workers[:100]
         events = []
         for owner in owners:
             events.extend(self.inbox(after=after, owner=owner, job=project, limit=limit + 1 if limit < 100 else limit))
@@ -330,12 +331,18 @@ class GuidanceInbox:
                     'approvalKind': (worker['question'] or {}).get('kind'),
                     'artifactRefs': [], 'usage': {'known': False}, 'capacity': {'known': False},
                 })
+        sessions = {(worker['accountId'], worker['sessionId']) for worker in all_workers}
         return {'project': project, 'workers': summarized,
+                'counts': {'registrations': len(all_workers), 'distinctSessions': len(sessions),
+                           'distinctAccounts': len({account for account, _ in sessions}),
+                           'scope': 'authorized_project_owners'},
                 'events': [{'id': row['id'], 'worker': row['worker'], 'kind': row['kind'],
                             'at': row['at'], 'errorCode': row['errorCode'],
+                            'accountId': row['accountId'], 'sessionId': row['sessionId'],
+                            'reportedModel': row['model'],
                             'ackAt': row['ack_at']} for row in page],
                 'cursor': page[-1]['id'] if page else after, 'hasMore': len(events) > limit,
-                'truncatedWorkers': len(self.project_workers(project=project, owners=owners)) > 100}
+                'truncatedWorkers': len(all_workers) > 100}
 
 def main():
     os.umask(0o077)

@@ -387,7 +387,7 @@ def read_recovery_snapshot(db_path, *, project, owners, after=0, limit=20, oracl
         owner_args = tuple(dict.fromkeys(owners))
         args = (project, *owner_args)
         rows = db.execute(f"""SELECT s.inbox_event_id,s.recovery_event_id,s.state AS source_state,s.processed,s.receipt,
-                    e.kind,e.severity,e.state AS event_state,e.decision,e.created,e.updated
+                    e.kind,e.severity,e.state AS event_state,e.decision,e.created,e.updated,e.account,e.session
                     FROM recovery_service_sources s LEFT JOIN recovery_events e ON e.event_id=s.recovery_event_id
                     WHERE s.project=? AND s.owner IN ({marks}) AND s.inbox_event_id>? ORDER BY s.inbox_event_id DESC LIMIT ?""",
                           (*args, after, limit)).fetchall()
@@ -414,6 +414,7 @@ def read_recovery_snapshot(db_path, *, project, owners, after=0, limit=20, oracl
                     pass
             item = {"eventId": row["recovery_event_id"] or "guidance-" + str(row["inbox_event_id"]),
                     "kind": row["kind"] or "unbound", "state": row["event_state"] or row["source_state"],
+                    "accountId": row["account"], "sessionId": row["session"],
                     "at": row["created"] or row["processed"], "decision": decision}
             if decision or row["recovery_event_id"]:
                 decisions.append(item)
