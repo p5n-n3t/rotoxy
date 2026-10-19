@@ -163,7 +163,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions"], "project");
     const projectId = candidate.projectId, rawClientIds = candidate.clientIds, rawAccountIds = candidate.accountIds, rawSessions = candidate.registeredSessions;
     if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeId) || new Set(rawClientIds).size !== rawClientIds.length ||
-        !Array.isArray(rawAccountIds) || !rawAccountIds.length || rawAccountIds.length > 50 || !rawAccountIds.every(safeId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
+        !Array.isArray(rawAccountIds) || rawAccountIds.length > 50 || !rawAccountIds.every(safeId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
     const accountIds = rawAccountIds as string[];
     const registeredSessions: RegisteredSession[] = rawSessions.map((item: unknown): RegisteredSession => {
       if (!object(item)) throw new Error("Invalid registered session");

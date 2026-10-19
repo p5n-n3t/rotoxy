@@ -277,6 +277,12 @@ test("runtime config rejects permissive fields, missing workspace bindings, and 
   duplicateSession.projects[1].registeredSessions[0].sessionId = "session-a";
   await writeFile(path, JSON.stringify(duplicateSession), { mode: 0o600 });
   await assert.rejects(readSupervisorRuntimeConfig(path), /only one project/);
+  const workspaceOnly = structuredClone(config);
+  workspaceOnly.projects.push({ projectId: "workspace-only", clientIds: ["client-c"], accountIds: [], registeredSessions: [] });
+  await writeFile(path, JSON.stringify(workspaceOnly), { mode: 0o600 });
+  const parsedWorkspaceOnly = await readSupervisorRuntimeConfig(path);
+  assert.deepEqual(parsedWorkspaceOnly.projects.find((project) => project.projectId === "workspace-only"),
+    { projectId: "workspace-only", clientIds: ["client-c"], accountIds: [], registeredSessions: [] });
   await writeFile(path, JSON.stringify(config), { mode: 0o644 });
   await chmod(path, 0o644);
   await assert.rejects(readSupervisorRuntimeConfig(path));
