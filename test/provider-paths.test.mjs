@@ -241,3 +241,31 @@ test("production buildApp wiring serves provider directory and rejects unauthent
   });
   assert.equal(unauthorized.status, 401);
 });
+
+
+test("/pools provider aliases retain provider pinning, catalog auth, and no cross-provider spillover", async t => {
+  const { store, api, calls, base } = await fixture(t);
+  const inference = new InferenceProviderStore(store);
+  await inference.addAccount({ provider: "openai", label: "OpenAI", token: "synthetic-openai-pool-token", allowedModels: ["gpt-test"] });
+  const invoke = await api.modelCredentials.issueToken({ scopes: ["model:invoke"], expiresInSeconds: 3600 });
+  const read = await api.modelCredentials.issueToken({ scopes: ["model:read"], expiresInSeconds: 3600 });
+  const directory = await fetch(base + "/pools");
+  assert.equal(directory.status, 200);
+  assert.ok((await directory.json()).providers.some(p => p.id === "openai"));
+  const listed = await fetch(base + "/pools/openai/v1/models", { headers: { authorization: "Bearer " + read.token } });
+  assert.equal(listed.status, 200);
+  assert.deepEqual((await listed.json()).data.map(row => row.id), ["openai/gpt-test"]);
+  assert.equal((await fetch(base + "/pools/openai/v1/models")).status, 401);
+  const headers = { authorization: "Bearer " + invoke.token, "content-type": "application/json" };
+  const mismatched = await fetch(base + "/pools/openai/v1/chat/completions", {
+    method: "POST", headers, body: JSON.stringify({ model: "openrouter/vendor/model-test", messages: [{ role: "user", content: "hello" }] }),
+  });
+  assert.equal(mismatched.status, 400);
+  assert.equal(calls.length, 0);
+  const allowed = await fetch(base + "/pools/openai/v1/chat/completions", {
+    method: "POST", headers, body: JSON.stringify({ model: "openai/gpt-test", messages: [{ role: "user", content: "hello" }] }),
+  });
+  assert.equal(allowed.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].provider, "openai");
+});

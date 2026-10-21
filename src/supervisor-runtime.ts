@@ -38,9 +38,12 @@ export function runtimeStateRoot(group: RuntimeStateGroup, home = homedir()): st
 export function runtimeStatePath(group: RuntimeStateGroup, ...parts: string[]): string { return join(runtimeStateRoot(group), group, ...parts); }
 type RegisteredSession = { sessionId: string; accountId: string; model: string; workspaceId: string };
 type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[] };
+/** An operator-opted-in shared provider workspace, distinct from project folders. */
+type SharedWorkspacePolicy = { projectId: string; membership: "consented_oauth" };
 export interface SupervisorRuntimeConfig {
   version: 1;
   projects: ProjectPolicy[];
+  sharedWorkspace?: SharedWorkspacePolicy;
   maxWorkers: number;
   allowUnknownQuota: true;
   localLimits: { maxTasks: number; maxJobBytes: number; maxOutputBytes: number };
@@ -152,7 +155,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
   }
   const raw: unknown = JSON.parse(await readFile(absolute, "utf8"));
   if (!object(raw)) throw new Error("Supervisor config must be an object");
-  assertKeys(raw, ["version", "projects", "maxWorkers", "allowUnknownQuota", "localLimits"], "root");
+  assertKeys(raw, ["version", "projects", "sharedWorkspace", "maxWorkers", "allowUnknownQuota", "localLimits"], "root");
   if (raw.version !== 1 || raw.allowUnknownQuota !== true || !Number.isInteger(raw.maxWorkers) || Number(raw.maxWorkers) < 1 || Number(raw.maxWorkers) > 8 || !Array.isArray(raw.projects) || !object(raw.localLimits)) throw new Error("Invalid supervisor config");
   assertKeys(raw.localLimits, ["maxTasks", "maxJobBytes", "maxOutputBytes"], "localLimits");
   if (!Number.isInteger(raw.localLimits.maxTasks) || Number(raw.localLimits.maxTasks) < 1 || Number(raw.localLimits.maxTasks) > 100 ||
@@ -176,9 +179,19 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     return { projectId, clientIds: rawClientIds as string[], accountIds, registeredSessions };
   });
   if (!projects.length || new Set(projects.map((item) => item.projectId)).size !== projects.length) throw new Error("Supervisor config needs unique projects");
+  let sharedWorkspace: SharedWorkspacePolicy | undefined;
+  if (raw.sharedWorkspace !== undefined) {
+    if (!object(raw.sharedWorkspace)) throw new Error("Invalid shared workspace policy");
+    assertKeys(raw.sharedWorkspace, ["projectId", "membership"], "sharedWorkspace");
+    if (!safeId(raw.sharedWorkspace.projectId) || raw.sharedWorkspace.membership !== "consented_oauth" ||
+        !projects.some((project) => project.projectId === (raw.sharedWorkspace as Record<string, unknown>).projectId)) {
+      throw new Error("Shared workspace must reference a configured project and consented OAuth membership");
+    }
+    sharedWorkspace = { projectId: raw.sharedWorkspace.projectId, membership: "consented_oauth" };
+  }
   const sessionIds = projects.flatMap((p) => p.registeredSessions.map((s) => s.sessionId));
   if (new Set(sessionIds).size !== sessionIds.length) throw new Error("A registered session may be owned by only one project");
-  return { version: 1, projects, maxWorkers: Number(raw.maxWorkers), allowUnknownQuota: true,
+  return { version: 1, projects, ...(sharedWorkspace ? { sharedWorkspace } : {}), maxWorkers: Number(raw.maxWorkers), allowUnknownQuota: true,
     localLimits: { maxTasks: Number(raw.localLimits.maxTasks), maxJobBytes: Number(raw.localLimits.maxJobBytes), maxOutputBytes: Number(raw.localLimits.maxOutputBytes) } };
 }
 
@@ -429,7 +442,10 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   async callTool(name: JobToolName, rawArgs: unknown, caller: SupervisorCaller): Promise<unknown> {
     if (this.closed || !this.started) throw new Error("supervisor_not_running");
-    const project = configuredProject(this.config, caller);
+    // Project folder identity never grants or denies shared workspace resources by itself.
+    // Recheck the persisted owner policy and OAuth consent for each operation.
+    await this.authorizeWorkspace(caller.projectId, caller.clientId);
+    const project = this.config.projects.find((row) => row.projectId === caller.projectId)!;
     const args = validateJobToolArguments(name, rawArgs) as Record<string, any>;
     if (args.projectId !== project.projectId) throw new JobInputError("project is not authorized for this OAuth client");
     const owner = this.owner(caller);
@@ -554,13 +570,38 @@ export class SupervisorRuntime implements SupervisorBackend {
     });
   }
 
-  authorizeWorkspace(projectId: string, clientId: string): void {
-    configuredProject(this.config, { projectId, clientId });
+  /** Catch out-of-band admin edits and revocations without requiring a gateway restart. */
+  private async refreshWorkspacePolicy(): Promise<void> {
+    if (this.options.configPath) this.config = await readSupervisorRuntimeConfig(this.options.configPath);
+  }
+
+  /** Registration alone is insufficient: an unexpired, issued OAuth refresh grant proves consent. */
+  private async consentedSharedClient(clientId: string): Promise<boolean> {
+    if (!this.config.sharedWorkspace || !safeId(clientId)) return false;
+    const state = await this.options.store.load();
+    if (!Array.isArray(state.oauthClients) || !state.oauthClients.some((client) => client.clientId === clientId)) return false;
+    return Array.isArray(state.refreshTokens) && state.refreshTokens.some((grant) =>
+      grant.clientId === clientId && typeof grant.expiresAt === "number" && grant.expiresAt > Date.now() &&
+      typeof grant.scope === "string" && grant.scope.split(/\s+/).includes("mcp"));
+  }
+
+  async authorizeWorkspace(projectId: string, clientId: string): Promise<void> {
+    await this.refreshWorkspacePolicy();
+    if (!safeId(projectId) || !safeId(clientId)) throw new JobInputError("project is not authorized for this OAuth client");
+    const project = this.config.projects.find((item) => item.projectId === projectId);
+    if (!project) throw new JobInputError("project is not authorized for this OAuth client");
+    if (project.clientIds.includes(clientId)) return;
+    if (this.config.sharedWorkspace?.projectId === projectId && await this.consentedSharedClient(clientId)) return;
+    throw new JobInputError("project is not authorized for this OAuth client");
   }
 
   async workspaceProjects(clientId: string): Promise<Array<{ projectId: string }>> {
+    await this.refreshWorkspacePolicy();
     if (!safeId(clientId)) return [];
-    return this.config.projects.filter((project) => project.clientIds.includes(clientId)).map(({ projectId }) => ({ projectId }));
+    const shared = this.config.sharedWorkspace;
+    const consented = shared ? await this.consentedSharedClient(clientId) : false;
+    return this.config.projects.filter((project) =>
+      project.clientIds.includes(clientId) || (consented && project.projectId === shared?.projectId)).map(({ projectId }) => ({ projectId }));
   }
 
   private async accessSnapshot(rawConfig?: string, editable = false): Promise<WorkspaceAccessSnapshot> {
@@ -570,6 +611,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       label: redactString(typeof client.clientName === "string" ? client.clientName : "Unnamed client", 120) || "Unnamed client",
     }));
     return {
+      ...(this.config.sharedWorkspace ? { sharedWorkspace: { ...this.config.sharedWorkspace } } : {}),
       projects: this.config.projects.map((project) => ({ projectId: project.projectId, clientIds: [...project.clientIds] })),
       clients,
       revision: workspaceAccessRevision(rawConfig ?? JSON.stringify(this.config), clients),

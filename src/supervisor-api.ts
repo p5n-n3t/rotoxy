@@ -26,6 +26,7 @@ export interface SupervisorControlInput {
 export interface WorkspaceAccessProject { projectId: string; clientIds: string[] }
 export interface WorkspaceAccessClient { clientId: string; label: string }
 export interface WorkspaceAccessSnapshot {
+  sharedWorkspace?: { projectId: string; membership: "consented_oauth" };
   projects: WorkspaceAccessProject[];
   clients: WorkspaceAccessClient[];
   revision: string;

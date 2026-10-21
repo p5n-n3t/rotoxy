@@ -329,8 +329,8 @@ export function renderAgentWorkspace(snapshot: unknown, options: AgentWorkspaceR
   const workspace = projectId ? normalizeWorkspace(snapshot, projectId) : undefined;
   const base = options.base.replace(/\/$/, "");
   const endpoint = projectId ? `${base}/admin/api/v1/agent-workspace/${encodeURIComponent(projectId)}/update` : "";
-  const selectedProject = projectId ? `<option value="${esc(projectId)}" selected>${esc(projectId === "token2oauth" ? "ROTOXY" : projectId)}</option>` : "<option value=\"\" selected>Select a project</option>";
-  const projectSelect = `<form class="aw-project-select" method="get" action="${esc(base)}/admin/agents"><label for="aw-project">Project</label><select id="aw-project" name="project">${selectedProject}${projects.filter((id) => id !== projectId).map((id) => `<option value="${esc(id)}">${esc(id === "token2oauth" ? "ROTOXY" : id)}</option>`).join("")}</select><button type="submit" class="secondary">Open</button></form>`;
+  const selectedProject = projectId ? `<option value="${esc(projectId)}" selected>${esc(projectId === "token2oauth" ? "ROTOXY shared workspace" : projectId)}</option>` : "<option value=\"\" selected>Select a project</option>";
+  const projectSelect = `<form class="aw-project-select" method="get" action="${esc(base)}/admin/agents"><label for="aw-project">Project</label><select id="aw-project" name="project">${selectedProject}${projects.filter((id) => id !== projectId).map((id) => `<option value="${esc(id)}">${esc(id === "token2oauth" ? "ROTOXY shared workspace" : id)}</option>`).join("")}</select><button type="submit" class="secondary">Open</button></form>`;
   const bodyContent = workspace ? (() => {
     const byId = new Map(workspace.participants.map((person) => [person.id, person]));
     const counts = `<dl class="aw-metrics"><div><dt>Participants</dt><dd>${workspace.participants.length}</dd></div><div><dt>Tasks</dt><dd>${workspace.tasks.length}</dd></div><div><dt>Messages</dt><dd>${workspace.messages.length}</dd></div><div><dt>Artifacts</dt><dd>${workspace.artifacts.length}</dd></div><div><dt>Revision</dt><dd>${workspace.revision}</dd></div></dl>`;
