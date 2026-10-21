@@ -29,7 +29,7 @@ function error(res: Response, status: number, code: string): void {
  */
 export function createProviderPathApi(unifiedRouter: RequestHandler) {
   const router = express.Router();
-  router.get("/providers", (_req, res) => res.json({
+  router.get(["/providers", "/pools"], (_req, res) => res.json({
     object: "provider_path_directory",
     providers: [
       ...Object.entries(PATHS).map(([id, value]) => ({ id, path: `/providers/${id}/v1`, protocol: value.protocol, modelPrefix: value.modelPrefix, availability: value.availability })),
@@ -39,7 +39,7 @@ export function createProviderPathApi(unifiedRouter: RequestHandler) {
   }));
 
   router.use((req, res, next) => {
-    const match = /^\/providers\/([A-Za-z0-9_-]+)\/v1\/(models|chat\/completions)$/.exec(req.path);
+    const match = /^\/(?:providers|pools)\/([A-Za-z0-9_-]+)\/v1\/(models|chat\/completions)$/.exec(req.path);
     if (!match) return next();
     const routeId = match[1]!;
     const builtInId = routeId.toLowerCase();

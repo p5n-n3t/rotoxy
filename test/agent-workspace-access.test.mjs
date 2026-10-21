@@ -45,8 +45,8 @@ test("workspace membership edits persist narrowly, reauthorize immediately, and 
   assert.equal(concurrent.filter((result) => result.status === "rejected").length, 1);
   const granted = concurrent.find((result) => result.status === "fulfilled").value;
   assert.deepEqual(await runtime.workspaceProjects("client-c"), [{ projectId: "project-a" }]);
-  assert.doesNotThrow(() => runtime.authorizeWorkspace("project-a", "client-c"));
-  assert.throws(() => runtime.authorizeWorkspace("project-b", "client-c"));
+  await assert.doesNotReject(runtime.authorizeWorkspace("project-a", "client-c"));
+  await assert.rejects(runtime.authorizeWorkspace("project-b", "client-c"));
   await assert.rejects(runtime.updateWorkspaceAccessAdmin({ projectId: "project-a", clientIds: ["client-a"], expectedRevision: before.revision }), /workspace_access_conflict/);
   const savedText = await readFile(configPath, "utf8");
   const saved = JSON.parse(savedText);
@@ -64,7 +64,7 @@ test("workspace membership edits persist narrowly, reauthorize immediately, and 
   assert.deepEqual(await restarted.workspaceProjects("client-c"), [{ projectId: "project-a" }]);
   await restarted.updateWorkspaceAccessAdmin({ projectId: "project-a", clientIds: ["client-a"], expectedRevision: granted.revision });
   assert.deepEqual(await restarted.workspaceProjects("client-c"), []);
-  assert.throws(() => restarted.authorizeWorkspace("project-a", "client-c"));
+  await assert.rejects(restarted.authorizeWorkspace("project-a", "client-c"));
   const revokeAll = await restarted.workspaceAccessAdmin();
   await restarted.updateWorkspaceAccessAdmin({ projectId: "project-a", clientIds: [], expectedRevision: revokeAll.revision });
   const reload = await readSupervisorRuntimeConfig(configPath);
@@ -115,4 +115,51 @@ test("admin access page requires session, CSRF and same-origin; exposes no crede
   const accepted = await fetch(url, { method: "POST", redirect: "manual", headers: { cookie: `t2o_admin=${token}`, "content-type": "application/x-www-form-urlencoded", origin: base }, body: form });
   assert.equal(accepted.status, 303);
   assert.deepEqual(update, { projectId: "project-a", expectedRevision: revision, clientIds: ["client-a"] });
+});
+
+
+test("shared resource workspace admits only OAuth-consented clients, without granting unrelated project access, and reloads external revocation", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "rotoxy-shared-consented-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "supervisor.json");
+  const policy = { ...config, sharedWorkspace: { projectId: "project-a", membership: "consented_oauth" } };
+  await writeFile(configPath, JSON.stringify(policy), { mode: 0o600 });
+  const exp = Date.now() + 3600_000;
+  let grants = [{ clientId: "client-c", expiresAt: exp, scope: "mcp jobs:read jobs:write" }];
+  const store = { async load() { return {
+    oauthClients: [{ clientId: "client-a" }, { clientId: "client-b" }, { clientId: "client-c" }, { clientId: "client-d" }],
+    refreshTokens: grants,
+  }; } };
+  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), { configPath, configDir: dir, store });
+  t.after(() => runtime.close());
+  assert.deepEqual(await runtime.workspaceProjects("client-c"), [{ projectId: "project-a" }]);
+  await assert.doesNotReject(runtime.authorizeWorkspace("project-a", "client-c"));
+  await assert.rejects(runtime.authorizeWorkspace("project-b", "client-c"), /not authorized/);
+  assert.deepEqual(await runtime.workspaceProjects("client-d"), []);
+  await assert.rejects(runtime.authorizeWorkspace("project-a", "client-d"), /not authorized/);
+  // An unauthorized dynamic registration without OAuth authorization must remain denied.
+  grants = [{ clientId: "client-c", expiresAt: Date.now() - 1, scope: "mcp jobs:write" }];
+  assert.deepEqual(await runtime.workspaceProjects("client-c"), []);
+  await assert.rejects(runtime.authorizeWorkspace("project-a", "client-c"), /not authorized/);
+  // A missing MCP scope does not grant shared resources even if the token is otherwise current.
+  grants = [{ clientId: "client-c", expiresAt: exp, scope: "jobs:read jobs:write" }];
+  assert.deepEqual(await runtime.workspaceProjects("client-c"), []);
+  grants = [{ clientId: "client-c", expiresAt: exp, scope: "mcp jobs:read jobs:write" }];
+  // External policy replacement must be effective without restarting the long-running gateway.
+  const revoked = { ...config, projects: config.projects.map(p => ({ ...p })) };
+  await writeFile(configPath, JSON.stringify(revoked), { mode: 0o600 });
+  assert.deepEqual(await runtime.workspaceProjects("client-c"), []);
+  await assert.rejects(runtime.authorizeWorkspace("project-a", "client-c"), /not authorized/);
+});
+
+test("shared workspace policy fails closed on invalid/unrelated project or membership mode", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "rotoxy-shared-invalid-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "supervisor.json");
+  for (const sharedWorkspace of [{ projectId: "unknown", membership: "consented_oauth" },
+      { projectId: "project-a", membership: "any_registered_client" },
+      { projectId: "project-a", membership: "consented_oauth", extra: true }]) {
+    await writeFile(configPath, JSON.stringify({ ...config, sharedWorkspace }), { mode: 0o600 });
+    await assert.rejects(readSupervisorRuntimeConfig(configPath));
+  }
 });
