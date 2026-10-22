@@ -11,6 +11,7 @@ import { LightSprintJobsAdapter } from "./providers/lightsprint-jobs.js";
 import type { StateStore } from "./store.js";
 import type { UpstreamAccount } from "./types.js";
 import { redactString } from "./telemetry.js";
+import { fleetLabel, isPrimaryFleet } from "./fleet-identity.js";
 import { SupervisorBridge, type SupervisorBridgeOptions } from "./supervisor-bridge.js";
 import type { SupervisorBackend, SupervisorCaller, WorkspaceAccessSnapshot, WorkspaceAccessUpdate } from "./supervisor-api.js";
 import type { SupervisorAccountUsage, SupervisorEvent, SupervisorJob, SupervisorSnapshot, SupervisorTask, SupervisorUsage, SupervisorWorker } from "./supervisor-ui.js";
@@ -639,13 +640,17 @@ export class SupervisorRuntime implements SupervisorBackend {
     throw new JobInputError("project is not authorized for this OAuth client");
   }
 
-  async workspaceProjects(clientId: string): Promise<Array<{ projectId: string }>> {
+  async workspaceProjects(clientId: string): Promise<Array<{ projectId: string; label: string; kind: "fleet" | "task_context" }>> {
     await this.refreshWorkspacePolicy();
     if (!safeClientId(clientId)) return [];
     const shared = this.config.sharedWorkspace;
     const consented = shared ? await this.consentedSharedClient(clientId) : false;
     return this.config.projects.filter((project) =>
-      project.clientIds.includes(clientId) || (consented && project.projectId === shared?.projectId)).map(({ projectId }) => ({ projectId }));
+      project.clientIds.includes(clientId) || (consented && project.projectId === shared?.projectId)).map(({ projectId }) => ({
+        projectId,
+        label: fleetLabel(projectId),
+        kind: isPrimaryFleet(projectId) ? "fleet" : "task_context",
+      }));
   }
 
   private async accessSnapshot(rawConfig?: string, editable = false): Promise<WorkspaceAccessSnapshot> {

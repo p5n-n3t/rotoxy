@@ -51,7 +51,7 @@ export interface SupervisorBackend {
   /** Admin-only one-shot message to a configured existing worker session. */
   guidanceAdmin?(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult>;
   /** Read-only discovery limited to projects explicitly authorized for this OAuth client. */
-  workspaceProjects?(clientId: string): Promise<Array<{ projectId: string }>>;
+  workspaceProjects?(clientId: string): Promise<Array<{ projectId: string; label?: string; kind?: "fleet" | "task_context" }>>;
   /** Sanitized project/client membership snapshot for the authenticated admin. */
   workspaceAccessAdmin?(): Promise<WorkspaceAccessSnapshot>;
   /** Explicitly change only one project's OAuth client membership. */

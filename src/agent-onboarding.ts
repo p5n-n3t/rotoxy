@@ -39,12 +39,12 @@ const GUIDE: Record<OnboardingTopic, string> = {
 ## Overview
 ROTOXY is an MCP gateway that pools upstream credentials, enforces tool policy, and provides durable agent-coordination tools when a supervisor is configured. One gateway instance can be shared across multiple client folders and machines.
 
-## Shared workspace
-A ROTOXY gateway can expose shared project resources to clients from different folders and machines. Your token can see only projects authorized for its client ID; project membership, task ownership, scope keys, and budgets still apply. A folder name is task context, not an automatic provider workspace.
+## ROTOXY Fleet access
+ROTOXY has one provider Fleet that can serve authorized clients from different folders and machines. A repository or project identifier is task context for a job, audit trail, budget, and artifact ownership; it does not make a second provider pool. Your token sees only Fleet or task-context records authorized for its client ID. Folder names never grant provider access automatically.
 
 ## Canonical flow
 1. Call tools/list — see every tool authorized for your token.
-2. Call workspace_projects when it appears in tools/list, then use only an authorized project ID. An empty list means the client ID has no project membership. Ask a ROTOXY administrator to grant that client access through the configured administration path, then reconnect and retry. Do not assume access or use another client's authorization.
+2. Call workspace_projects when it appears in tools/list, then use only an authorized Fleet or task-context ID. An empty list means the client ID has no access record. Ask a ROTOXY administrator to grant Fleet access through the configured administration path, then reconnect and retry. Do not assume access or use another client's authorization.
 3. Discover current account health and capacity via live discovery tools. Idle sessions and registered accounts do not prove quota or usable capacity.
 4. Split the objective into independent bounded tasks; assign explicit file or record scope keys, inputs, acceptance criteria, and an artifact destination to each task.
 5. Submit with workspace_dispatch (DAG + ledger) or job_submit (simple jobs). Always use a stable idempotency key.

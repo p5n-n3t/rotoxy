@@ -1,6 +1,8 @@
-# ROTOXY shared provider workspace
+# ROTOXY Fleet access
 
-ROTOXY is the orchestration workspace; project folder names are task context, not provider entitlements. Legacy internal ID token2oauth remains a durable compatibility alias. The UI displays ROTOXY shared workspace without migrating jobs, tasks, or historical records.
+ROTOXY has one provider Fleet/control plane. Repository, folder, and project names are task context for a job, not separate provider workspaces or provider entitlements. The durable internal ID `token2oauth` remains a compatibility key for existing OAuth grants, jobs, and session ownership; user-facing UI calls it **ROTOXY Fleet** without migrating jobs, tasks, or historical records.
+
+Fleet access does not merge project data. A job still records its repository, scope keys, owner, budget, artifacts, and durable event ledger. Semantic memory is kept project-context scoped, with a separate ROTOXY operations memory; credentials, private prompts, and raw provider output do not go into either memory store.
 
 ## One-time OAuth consent
 

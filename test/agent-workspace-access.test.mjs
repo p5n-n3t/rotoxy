@@ -44,7 +44,7 @@ test("workspace membership edits persist narrowly, reauthorize immediately, and 
   assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
   assert.equal(concurrent.filter((result) => result.status === "rejected").length, 1);
   const granted = concurrent.find((result) => result.status === "fulfilled").value;
-  assert.deepEqual(await runtime.workspaceProjects("client-c"), [{ projectId: "project-a" }]);
+  assert.deepEqual(await runtime.workspaceProjects("client-c"), [{ projectId: "project-a", label: "project-a", kind: "task_context" }]);
   await assert.doesNotReject(runtime.authorizeWorkspace("project-a", "client-c"));
   await assert.rejects(runtime.authorizeWorkspace("project-b", "client-c"));
   await assert.rejects(runtime.updateWorkspaceAccessAdmin({ projectId: "project-a", clientIds: ["client-a"], expectedRevision: before.revision }), /workspace_access_conflict/);
@@ -61,7 +61,7 @@ test("workspace membership edits persist narrowly, reauthorize immediately, and 
 
   const restarted = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
   t.after(() => restarted.close());
-  assert.deepEqual(await restarted.workspaceProjects("client-c"), [{ projectId: "project-a" }]);
+  assert.deepEqual(await restarted.workspaceProjects("client-c"), [{ projectId: "project-a", label: "project-a", kind: "task_context" }]);
   await restarted.updateWorkspaceAccessAdmin({ projectId: "project-a", clientIds: ["client-a"], expectedRevision: granted.revision });
   assert.deepEqual(await restarted.workspaceProjects("client-c"), []);
   await assert.rejects(restarted.authorizeWorkspace("project-a", "client-c"));
@@ -76,7 +76,7 @@ test("an in-memory runtime exposes membership read-only and rejects edits withou
   t.after(() => runtime.close());
   const snapshot = await runtime.workspaceAccessAdmin();
   assert.equal(snapshot.editable, false);
-  assert.deepEqual(await runtime.workspaceProjects("client-a"), [{ projectId: "project-a" }]);
+  assert.deepEqual(await runtime.workspaceProjects("client-a"), [{ projectId: "project-a", label: "project-a", kind: "task_context" }]);
   await assert.rejects(runtime.updateWorkspaceAccessAdmin({ projectId: "project-a", clientIds: [], expectedRevision: snapshot.revision }), /workspace_access_not_persisted/);
 });
 
@@ -103,7 +103,7 @@ test("admin access page requires session, CSRF and same-origin; exposes no crede
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("referrer-policy"), "same-origin");
   assert.match(html, /Agent workspace access/);
-  assert.match(html, /no project access until an administrator grants it/);
+  assert.match(html, /Only explicitly authorized OAuth clients can discover or use this task context/);
   assert.doesNotMatch(html, /abcdef1234567890/);
   assert.match(html, /&lt;\/|Bearer \[REDACTED\]/);
 
@@ -132,7 +132,7 @@ test("shared resource workspace admits only OAuth-consented clients, without gra
   }; } };
   const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), { configPath, configDir: dir, store });
   t.after(() => runtime.close());
-  assert.deepEqual(await runtime.workspaceProjects("client-c"), [{ projectId: "project-a" }]);
+  assert.deepEqual(await runtime.workspaceProjects("client-c"), [{ projectId: "project-a", label: "project-a", kind: "task_context" }]);
   await assert.doesNotReject(runtime.authorizeWorkspace("project-a", "client-c"));
   await assert.rejects(runtime.authorizeWorkspace("project-b", "client-c"), /not authorized/);
   assert.deepEqual(await runtime.workspaceProjects("client-d"), []);
