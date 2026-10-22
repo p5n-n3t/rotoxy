@@ -26,6 +26,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   { label: "Command", items: [{ key: "pool", label: "Overview", href: "/admin" }, { key: "agents", label: "Agent workspace", href: "/admin/agents" }, { key: "jobs", label: "Jobs", href: "/admin/jobs" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
   { label: "Resources", items: [
     { key: "accounts", label: "Workspace accounts", href: "/admin#accounts" },
+    { key: "lightsprint-sessions", label: "LightSprint sessions", href: "/admin/lightsprint/sessions" },
     { key: "models", label: "Models & APIs", href: "/admin/providers" },
     { key: "codex", label: "ChatGPT & Codex", href: "/admin/codex" },
     { key: "oracle", label: "Private workers", href: "/admin/oracle" },
@@ -38,7 +39,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {
   const b = esc(base);
   const navActive = active === "dispatch-approvals" ? "jobs" : active === "runners" ? "models" : active === "chatgpt-codex" ? "codex" : ["cloudflare", "inference"].includes(active) ? "models" : active;
-  const labels: Record<string, string> = { "dispatch-approvals": "Dispatch approvals", runners: "CLI runner profiles", cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map" };
+  const labels: Record<string, string> = { "dispatch-approvals": "Dispatch approvals", runners: "CLI runner profiles", cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map", "lightsprint-sessions": "LightSprint session bindings" };
   const current = labels[active] ?? groups.flatMap((group) => group.items).find((item) => item.key === navActive)?.label ?? active;
   const link = (item: NavItem) => item.href
     ? `<a class="nav-link" href="${b}${esc(item.href)}"${navActive === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`

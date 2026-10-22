@@ -36,6 +36,7 @@ import { liveWebToolsConfig, type ConfiguredWebTools } from "./web-tools-config.
 import { createAnalyticsApiRouter } from "./analytics-api.js";
 import { createModelGateway } from "./model-gateway.js";
 import { createControlPlaneAdminRouter } from "./control-plane-admin.js";
+import { createLightSprintSessionBindingsRouter } from "./lightsprint-session-bindings.js";
 
 export interface ServerOptions {
   host?: string;
@@ -51,7 +52,7 @@ export interface ServerOptions {
   webTools?: ConfiguredWebTools;
 }
 
-export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "oracleTools" | "webTools" | "webToolsConfigPath"> = {}) {
+export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "supervisorConfigPath" | "oracleTools" | "webTools" | "webToolsConfigPath"> = {}) {
   await store.init();
   const state = await store.load();
   const sessions = new AdminSessions();
@@ -97,6 +98,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(createOracleModelAdminRouter(store, sessions).router);
   router.use(createResourceRoutingAdminRouter(store, sessions).router);
   router.use(createAgentWorkspaceAccessRouter(store, sessions, options.supervisorBackend));
+  if (options.supervisorConfigPath) router.use(createLightSprintSessionBindingsRouter(store, sessions, { configPath: options.supervisorConfigPath }).router);
   router.use(createAgentWorkspaceRouter(store, sessions, agentWorkspace, renderAgentWorkspace));
   router.use(createCommandWorkspaceRouter(store, sessions, options.supervisorBackend));
   router.use(createJobsAdminRouter(store, sessions, options.supervisorBackend));
@@ -140,7 +142,7 @@ export async function startServer(options: ServerOptions = {}) {
     supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)),
     store,
   }) : undefined;
-  const { app, codexProfiles, agentWorkspace } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath });
+  const { app, codexProfiles, agentWorkspace } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, supervisorConfigPath: options.supervisorConfigPath, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath });
   const host = options.host || process.env.TOKEN2OAUTH_HOST || "127.0.0.1";
   const port = options.port || Number(process.env.TOKEN2OAUTH_PORT || 2030);
 
