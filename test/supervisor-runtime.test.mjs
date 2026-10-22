@@ -117,6 +117,12 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   assert.ok(Array.isArray(supervision.models));
   assert.equal(supervision.recovery.project, "project-a");
   assert.equal(supervision.recovery.available, false, "the scoped snapshot uses the injected temporary recovery database");
+  const paused = await runtime.callTool("job_control", {projectId:"project-a", action:"pause_dispatch"}, caller);
+  assert.equal(paused.projectId,"project-a");
+  assert.equal(paused.state,"paused");
+  const dispatchResumed = await runtime.callTool("job_control", {projectId:"project-a", action:"resume_dispatch"}, caller);
+  assert.equal(dispatchResumed.state,"running");
+  assert.ok(dispatchResumed.revision > paused.revision);
   currentState.accounts.find((account) => account.id === "acct-b").stats.state = "auth-failed";
   const narrowed = await runtime.callTool("job_submit", { ...submission, jobId: "job-two", idempotencyKey: "idem-two", tasks: [submission.tasks[0]] }, caller);
   assert.equal(narrowed.assignmentId, "job-two");
@@ -293,6 +299,53 @@ test("runtime config rejects permissive fields, missing workspace bindings, and 
   await writeFile(path, JSON.stringify(config), { mode: 0o644 });
   await chmod(path, 0o644);
   await assert.rejects(readSupervisorRuntimeConfig(path));
+});
+
+test("reconcile_task action verifies project ownership and passes caller revision without auto-refresh", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-reconcile-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const runtime = new SupervisorRuntime(config, { configDir: dir,
+    supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"),
+    recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"),
+    oracleDbPath: join(dir, "oracle.sqlite"), store });
+  runtime.started = true; // bypass bridge start; bridge.request is fully mocked below
+  const bridgeCalls = [];
+  runtime.bridge.request = async (method, path, body) => {
+    bridgeCalls.push({ method, path, body });
+    if (method === "GET" && path.startsWith("/admin/api/v1/assignments/")) {
+      return { assignmentId: "job-x", projectId: "project-b", revision: 7 };
+    }
+    return {};
+  };
+  // reconcile_task with a job that belongs to project-b must be rejected
+  await assert.rejects(
+    runtime.callTool("job_control", { projectId: "project-a", action: "reconcile_task",
+      jobId: "job-x", taskId: "task-1", expectedRevision: 7 }, caller),
+    /job is not available/,
+  );
+  // The reconcile bridge write must NOT have been called
+  assert.ok(!bridgeCalls.some((c) => c.path.endsWith("/reconcile")),
+    "bridge reconcile route must not be reached on project mismatch");
+  // Now test that a matching project passes the caller-supplied revision (not the fetched one)
+  runtime.bridge.request = async (method, path, body) => {
+    bridgeCalls.push({ method, path, body });
+    if (method === "GET" && path.startsWith("/admin/api/v1/assignments/")) {
+      return { assignmentId: "job-y", projectId: "project-a", revision: 5 };
+    }
+    if (method === "POST" && path.endsWith("/reconcile")) {
+      return { assignmentId: "job-y", taskId: "task-1", state: "awaiting_output", revision: 6 };
+    }
+    return {};
+  };
+  bridgeCalls.length = 0;
+  const result = await runtime.callTool("job_control", { projectId: "project-a", action: "reconcile_task",
+    jobId: "job-y", taskId: "task-1", expectedRevision: 3 }, caller);
+  assert.equal(result.state, "awaiting_output");
+  const reconcileCall = bridgeCalls.find((c) => c.path.endsWith("/reconcile"));
+  assert.ok(reconcileCall, "bridge reconcile route must be called");
+  // Caller-supplied expectedRevision (3) must be passed, not the fetched one (5)
+  assert.equal(reconcileCall.body.expectedRevision, 3, "caller-supplied revision must be forwarded");
+  assert.equal(reconcileCall.body.taskId, "task-1");
 });
 
  test("runtime accepts explicit large worker ceilings and deployed shared membership without inventing sessions", async (t) => {

@@ -25,6 +25,8 @@ Record project, job and worker IDs before yielding. Record requested and provide
 
 Read `job_status`, `job_results`, `job_inbox` and `workspace_sync` as applicable. Let the persistent backend poll; do not keep an LLM running as a timer. Inspect provider errors independently of state: `ACP_RELAY_DIED` is a failure even when the session says idle. Idle is not verified completion. Retrieve and validate the requested output or artifact before completing a task.
 
+If the discovered `job_control` schema supports `reconcile_task`, an authorized owner may request observation of a blocked or ambiguous original execution using its `jobId`, `taskId` and current `expectedRevision`. Read status first. This does not resend instructions, release ownership, change sessions, reset the original monitoring deadline or restart the worker. Re-read status/results afterwards; a queued observation is not completion. Do not retry automatically on stale revision or missing evidence. Older deployments may lack this action; use the documented operator handoff rather than inventing a tool.
+
 For native approvals or questions, use only discovered supported actions within the operator's permissions. Otherwise preserve an actionable handoff. Do not replay an ambiguous mutation or restart a failed paid session blindly. Acknowledge a specific inbox event after recording its disposition; acknowledgement does not fix a worker.
 
 Use `workspace_update` for attributed messages, artifact submission and review decisions, with the current revision and idempotency key. Review approval does not merge a PR. Keep routine updates compact and escalate decisions with the relevant task, account, reported model and evidence.

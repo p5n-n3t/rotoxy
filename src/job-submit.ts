@@ -22,6 +22,7 @@ export interface JobTaskInput {
   execution: { mode: "fresh"; provider: "claude" | "codex" | "auto" | "pi" } | { mode: "existing-session" };
   output: { kind: "text"; maxBytes: number; format: string; expectedMarker: string };
   priority?: number;
+  observationTimeoutSeconds?: number;
 }
 
 export class JobInputError extends Error {
@@ -58,8 +59,14 @@ function scopeKey(value: unknown): string {
 
 function parseTask(raw: unknown): JobTaskInput {
   if (!object(raw)) throw new JobInputError("each task must be an object");
-  only(raw, ["taskId", "dependsOn", "scopeKeys", "inputRef", "inputSha256", "instructions", "execution", "output", "priority"], "task");
+  only(raw, ["taskId", "dependsOn", "scopeKeys", "inputRef", "inputSha256", "instructions", "execution", "output", "priority", "observationTimeoutSeconds"], "task");
   const taskId = id(raw.taskId, "taskId");
+  let observationTimeoutSeconds: number | undefined;
+  if (raw.observationTimeoutSeconds !== undefined) {
+    if (!Number.isInteger(raw.observationTimeoutSeconds) || Number(raw.observationTimeoutSeconds) < 60 || Number(raw.observationTimeoutSeconds) > 604800)
+      throw new JobInputError("observationTimeoutSeconds must be an integer from 60 to 604800");
+    observationTimeoutSeconds = Number(raw.observationTimeoutSeconds);
+  }
   let priority: number | undefined;
   if (raw.priority !== undefined) {
     if (!Number.isInteger(raw.priority) || Number(raw.priority) < -100 || Number(raw.priority) > 100) throw new JobInputError("priority must be an integer from -100 to 100");
@@ -81,7 +88,8 @@ function parseTask(raw: unknown): JobTaskInput {
     if (typeof raw.inputSha256 !== "string" || !HASH.test(raw.inputSha256) || !inputRef) throw new JobInputError("inputSha256 requires inputRef and 64 lowercase hexadecimal characters");
     inputSha256 = raw.inputSha256;
   }
-  const instructions = str(raw.instructions, "instructions", 16_384);
+  if (typeof raw.instructions !== "string" || !raw.instructions.trim() || Buffer.byteLength(raw.instructions, "utf8") > 16_384) throw new JobInputError("instructions must be non-empty and at most 16384 bytes");
+  const instructions = raw.instructions;
   if (!object(raw.execution)) throw new JobInputError("execution must be an object");
   let execution: JobTaskInput["execution"];
   if (raw.execution.mode === "fresh") {
@@ -97,7 +105,7 @@ function parseTask(raw: unknown): JobTaskInput {
   const expectedMarker = str(raw.output.expectedMarker, "expectedMarker", 256);
   if (/[\r\n\0]/.test(expectedMarker) || expectedMarker !== expectedMarker.trim()) throw new JobInputError("expectedMarker must be a single exact, trimmed line of at most 256 characters");
   const output: JobTaskInput["output"] = { kind: "text", maxBytes: Number(raw.output.maxBytes), format: str(raw.output.format, "text format", 64), expectedMarker };
-  return { taskId, dependsOn, scopeKeys, inputRef, inputSha256, instructions, execution, output, priority };
+  return { taskId, dependsOn, scopeKeys, inputRef, inputSha256, instructions, execution, output, priority, ...(observationTimeoutSeconds === undefined ? {} : {observationTimeoutSeconds}) };
 }
 
 export function validateJobSubmission(value: unknown): JobSubmission {
@@ -167,6 +175,7 @@ export const JOB_TOOL_DEFINITIONS = [
       properties: {
         taskId: jobKey, dependsOn: { type: "array", maxItems: 8, items: jobKey }, priority: { type: "integer", minimum: -100, maximum: 100 }, scopeKeys: { type: "array", minItems: 1, maxItems: 32, uniqueItems: true, items: { type: "string", maxLength: 512 } },
         inputRef: { type: "string", minLength: 1, maxLength: 2048 }, inputSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        observationTimeoutSeconds: { type: "integer", minimum: 60, maximum: 604800, description: "Monitoring deadline only; expiry requires reconciliation and does not cancel the upstream worker. Default six hours." },
         instructions: { type: "string", minLength: 1, maxLength: 16384 },
         execution: { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { const: "existing-session" } } },
         output: { type: "object", additionalProperties: false, required: ["kind", "maxBytes", "format", "expectedMarker"], properties: {
@@ -178,7 +187,7 @@ export const JOB_TOOL_DEFINITIONS = [
   tool("job_status", "Read one job's state for an authorized project.", { projectId: jobKey, jobId: jobKey }, ["projectId", "jobId"]),
   tool("job_workers", "Read bounded worker/account observations for an authorized project.", { projectId: jobKey }, ["projectId"]),
   tool("job_results", "Read bounded results for an authorized job/task.", { projectId: jobKey, jobId: jobKey, taskId: jobKey }, ["projectId", "jobId"]),
-  tool("job_control", "Apply an allowlisted durable pause, stop, resume, or cancellation action.", { projectId: jobKey, action: { type: "string", enum: ["pause_dispatch", "resume_dispatch", "emergency_stop", "cancel_job"] }, jobId: jobKey }, ["projectId", "action"]),
+  tool("job_control", "Apply an allowlisted durable pause, stop, resume, cancellation, or task reconciliation action.", { projectId: jobKey, action: { type: "string", enum: ["pause_dispatch", "resume_dispatch", "emergency_stop", "cancel_job", "reconcile_task"] }, jobId: jobKey, taskId: jobKey, expectedRevision: { type: "integer", minimum: 1 } }, ["projectId", "action"]),
   tool("job_inbox", "Read the caller's bounded durable incident inbox.", { projectId: jobKey, after: { type: "string", maxLength: 128 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, ["projectId"]),
   tool("job_inbox_ack", "Acknowledge one event in the caller's durable project inbox.", {
     projectId: jobKey, eventId: { type: "string", pattern: "^(?:repo|job):[1-9][0-9]{0,18}$", maxLength: 24 },
@@ -198,7 +207,7 @@ export function validateJobToolArguments(name: JobToolName, value: unknown): unk
   if (!object(value)) throw new JobInputError("tool arguments must be an object");
   const allowed: Record<Exclude<JobToolName, "job_submit">, string[]> = {
     job_status: ["projectId", "jobId"], job_workers: ["projectId"], job_results: ["projectId", "jobId", "taskId"],
-    job_control: ["projectId", "action", "jobId"], job_inbox: ["projectId", "after", "limit"],
+    job_control: ["projectId", "action", "jobId", "taskId", "expectedRevision"], job_inbox: ["projectId", "after", "limit"],
     job_inbox_ack: ["projectId", "eventId"],
   };
   only(value, allowed[name], name);
@@ -206,8 +215,15 @@ export function validateJobToolArguments(name: JobToolName, value: unknown): unk
   if (name === "job_status" || name === "job_results") id(value.jobId, "jobId");
   if (name === "job_results" && value.taskId !== undefined) id(value.taskId, "taskId");
   if (name === "job_control") {
-    if (!["pause_dispatch", "resume_dispatch", "emergency_stop", "cancel_job"].includes(String(value.action))) throw new JobInputError("unsupported control action");
+    if (!["pause_dispatch", "resume_dispatch", "emergency_stop", "cancel_job", "reconcile_task"].includes(String(value.action))) throw new JobInputError("unsupported control action");
     if (value.action === "cancel_job") id(value.jobId, "jobId");
+    if (value.action === "reconcile_task") {
+      id(value.jobId, "jobId");
+      id(value.taskId, "taskId");
+      if (typeof value.expectedRevision !== "number" || !Number.isSafeInteger(value.expectedRevision) || Number(value.expectedRevision) < 1) throw new JobInputError("expectedRevision must be a positive safe integer");
+    } else if (value.taskId !== undefined || value.expectedRevision !== undefined) {
+      throw new JobInputError("taskId and expectedRevision require reconcile_task");
+    }
   }
   if (name === "job_inbox") {
     if (value.after !== undefined && (typeof value.after !== "string" || value.after.length > 128 || /[\u0000-\u001f\u007f]/.test(value.after))) throw new JobInputError("after must be a bounded opaque cursor string");

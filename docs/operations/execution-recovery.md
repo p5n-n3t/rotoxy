@@ -64,3 +64,27 @@ retrieved the existing code; implementation was not repeated.
 The revised elapsed-time monitoring and operator CLI are source changes pending
 a coherent runtime release. The example used the reviewed CLI against the live
 ledger; it does not imply the entire new bundle is deployed.
+
+## Authenticated agent control (new source bundle)
+
+When the connected gateway advertises the action, an owner with `jobs:write`
+can call `job_control` with `action: "reconcile_task"`, the discovered `projectId`,
+original `jobId` and `taskId`, and the current positive integer
+`expectedRevision`. Ownership and project checks occur before the private bridge
+mutation. A stale revision is rejected rather than silently refreshed. This is
+the same observation-only operation as the local operator CLI. Discover the
+installed schema before use; the production bundle has not yet been upgraded.
+
+## Internal provisioning components
+
+The provisioning coordinator and SQLite ledger are isolated source components;
+they do not yet enable automatic account enrollment or session creation. The
+ledger preserves uncertain reservations across restart and prevents changing a
+known session binding. Exact requested model/effort pins require matching
+provider evidence before success is reported. Missing/mismatched evidence keeps
+the original session under reconciliation without relaunching it.
+
+The SQLite implementation uses Node's built-in `node:sqlite`. Node 22.13.0 or
+23.4.0 first exposes that module without an experimental command-line flag;
+validate the supported Node runtime before wiring this component into a release.
+See the [official Node SQLite history](https://nodejs.org/api/sqlite.html).

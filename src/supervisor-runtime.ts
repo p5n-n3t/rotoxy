@@ -543,6 +543,15 @@ export class SupervisorRuntime implements SupervisorBackend {
       if (raw.eventId !== eventId || raw.acknowledged !== true) throw new JobInputError("inbox event is unavailable");
       return boundedJson({ projectId: project.projectId, eventId, acknowledged: true });
     }
+    if (name === "job_control" && args.action === "reconcile_task") {
+      const jobId = String(args.jobId);
+      const taskId = String(args.taskId);
+      const expectedRevision = Number(args.expectedRevision);
+      const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${jobId}`, undefined, owner));
+      if (row.projectId !== project.projectId) throw new JobInputError("job is not available");
+      return boundedJson(await this.bridge.request("POST", `/v1/assignments/${jobId}/reconcile`,
+        { taskId, expectedRevision }, owner));
+    }
     if (name === "job_control" && args.action === "cancel_job") {
       const jobId = String(args.jobId);
       const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${jobId}`, undefined, owner));
