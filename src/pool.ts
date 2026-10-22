@@ -360,7 +360,7 @@ export class CredentialPool {
           params: {
             protocolVersion: "2025-06-18",
             capabilities: {},
-            clientInfo: { name: "Token2OAuth health probe", version: "0.1.0" },
+            clientInfo: { name: "ROTOXY health probe", version: "0.2.0" },
           },
         }),
         redirect: "manual",

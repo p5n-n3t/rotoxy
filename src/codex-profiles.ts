@@ -421,7 +421,7 @@ export class CodexProfiles {
       const profile = this.profile(id); await mkdir(profile.profileDir, { recursive: true, mode: 0o700 }); await chmod(profile.profileDir, 0o700);
       const t = this.transportFactory(this.binaryPath!, profile.profileDir);
       try {
-        await t.request("initialize", { clientInfo: { name: "token2oauth", title: "Token2OAuth local Codex profiles", version: "0.2.0" } }, this.rpcTimeoutMs);
+        await t.request("initialize", { clientInfo: { name: "token2oauth", title: "ROTOXY local Codex profiles", version: "0.2.0" } }, this.rpcTimeoutMs);
         t.notify("initialized", {});
         t.onNotification((method, params) => {
           if (method !== "account/login/completed") return;
