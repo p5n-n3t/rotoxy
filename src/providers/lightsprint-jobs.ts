@@ -44,6 +44,20 @@ export interface LightSprintJobsOptions {
   trustedChatMutationPermit?: (request: Readonly<{ method: "POST"; path: string; body: Readonly<{ message: string; clientMessageId: string }> }>) => boolean;
 }
 
+export type ProvisioningContractFamily = "legacy-task" | "workspace-task" | "unknown";
+export interface ProvisioningContractDiscovery {
+  accountId: string;
+  family: ProvisioningContractFamily;
+  descriptionSha256: string | null;
+  launchRouteAvailable: boolean;
+  listRouteAvailable: boolean;
+  /** Generic model/effort wording does not establish exact-pin semantics. */
+  modelPin: "unknown" | "unsupported";
+  effortPin: "unknown" | "unsupported";
+  status: "documented" | "unknown" | "unavailable";
+  reason?: "catalog_missing" | "catalog_malformed" | "contract_unrecognized" | "auth_failed" | "transport_failed" | "account_unavailable" | "catalog_unavailable";
+}
+
 const MAX_MCP_RESPONSE_BYTES = 1_048_576;
 const MAX_TRANSCRIPT_PROJECTION_BYTES = 256 * 1024;
 const MAX_TRANSCRIPT_PREVIEW_BYTES = 8 * 1024;
@@ -57,6 +71,15 @@ const MAX_MESSAGE_LENGTH = 50_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const CLIENT_MESSAGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PROVIDERS = new Set<JobProvider>(["claude", "codex", "auto", "pi"]);
+const MAX_DISCOVERY_PAGES = 8;
+const MAX_DISCOVERY_TOOLS = 256;
+const MAX_DISCOVERY_DESCRIPTION_BYTES = 128 * 1024;
+const MAX_DISCOVERY_CURSOR_LENGTH = 512;
+
+const LEGACY_LAUNCH_ROUTE = "/api/tasks/{taskId}/lightsprint-agents/{claude|codex|auto|pi}";
+const LEGACY_LIST_ROUTE = "/api/tasks/{taskId}/lightsprint-agents";
+const WORKSPACE_LAUNCH_ROUTE = "/api/agent-sessions";
+const WORKSPACE_LIST_ROUTE = "/api/agent-sessions";
 
 class HttpStatusError extends Error {
   constructor(readonly status: number) { super("LightSprint HTTP response"); }
@@ -70,6 +93,41 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+function hasDocumentedRoute(description: string, method: "GET" | "POST", route: string): boolean {
+  const escaped = route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${method}\\s+${escaped}(?=$|[\\s\\x60,;?.)])`, "i").test(description);
+}
+
+function unknownDiscovery(
+  accountId: string,
+  reason: ProvisioningContractDiscovery["reason"],
+  descriptionSha256: string | null = null,
+): ProvisioningContractDiscovery {
+  return {
+    accountId, family: "unknown", descriptionSha256,
+    launchRouteAvailable: false, listRouteAvailable: false,
+    modelPin: "unknown", effortPin: "unknown", status: "unknown", reason,
+  };
+}
+
+function failedDiscovery(accountId: string, error: unknown): ProvisioningContractDiscovery {
+  if (error instanceof AccountUnavailableError) return {
+    ...unknownDiscovery(accountId, "account_unavailable"), status: "unavailable",
+  };
+  const candidate = record(error);
+  const status = error instanceof HttpStatusError ? error.status
+    : candidate && Object.hasOwn(candidate, "status") && typeof candidate.status === "number" ? candidate.status
+      : candidate && Object.hasOwn(candidate, "statusCode") && typeof candidate.statusCode === "number" ? candidate.statusCode
+        : undefined;
+  if (status === 401 || status === 403) return {
+    ...unknownDiscovery(accountId, "auth_failed"), status: "unavailable",
+  };
+  if (error instanceof JsonRpcFailure || error instanceof ResponseTooLargeError) return {
+    ...unknownDiscovery(accountId, "catalog_unavailable"), status: "unavailable",
+  };
+  return { ...unknownDiscovery(accountId, "transport_failed"), status: "unavailable" };
 }
 
 function validateId(value: unknown, label: string): asserts value is string {
@@ -494,6 +552,97 @@ export class LightSprintJobsAdapter {
     this.factory = options.clientFactory ?? createLightSprintMcpClient;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 120_000) throw new RangeError("timeoutMs is invalid");
+  }
+
+  /** Reads only MCP tools/list through this account's validated, credential-pinned client. */
+  async discoverProvisioningContract(): Promise<ProvisioningContractDiscovery> {
+    let description: string | undefined;
+    let malformed = false;
+    let catalogMissing = false;
+    try {
+      const client = await this.client();
+      const seenNames = new Set<string>();
+      const seenCursors = new Set<string>();
+      let totalTools = 0;
+      let totalDescriptionBytes = 0;
+      let cursor: string | undefined;
+      let foundTarget = false;
+
+      for (let pageIndex = 0; pageIndex < MAX_DISCOVERY_PAGES; pageIndex++) {
+        const page = record(await client.request("tools/list", cursor === undefined ? {} : { cursor }));
+        if (!page || !Array.isArray(page.tools) || page.tools.length > MAX_DISCOVERY_TOOLS ||
+            totalTools + page.tools.length > MAX_DISCOVERY_TOOLS) {
+          malformed = true;
+          break;
+        }
+        totalTools += page.tools.length;
+        for (const rawTool of page.tools) {
+          const tool = record(rawTool);
+          if (!tool || typeof tool.name !== "string" || tool.name.trim().length === 0 || tool.name.length > 128 ||
+              (tool.description !== undefined && typeof tool.description !== "string")) {
+            malformed = true;
+            break;
+          }
+          if (seenNames.has(tool.name)) { malformed = true; break; }
+          seenNames.add(tool.name);
+          if (typeof tool.description === "string") {
+            const bytes = Buffer.byteLength(tool.description, "utf8");
+            if (bytes > MAX_DISCOVERY_DESCRIPTION_BYTES || totalDescriptionBytes + bytes > 256 * 1024) {
+              malformed = true;
+              break;
+            }
+            totalDescriptionBytes += bytes;
+          }
+          if (tool.name === "lightsprint_api") {
+            if (foundTarget || typeof tool.description !== "string" || tool.description.trim().length === 0) {
+              malformed = true;
+              break;
+            }
+            foundTarget = true;
+            description = tool.description;
+          }
+        }
+        if (malformed) break;
+
+        if (page.nextCursor === undefined) break;
+        if (typeof page.nextCursor !== "string" || page.nextCursor.length === 0 || page.nextCursor.length > MAX_DISCOVERY_CURSOR_LENGTH ||
+            seenCursors.has(page.nextCursor) || pageIndex === MAX_DISCOVERY_PAGES - 1) {
+          malformed = true;
+          break;
+        }
+        cursor = page.nextCursor;
+        seenCursors.add(cursor);
+      }
+      if (!foundTarget && !malformed) catalogMissing = true;
+    } catch (error) {
+      return failedDiscovery(this.accountId, error);
+    }
+
+    if (malformed) return unknownDiscovery(this.accountId, "catalog_malformed");
+    if (catalogMissing || description === undefined) return unknownDiscovery(this.accountId, "catalog_missing");
+
+    const descriptionSha256 = createHash("sha256").update(description, "utf8").digest("hex");
+    const hasTaskCreation = hasDocumentedRoute(description, "POST", "/api/tasks");
+    const hasLegacyLaunch = hasDocumentedRoute(description, "POST", LEGACY_LAUNCH_ROUTE);
+    const hasWorkspaceLaunch = hasDocumentedRoute(description, "POST", WORKSPACE_LAUNCH_ROUTE);
+    if (!hasTaskCreation || hasLegacyLaunch === hasWorkspaceLaunch) {
+      return unknownDiscovery(this.accountId, "contract_unrecognized", descriptionSha256);
+    }
+    const family: Exclude<ProvisioningContractFamily, "unknown"> = hasLegacyLaunch ? "legacy-task" : "workspace-task";
+    const listRouteAvailable = family === "legacy-task"
+      ? hasDocumentedRoute(description, "GET", LEGACY_LIST_ROUTE)
+      : hasDocumentedRoute(description, "GET", WORKSPACE_LIST_ROUTE);
+    return {
+      accountId: this.accountId,
+      family,
+      descriptionSha256,
+      launchRouteAvailable: true,
+      listRouteAvailable,
+      // The route family signatures document no enforceable exact model/effort pin guarantee.
+      modelPin: "unknown",
+      effortPin: "unknown",
+      status: "documented",
+    };
   }
 
   private async client(): Promise<LightSprintMcpClient> {
