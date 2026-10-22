@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProvisioningConflictError } from "../dist/providers/lightsprint-provisioning.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { DurableSessionProvisioningCoordinator, ProvisioningConflictError } from "../dist/providers/lightsprint-provisioning.js";
 import {
   ProvisioningLedgerError,
   SqliteProvisioningLedger,
@@ -129,4 +131,45 @@ test("metadata is bounded and SQLite files stay owner-private", async (t) => {
   await assert.rejects(ledger.reserve({ ...reservation(), payload: "must not be stored" }), /Unknown reservation field/);
   ledger.close();
   await assert.rejects(ledger.getByIdempotencyKey("request-1"), /closed/);
+});
+
+test("separate processes share one durable reservation", async (t) => {
+  const f = await fixture(t);
+  f.open();
+  const moduleUrl = new URL("../dist/providers/lightsprint-provisioning-ledger.js", import.meta.url).href;
+  const code = `import {SqliteProvisioningLedger} from ${JSON.stringify(moduleUrl)};
+    const ledger=new SqliteProvisioningLedger(process.argv[1]);
+    const result=await ledger.reserve(JSON.parse(process.argv[2]));
+    console.log(JSON.stringify(result));ledger.close();`;
+  const run = promisify(execFile);
+  const replies = await Promise.all([1, 2].map(() => run(process.execPath,
+    ["--input-type=module", "-e", code, f.databasePath, JSON.stringify(reservation())], {timeout: 15000})));
+  const rows = replies.map(reply => JSON.parse(reply.stdout));
+  assert.equal(rows.filter(row => row.created).length, 1);
+  assert.equal(rows[0].record.id, rows[1].record.id);
+});
+
+test("coordinator preserves mismatched pin evidence across restart and never changes session ownership", async (t) => {
+  const f = await fixture(t);
+  let launches = 0;
+  let evidence = {accountId:"account-1",workspaceId:"workspace-1",taskId:"task-1",providerSessionId:"session-1",reportedModel:"wrong"};
+  const adapter = {capabilities:{modelPin:true,effortPin:false},isAccountEligible:()=>true,
+    launch:async()=>{ launches++; return {kind:"started",evidence}; },reconcile:async()=>[evidence]};
+  const input = {...evidence,idempotencyKey:"coordinator",payload:{prompt:"bounded"},model:"wanted"};
+  const original = f.open();
+  const result = await new DurableSessionProvisioningCoordinator(original,adapter).provision(input);
+  assert.equal(result.state,"needs_reconciliation");
+  assert.equal(result.record.providerSessionId,"session-1");
+  assert.equal(result.record.reportedModel,"wrong");
+  original.close();
+  const recovered = new DurableSessionProvisioningCoordinator(f.open(),adapter);
+  assert.equal((await recovered.provision(input)).state,"needs_reconciliation");
+  assert.equal((await recovered.reconcile("coordinator")).record.reportedModel,"wrong");
+  evidence={...evidence,providerSessionId:"session-other",reportedModel:"wanted"};
+  const changed=await recovered.reconcile("coordinator");
+  assert.equal(changed.state,"needs_reconciliation");
+  assert.equal(changed.record.providerSessionId,"session-1");
+  evidence={...evidence,providerSessionId:"session-1"};
+  assert.equal((await recovered.reconcile("coordinator")).state,"started");
+  assert.equal(launches,1);
 });

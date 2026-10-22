@@ -26,7 +26,7 @@ const STATES = new Set<ProvisioningState>([
 const ALLOWED_TRANSITIONS: Record<ProvisioningState, ReadonlySet<ProvisioningState>> = {
   reserved: new Set(["launching", "rejected", "needs_reconciliation"]),
   launching: new Set(["started", "rejected", "needs_reconciliation"]),
-  needs_reconciliation: new Set(["started"]),
+  needs_reconciliation: new Set(["started", "needs_reconciliation"]),
   started: new Set(),
   rejected: new Set(),
 };
@@ -250,8 +250,11 @@ export class SqliteProvisioningLedger implements ProvisioningLedger {
       if (!ALLOWED_TRANSITIONS[current.state].has(nextState)) throw new ProvisioningLedgerError("invalid_transition");
       if (nextState === "started" && !providerSessionId) throw new TypeError("Started state requires a provider session ID");
       if (nextState === "rejected" && !refusalCode) throw new TypeError("Rejected state requires a refusal code");
-      if (nextState !== "started" && (providerSessionId !== undefined || reportedModel !== undefined || reportedEffort !== undefined)) {
-        throw new TypeError("Provider result fields are only valid when starting");
+      if (current.providerSessionId && providerSessionId && current.providerSessionId !== providerSessionId) {
+        throw new ProvisioningLedgerError("invalid_transition");
+      }
+      if (nextState !== "started" && nextState !== "needs_reconciliation" && (providerSessionId !== undefined || reportedModel !== undefined || reportedEffort !== undefined)) {
+        throw new TypeError("Provider result fields require a started or uncertain execution");
       }
       if (nextState !== "rejected" && refusalCode !== undefined) throw new TypeError("Refusal code is only valid when rejecting");
 
