@@ -1161,5 +1161,281 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(JobRegistry(target).get_assignment("job-1")["tasks"][0]["state"],"awaiting_output")
 
 
+    # ------------------------------------------------------------------ #
+    # Retained-blocked execution-lock semantics (repository=None)        #
+    # ------------------------------------------------------------------ #
+
+    def _make_retained_blocked(self, assignment_id="job-1", key="key-1"):
+        """Submit, dispatch, then trigger observation timeout → blocked with dispatch_at set, released_at NULL."""
+        body = assignment(assignment_id, key)
+        body["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body, now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        obs = self.registry.claim_operation("worker", now=100)
+        self.assertEqual(obs["kind"], "observe_session")
+        # dispatch_at=2; now-dispatch_at=99 >= observationTimeoutSeconds=60 → blocked, released_at stays NULL
+        self.registry.record_result(obs["operationId"], {"workerId": "worker", "outcome": "accepted",
+            "result": {"status": "running", "sessionId": chat["sessionId"]}}, now=101)
+        return chat
+
+    def test_retained_blocked_locks_session_and_scope(self):
+        """A retained-blocked task (dispatch_at set, released_at NULL) must hold its session and scope."""
+        chat = self._make_retained_blocked()
+        with self.registry.connection() as db:
+            row = db.execute("SELECT state,dispatch_at,released_at FROM job_tasks WHERE assignment='job-1'").fetchone()
+        self.assertEqual(row["state"], "blocked")
+        self.assertIsNotNone(row["dispatch_at"])
+        self.assertIsNone(row["released_at"])
+
+        # Same session: must be locked
+        self.registry.submit(assignment("job-2", "key-2", [task("task-2")]), now=102)
+        self.assertIsNone(self.registry.claim_operation("worker-2", now=103),
+                          "retained-blocked task must hold the session lock")
+
+        # Overlapping scope on a different account/session: must also be blocked
+        self.register("account-b")
+        self.registry.submit(
+            assignment("job-3", "key-3", [task("task-3", account="account-b",
+                                               scope="path:src/task-1.txt")], accounts=["account-b"]),
+            now=102,
+        )
+        self.assertIsNone(self.registry.claim_operation("worker-3", now=103),
+                          "retained-blocked task must hold its scope lock")
+
+    def test_independent_session_eligible_within_capacity_when_retained_blocked(self):
+        """A retained-blocked task consumes one capacity slot but a different session stays eligible."""
+        sessions = [
+            {"id": "session-s1", "model": "model-a", "workspace": "workspace-a"},
+            {"id": "session-s2", "model": "model-a", "workspace": "workspace-a"},
+        ]
+        self.registry.register_account({
+            "accountId": "account-a", "enabled": True, "authorized": True,
+            "health": "healthy", "quota": "available", "allowUnknownQuota": False,
+            "localCapacity": 2,
+            "registeredSessions": sessions,
+        })
+        body = assignment(tasks=[task("t1", session_id="session-s1")])
+        body["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body, now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        obs = self.registry.claim_operation("worker", now=100)
+        self.registry.record_result(obs["operationId"], {"workerId": "worker", "outcome": "accepted",
+            "result": {"status": "running", "sessionId": "session-s1"}}, now=101)
+        # t1 is now retained-blocked on session-s1; slot 1 of 2 used
+
+        self.registry.submit(
+            assignment("job-2", "key-2", [task("t2", session_id="session-s2", scope="path:src/t2.txt")]),
+            now=102,
+        )
+        op = self.registry.claim_operation("worker-2", now=103)
+        self.assertIsNotNone(op, "task on independent session must be claimable within capacity")
+        self.assertEqual(op["sessionId"], "session-s2")
+
+    def test_predispatch_blocked_does_not_consume_occupancy_slot(self):
+        """A credit-denied (pre-dispatch) blocked task sets released_at and must not occupy any slot."""
+        class DenyAdmission:
+            def reserve(self, **_kwargs):
+                raise CreditDenied("insufficient credit")
+            def release_known_refusal(self, *_args, **_kwargs):
+                pass
+
+        self.registry.credit_admission = DenyAdmission()
+        self.registry.submit(assignment(), now=1)
+        self.assertIsNone(self.registry.claim_operation("worker", now=2))
+        with self.registry.connection() as db:
+            row = db.execute("SELECT state,released_at FROM job_tasks WHERE assignment='job-1'").fetchone()
+        self.assertEqual(row["state"], "blocked")
+        self.assertIsNotNone(row["released_at"])  # pre-dispatch: slot was released
+
+        # Same session must be claimable once credit restriction lifted
+        self.registry.credit_admission = None
+        self.registry.submit(assignment("job-2", "key-2", [task("task-2")]), now=3)
+        op = self.registry.claim_operation("worker-2", now=4)
+        self.assertIsNotNone(op, "pre-dispatch blocked must not occupy session or account slot")
+        self.assertEqual(op["kind"], "chat_session")
+
+    def test_max_workers_1_blocks_new_dispatch_while_retained_blocked_holds_slot(self):
+        """Retained-blocked task counts toward global cap; a separate account's task must not dispatch."""
+        self.register("account-b")
+        # Set global cap=1 up front so it governs both dispatch and scheduling.
+        self.registry.set_control("set_concurrency", 1, expected_revision=1)
+
+        # Job-1 uses account-a; drive t1 to retained-blocked while global cap is already 1.
+        body1 = assignment("job-1", "key-1", [task("t1")]) | {"scheduling": {"profile": "throughput"}}
+        body1["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body1, now=1)
+        chat = self.registry.claim_operation("worker-a", now=2)  # cap=1, active_count→1; ok to dispatch
+        self.assertEqual(chat["sessionId"], "session-account-a")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker-a", "outcome": "accepted"}, now=3)
+        obs = self.registry.claim_operation("worker-a", now=100)
+        self.registry.record_result(obs["operationId"], {"workerId": "worker-a", "outcome": "accepted",
+            "result": {"status": "running", "sessionId": "session-account-a"}}, now=101)
+        with self.registry.connection() as db:
+            t1 = db.execute("SELECT state,released_at FROM job_tasks WHERE task_id='t1'").fetchone()
+        self.assertEqual(t1["state"], "blocked")
+        self.assertIsNone(t1["released_at"])  # retained: dispatch_at set, released_at NULL
+
+        # Submit job-2 on account-b (different account/session, no scope conflict).
+        # With t1 retained-blocked counting as 1, active_count=1 >= cap=1 → must not dispatch.
+        self.registry.submit(
+            assignment("job-2", "key-2", [task("t2", account="account-b")], accounts=["account-b"]),
+            now=102,
+        )
+        self.assertIsNone(self.registry.claim_operation("worker-b", now=103),
+                          "retained-blocked t1 must fill the cap=1 slot, blocking t2 dispatch")
+
+    def test_predispatch_blocked_does_not_occupy_global_cap(self):
+        """A credit-denied (pre-dispatch) blocked task leaves the global slot free."""
+        class DenyAdmission:
+            def reserve(self, **_kwargs):
+                raise CreditDenied("insufficient credit")
+            def release_known_refusal(self, *_args, **_kwargs):
+                pass
+
+        self.register("account-b")
+        self.registry.set_control("set_concurrency", 1, expected_revision=1)
+        self.registry.credit_admission = DenyAdmission()
+        self.registry.submit(assignment(), now=1)
+        self.assertIsNone(self.registry.claim_operation("worker", now=2))
+        with self.registry.connection() as db:
+            row = db.execute("SELECT state,released_at FROM job_tasks WHERE assignment='job-1'").fetchone()
+        self.assertEqual(row["state"], "blocked")
+        self.assertIsNotNone(row["released_at"])  # pre-dispatch: slot free
+
+        # A different job can dispatch immediately because global cap is still open.
+        self.registry.credit_admission = None
+        self.registry.submit(assignment("job-2", "key-2",
+            [task("t2", account="account-b")], accounts=["account-b"]), now=3)
+        op = self.registry.claim_operation("worker-2", now=4)
+        self.assertIsNotNone(op, "global cap must remain open after pre-dispatch block")
+        self.assertEqual(op["kind"], "chat_session")
+
+    def test_reconcile_observe_claimable_at_capacity(self):
+        """observe_session for reconciliation must be claimable even when project capacity is exhausted."""
+        self.register("account-b")
+        body = assignment("job-1", "key-1", [task("t1")],
+                          accounts=["account-a"], max_workers=1) | {"scheduling": {"profile": "economy"}}
+        body["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body, now=1)
+
+        # Drive t1 to retained-blocked.
+        chat = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        obs = self.registry.claim_operation("worker", now=100)
+        self.registry.record_result(obs["operationId"], {"workerId": "worker", "outcome": "accepted",
+            "result": {"status": "running", "sessionId": chat["sessionId"]}}, now=101)
+
+        # Inject a second reserved task in the same project to simulate capacity full.
+        with self.registry.connection(write=True) as db:
+            db.execute(
+                "INSERT INTO assignments(id,project,idem,fingerprint,eligible,body,state,approved,revision,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("filler-job", "project-a", "filler-idem", "fp2", '["account-b"]', '{}', "queued", 1, 1, 50),
+            )
+            db.execute(
+                "INSERT INTO job_tasks(assignment,task_id,body,state,generation,selected_account,"
+                "attempt_id,session_id,dispatch_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("filler-job", "filler-t", '{"scopeKeys":["path:filler.txt"],"dependsOn":[],"instructions":"",'
+                 '"execution":{"mode":"existing-session","sessionId":"session-account-b","accountId":"account-b"},'
+                 '"output":{"kind":"text","maxBytes":512,"format":"plain","expectedMarker":"OK"}}',
+                 "reserved", 1, "account-b", "filler-attempt", "session-account-b", 50),
+            )
+
+        # With a reserved task in the project, project is "at capacity" (max_workers=1 for job-1, but
+        # the global control cap matters for dispatch). Reconcile t1 and verify observe is claimable.
+        snap = self.registry.get_assignment("job-1")
+        self.registry.reconcile_task("job-1", "t1", snap["revision"], now=102)
+
+        observe_op = self.registry.claim_operation("worker-reconcile", now=103)
+        self.assertIsNotNone(observe_op,
+                             "observe_session must be claimable at capacity for reconciliation")
+        self.assertEqual(observe_op["kind"], "observe_session")
+        self.assertEqual(observe_op["sessionId"], chat["sessionId"])
+
+    def test_reconcile_rejects_if_different_task_occupies_session(self):
+        """reconcile_task must raise RuntimeError when another live task already holds the session."""
+        self._make_retained_blocked()
+        snap = self.registry.get_assignment("job-1")
+        self.assertEqual(snap["tasks"][0]["state"], "blocked")
+
+        # Inject a live task on the same session (simulates a race that the fix prevents, but
+        # reconcile must still guard against it defensively).
+        task_body = json.dumps({
+            "scopeKeys": ["path:other.txt"], "dependsOn": [], "instructions": "",
+            "execution": {"mode": "existing-session", "sessionId": "session-account-a", "accountId": "account-a"},
+            "output": {"kind": "text", "maxBytes": 512, "format": "plain", "expectedMarker": "OK"},
+        })
+        with self.registry.connection(write=True) as db:
+            db.execute(
+                "INSERT INTO assignments(id,project,idem,fingerprint,eligible,body,state,approved,revision,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("other-job", "project-a", "other-idem", "fp", '["account-a"]', '{}', "queued", 1, 1, 100),
+            )
+            db.execute(
+                "INSERT INTO job_tasks(assignment,task_id,body,state,generation,selected_account,"
+                "attempt_id,session_id,dispatch_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("other-job", "other-task", task_body, "reserved", 1, "account-a",
+                 "other-attempt", "session-account-a", 100),
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "different live task"):
+            self.registry.reconcile_task("job-1", "task-1", snap["revision"], now=102)
+
+    # ------------------------------------------------------------------ #
+    # Observation eligibility: quota/health bypass for observe_session    #
+    # ------------------------------------------------------------------ #
+
+    def test_exhausted_account_observe_bypasses_quota_gate(self):
+        """observe_session is claimable for a quota-depleted account; chat_session dispatch is blocked."""
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        # Account becomes quota-exhausted after the chat dispatch.
+        self.register("account-a", quota="depleted")
+        # observe_session must still be claimable despite depleted quota.
+        obs = self.registry.claim_operation("worker", now=5)
+        self.assertIsNotNone(obs, "observe_session must bypass quota gate for depleted account")
+        self.assertEqual(obs["kind"], "observe_session")
+        # chat_session submission for a depleted account is blocked.
+        with self.assertRaisesRegex(RuntimeError, "quota"):
+            self.registry.submit(assignment("job-2", "key-2", [task("task-2")]), now=4)
+
+    def test_degraded_account_observe_bypasses_health_gate(self):
+        """observe_session is claimable for a health-degraded account."""
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        # Account health degrades after dispatch.
+        self.register("account-a", health="degraded")
+        obs = self.registry.claim_operation("worker", now=5)
+        self.assertIsNotNone(obs, "observe_session must bypass health gate for degraded account")
+        self.assertEqual(obs["kind"], "observe_session")
+
+    def test_disabled_account_observe_is_denied(self):
+        """A disabled account blocks observe_session."""
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        self.register("account-a", enabled=False)
+        with self.assertRaisesRegex(RuntimeError, "disabled"):
+            self.registry.claim_operation("worker", now=5)
+
+    def test_unauthorized_account_observe_is_denied(self):
+        """An unauthorized account blocks observe_session."""
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        self.register("account-a", authorized=False)
+        with self.assertRaisesRegex(RuntimeError, "authorized"):
+            self.registry.claim_operation("worker", now=5)
+
+
 if __name__ == "__main__":
     unittest.main()

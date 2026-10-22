@@ -41,6 +41,18 @@ OUTPUT_KEYS = {
     "coding-artifact": {"kind", "repository", "allowedPaths", "requirePullRequest"},
 }
 ACTIVE_TASK_STATES = ("reserved", "starting", "running", "awaiting_output", "ambiguous", "cancel_pending")
+# SQL predicate for job_tasks rows that hold an execution slot.  Covers all
+# ACTIVE_TASK_STATES plus retained-blocked rows (dispatched but not yet released).
+# Pre-dispatch blocked rows (released_at IS NOT NULL) must not count as occupied.
+_SLOT_SQL = (
+    "state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')"
+    " OR (state='blocked' AND dispatch_at IS NOT NULL AND released_at IS NULL)"
+)
+# Same predicate with explicit table alias for JOIN queries.
+_SLOT_SQL_T = (
+    "t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')"
+    " OR (t.state='blocked' AND t.dispatch_at IS NOT NULL AND t.released_at IS NULL)"
+)
 
 
 def _text(value, name, maximum=256):
@@ -387,8 +399,8 @@ class JobRegistry:
             requested_sessions = {item["id"]: item for item in clean_sessions}
             for session_id, old in old_sessions.items():
                 busy = db.execute(
-                    "SELECT 1 FROM job_tasks WHERE session_id=? AND state IN (?,?,?,?,?,?) LIMIT 1",
-                    (session_id, *ACTIVE_TASK_STATES),
+                    "SELECT 1 FROM job_tasks WHERE session_id=? AND (" + _SLOT_SQL + ") LIMIT 1",
+                    (session_id,),
                 ).fetchone()
                 if not busy and self.repository is not None:
                     busy = db.execute("SELECT 1 FROM attempts WHERE session=? AND released_at IS NULL LIMIT 1", (session_id,)).fetchone()
@@ -405,8 +417,8 @@ class JobRegistry:
                     other_sessions = json.loads(other["data"])["registeredSessions"]
                     if any(item["id"] == session_id for item in other_sessions):
                         busy = db.execute(
-                            "SELECT 1 FROM job_tasks WHERE session_id=? AND state IN (?,?,?,?,?,?) LIMIT 1",
-                            (session_id, *ACTIVE_TASK_STATES),
+                            "SELECT 1 FROM job_tasks WHERE session_id=? AND (" + _SLOT_SQL + ") LIMIT 1",
+                            (session_id,),
                         ).fetchone()
                         if not busy and self.repository is not None:
                             busy = db.execute("SELECT 1 FROM attempts WHERE session=? AND released_at IS NULL LIMIT 1", (session_id,)).fetchone()
@@ -419,15 +431,21 @@ class JobRegistry:
             return {"accountId": account_id, "revision": revision}
 
     @staticmethod
-    def _account(db, account_id, session_id=None):
+    def _account(db, account_id, session_id=None, *, observation=False):
         row = db.execute("SELECT data FROM registered_accounts WHERE account_id=?", (account_id,)).fetchone()
         if not row:
             raise RuntimeError("Account is not registered")
         account = json.loads(row["data"])
-        if not account["enabled"] or not account["authorized"] or account["health"] != "healthy":
-            raise RuntimeError("Account is disabled or not authorized/healthy")
-        if account["quota"] == "depleted" or (account["quota"] == "unknown" and not account["allowUnknownQuota"]):
-            raise RuntimeError("Account quota policy blocks dispatch")
+        if not account["enabled"] or not account["authorized"]:
+            raise RuntimeError("Account is disabled or not authorized")
+        if not observation:
+            # Health and quota gates are bypassed for read-only observe_session operations
+            # so that an already-dispatched session can be monitored even when the account
+            # becomes exhausted or degraded after dispatch.
+            if account["health"] != "healthy":
+                raise RuntimeError("Account is disabled or not authorized/healthy")
+            if account["quota"] == "depleted" or (account["quota"] == "unknown" and not account["allowUnknownQuota"]):
+                raise RuntimeError("Account quota policy blocks dispatch")
         session = next((item for item in account["registeredSessions"] if item["id"] == session_id), None) if session_id else None
         if session_id and session is None:
             raise RuntimeError("Session is not registered to this account")
@@ -737,12 +755,12 @@ class JobRegistry:
             if project_control["paused"] or project_control["emergency_stop"]:
                 continue
             max_workers = min(max_workers, project_control["max_workers"])
-            active_count = db.execute("SELECT COUNT(*) FROM job_tasks WHERE state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')").fetchone()[0]
-            job_active = db.execute("SELECT COUNT(*) FROM job_tasks WHERE assignment=? AND state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')", (row["id"],)).fetchone()[0]
+            active_count = db.execute("SELECT COUNT(*) FROM job_tasks WHERE (" + _SLOT_SQL + ")").fetchone()[0]
+            job_active = db.execute("SELECT COUNT(*) FROM job_tasks WHERE assignment=? AND (" + _SLOT_SQL + ")", (row["id"],)).fetchone()[0]
             if active_count >= control_row["max_workers"] or job_active >= max_workers:
                 continue
             project_active = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
-                                        "WHERE a.project=? AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')",
+                                        "WHERE a.project=? AND (" + _SLOT_SQL_T + ")",
                                         (row["project"],)).fetchone()[0]
             if project_active >= project_control["max_workers"]:
                 continue
@@ -752,7 +770,9 @@ class JobRegistry:
                     account_data, _ = self._account(db, candidate)
                 except RuntimeError:
                     continue
-                job_occupancy = db.execute("SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')", (candidate,)).fetchone()[0]
+                job_occupancy = db.execute(
+                    "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND (" + _SLOT_SQL + ")",
+                    (candidate,)).fetchone()[0]
                 external_occupancy = 0
                 if self.repository is not None:
                     for active_attempt in db.execute("SELECT data FROM attempts WHERE account=? AND released_at IS NULL", (candidate,)):
@@ -766,8 +786,8 @@ class JobRegistry:
                 available = [account for account in available if account == pinned]
                 session_id = spec["execution"]["sessionId"]
                 session_occupancy = db.execute(
-                    "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND state IN (?,?,?,?,?,?)",
-                    (session_id, *ACTIVE_TASK_STATES),
+                    "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND (" + _SLOT_SQL + ")",
+                    (session_id,),
                 ).fetchone()[0]
                 # This check is inside BEGIN IMMEDIATE alongside the reservation,
                 # so claims from other projects/accounts cannot win concurrently.
@@ -846,7 +866,10 @@ class JobRegistry:
         return False
 
     def _has_scope_conflict(self, db, project, scopes, assignment, task_id):
-        for row in db.execute("SELECT a.id,a.project,t.task_id,t.body AS task_body,t.state FROM assignments a JOIN job_tasks t ON t.assignment=a.id WHERE a.state NOT IN ('complete','cancelled') AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')"):
+        for row in db.execute(
+            "SELECT a.id,a.project,t.task_id,t.body AS task_body,t.state FROM assignments a "
+            "JOIN job_tasks t ON t.assignment=a.id WHERE a.state NOT IN ('complete','cancelled') "
+            "AND (" + _SLOT_SQL_T + ")"):
             if row["project"] == project and (row["id"], row["task_id"]) != (assignment, task_id):
                 if self._scopes_overlap(scopes, json.loads(row["task_body"])["scopeKeys"]):
                     return True
@@ -897,20 +920,30 @@ class JobRegistry:
             if control["paused"] or control["emergency_stop"] or project_control["paused"] or project_control["emergency_stop"] or assignment["state"] != "queued":
                 return None
             task_spec = json.loads(task_row["body"])
-            active_in_project = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
-                                           "WHERE a.project=? AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending') "
-                                           "AND NOT (t.assignment=? AND t.task_id=?)",
-                                           (assignment["project"], op["assignment"], op["task_id"])).fetchone()[0]
-            if active_in_project >= project_control["max_workers"]:
-                return None
-            account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"])
-            occupied = db.execute("SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) AND state IN (?,?,?,?,?,?)",
-                                  (op["account"], op["assignment"], op["task_id"], *ACTIVE_TASK_STATES)).fetchone()[0]
-            if occupied >= account_data["localCapacity"]:
-                return None
+            # observe_session is a read-only poll; it must remain claimable even when retained
+            # uncertain executions fill or exceed a lowered capacity limit, otherwise explicit
+            # reconciliation deadlocks.  Mutation dispatch caps stay enforced for all other kinds.
+            if op["kind"] != "observe_session":
+                active_in_project = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
+                                               "WHERE a.project=? AND (" + _SLOT_SQL_T + ") "
+                                               "AND NOT (t.assignment=? AND t.task_id=?)",
+                                               (assignment["project"], op["assignment"], op["task_id"])).fetchone()[0]
+                if active_in_project >= project_control["max_workers"]:
+                    return None
+                account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"])
+                occupied = db.execute(
+                    "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) "
+                    "AND (" + _SLOT_SQL + ")",
+                    (op["account"], op["assignment"], op["task_id"])).fetchone()[0]
+                if occupied >= account_data["localCapacity"]:
+                    return None
+            else:
+                account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"], observation=True)
             session_id = task_spec["execution"]["sessionId"]
-            session_occupancy = db.execute("SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND NOT (assignment=? AND task_id=?) AND state IN (?,?,?,?,?,?)",
-                                           (session_id, op["assignment"], op["task_id"], *ACTIVE_TASK_STATES)).fetchone()[0]
+            session_occupancy = db.execute(
+                "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND NOT (assignment=? AND task_id=?) "
+                "AND (" + _SLOT_SQL + ")",
+                (session_id, op["assignment"], op["task_id"])).fetchone()[0]
             if session_occupancy:
                 return None
             if self.repository is not None:
@@ -1220,6 +1253,17 @@ class JobRegistry:
                 )
             if task_row["released_at"] is not None or task_row["dispatch_at"] is None:
                 raise RuntimeError("Task has no retained execution reservation")
+            # Reject if a different live task already occupies the original session.
+            session_conflict = db.execute(
+                "SELECT 1 FROM job_tasks WHERE session_id=? AND NOT (assignment=? AND task_id=?) "
+                "AND (" + _SLOT_SQL + ") LIMIT 1",
+                (task_row["session_id"], assignment_id, task_id),
+            ).fetchone()
+            if session_conflict:
+                raise RuntimeError(
+                    "A different live task already occupies the original session; "
+                    "reconciliation rejected"
+                )
             # Duplicate-reconcile guard: checked BEFORE state gate so that a task
             # already transitioned to awaiting_output by a prior reconcile call
             # (pending observe still outstanding) produces the correct error message.

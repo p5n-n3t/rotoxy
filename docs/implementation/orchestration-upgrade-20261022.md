@@ -140,3 +140,49 @@ recovery tests and 11 focused Node tests passed. No service deployment/restart.
 - Provisioning remains internal until a discovered provider adapter, explicit
   admission and runtime wiring are verified. No automatic session creation or
   claim of twelve slots/account has been enabled. No production deployment.
+
+## Account-contract evidence and final safety follow-ups
+
+Read-only discovery cloud task completed and its commit `97d3030` was independently
+fetched and integrated as `972d11b`. Fresh native MCP catalogs revealed the live
+workspace-prefix/ellipsis format; added that observed format and regression
+coverage. Build and 28 discovery/existing-adapter tests pass.
+
+All twelve enabled accounts passed fresh independent catalog probes, recognized
+as workspace-task contracts. All twelve returned repository lists containing an
+exact ROTOXY repository identifier. Disabled Joey was left untouched. No credits,
+slot entitlement or exact model/effort selectors were inferred. Private evidence
+and account matrix are under `~/.local/state/rotoxy/preflight/`.
+
+Bounded local Opus review found no blocking issue in duplicate launch, retained
+reservation, session identity, pin evidence, ownership or revision fencing. Its
+optional-repository blocked-slot observation prompted a follow-up: retained
+post-dispatch blocked tasks now hold session/account/scope and global/job/project
+capacity; pre-dispatch blocks do not. Read-only reconciliation can still run at
+capacity. That follow-up passed 61 Python job tests.
+
+Current final review correction in progress: keep enabled/authorized original
+session observations available when dispatch quota is depleted or health is
+transiently degraded. Mutation eligibility remains unchanged. This is not yet
+verified or deployed; wait for the assigned Claude tests before packaging.
+Draft integration PR: https://github.com/p5n-n3t/rotoxy/pull/14
+
+## Final recovery verification
+
+Final focused verification passed: fresh TypeScript build; 87 Node tests across
+worker/runtime/validation/provisioning/discovery/adapters; 65 Python job tests;
+10 Python bridge tests. The last Sonnet implementation reached its CLI budget
+before verification; the integration lead reviewed its partial changes, completed
+regressions and ran these final checks. Do not treat that worker's budget stop as
+an independently completed verification receipt.
+
+Additional verified fixes: read-only observation is independent of quota and
+transient dispatch health, while disabled/revoked accounts remain blocked;
+expired transient cooldowns restore supervisor eligibility without clearing
+separate auth or quota blocks; an idle session with a dead relay or pending
+approval never receives a new job instruction. Cached health was not manually
+reset and provider credits were not inferred.
+
+Fresh-session dispatch remains disabled. Production deployment is being prepared
+as a full versioned bundle for the gateway and its private supervisor bridge,
+with rollback and preserved state; no deployment is yet claimed by this entry.

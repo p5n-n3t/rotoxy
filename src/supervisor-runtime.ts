@@ -122,7 +122,11 @@ function accountSignal(account: UpstreamAccount | undefined, nativeTarget: boole
   const providerOk = account?.provider === "lightsprint" || (account?.provider === "generic-bearer-mcp" && nativeTarget);
   const enabled = account?.enabled === true;
   const authFailed = account?.stats?.state === "auth-failed" || account?.stats?.lastStatus === 401;
-  const health = authFailed ? "auth_failed" : account?.stats?.state === "healthy" || account?.stats?.state === "exhausted" ? "healthy" : "degraded";
+  const cooldownUntil = account?.stats?.cooldownUntil;
+  const finiteCooldown = typeof cooldownUntil === "number" && Number.isFinite(cooldownUntil);
+  const cooling = finiteCooldown && cooldownUntil > Date.now();
+  const cooldownExpired = account?.stats?.state === "cooldown" && finiteCooldown && cooldownUntil <= Date.now();
+  const health = authFailed ? "auth_failed" : !cooling && (account?.stats?.state === "healthy" || account?.stats?.state === "exhausted" || cooldownExpired) ? "healthy" : "degraded";
   // A 429 is a rate-limit observation, not proof that account credits are depleted.
   const quota = account?.stats?.state === "exhausted" || account?.stats?.lastStatus === 402 ? "depleted" : "unknown";
   return { providerOk, enabled, authorized: !!providerOk && !authFailed, health, quota };
@@ -420,6 +424,13 @@ export class SupervisorRuntime implements SupervisorBackend {
           const latest = await this.options.store.load();
           const signal = accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl));
           return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
+        },
+        isAccountObservable: async (accountId) => {
+          const latest = await this.options.store.load();
+          const signal = accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl));
+          // Observations bypass quota and transient health; disabled accounts and
+          // revoked auth (including provider identity mismatch) remain blocked.
+          return signal.enabled && signal.authorized;
         },
         workerId: `token2oauth-${createHash("sha256").update(this.options.configDir).digest("hex").slice(0, 12)}`,
         allowedModels: [...new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.model)))], maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size)),

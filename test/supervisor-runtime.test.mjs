@@ -27,6 +27,27 @@ const currentState = {
 };
 const store = { async load() { return currentState; } };
 const caller = { clientId: "client-a", projectId: "project-a" };
+
+test("expired transient cooldown restores eligibility without clearing auth or quota blocks", async t=>{
+  const dir=await mkdtemp(join(tmpdir(),"rx-expired-cooldown-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const state=structuredClone(currentState);
+  const runtime=new SupervisorRuntime(config,{configDir:dir,supervisorCwd:join(process.cwd(),"supervisor"),
+    supervisionDbPath:join(dir,"inbox.sqlite"),recoveryDbPath:join(dir,"recovery.sqlite"),
+    oracleConfigPath:join(dir,"oracle.json"),oracleDbPath:join(dir,"oracle.sqlite"),store:{load:async()=>state}});
+  runtime.started=true;
+  for(const [stats,eligible] of [
+    [{state:"cooldown",cooldownUntil:Date.now()-10000},true],
+    [{state:"cooldown",cooldownUntil:Date.now()+3600000},false],
+    [{state:"exhausted",cooldownUntil:Date.now()-10000},false],
+    [{state:"auth-failed",cooldownUntil:Date.now()-10000},false],
+    [{state:"healthy",cooldownUntil:Date.now()+3600000},false],
+  ]){
+    state.accounts[0].stats=stats;
+    const snapshot=await runtime.callTool("job_workers",{projectId:"project-a"},caller);
+    assert.equal(snapshot.workers.find(w=>w.accountId==="acct-a").eligible,eligible,stats.state);
+  }
+});
 const submission = {
   schemaVersion: 1, jobId: "job-one", idempotencyKey: "idem-one", projectId: "project-a",
   eligibleAccountIds: ["acct-a", "acct-b"], scheduling: { profile: "custom", maxConcurrency: 2 },
@@ -346,6 +367,78 @@ test("reconcile_task action verifies project ownership and passes caller revisio
   // Caller-supplied expectedRevision (3) must be passed, not the fetched one (5)
   assert.equal(reconcileCall.body.expectedRevision, 3, "caller-supplied revision must be forwarded");
   assert.equal(reconcileCall.body.taskId, "task-1");
+});
+
+test("exhausted account shows ineligible for dispatch but isAccountObservable allows it", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-obs-predicate-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "runtime.json");
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+
+  // acct-a is quota-exhausted; all others are healthy
+  const exhaustedState = {
+    config: { upstreamUrl: "https://app.lightsprint.ai/mcp" },
+    accounts: [
+      { id: "acct-a", provider: "lightsprint", enabled: true, stats: { state: "exhausted" } },
+      { id: "acct-b", provider: "lightsprint", enabled: true, stats: { state: "healthy" } },
+      { id: "acct-c", provider: "lightsprint", enabled: true, stats: { state: "healthy" } },
+    ],
+  };
+
+  const results = [];
+  let claimCount = 0;
+  const observeOp = {
+    operationId: "obs-exhausted-predicate", attemptId: "attempt-obs-p", generation: 1,
+    selectedAccountId: "acct-a", kind: "observe_session", sessionId: "session-a",
+    input: { sessionId: "session-a", clientMessageId: "client-obs-p", dispatchAt: 100, expectedMarker: "DONE" },
+  };
+
+  const options = {
+    configPath, configDir: dir,
+    supervisorCwd: join(process.cwd(), "supervisor"),
+    supervisionDbPath: join(dir, "inbox.sqlite"),
+    recoveryDbPath: join(dir, "recovery.sqlite3"),
+    oracleConfigPath: join(dir, "oracle-config.json"),
+    oracleDbPath: join(dir, "oracle.sqlite"),
+    store: { async load() { return exhaustedState; } },
+    adapterFactory: (accountId) => fakeAdapter(accountId),
+    workerOptions: { pollIntervalMs: 20, adapterTimeoutMs: 1000 },
+  };
+
+  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
+  await runtime.start();
+  t.after(() => runtime.close());
+
+  // Exhaust-quoted account must not be eligible for chat dispatch.
+  const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
+  const exhaustedWorker = workers.workers.find((w) => w.accountId === "acct-a");
+  assert.equal(exhaustedWorker?.eligible, false, "exhausted account must not be dispatch-eligible");
+  const healthyWorker = workers.workers.find((w) => w.accountId === "acct-b");
+  assert.equal(healthyWorker?.eligible, true, "healthy account must remain dispatch-eligible");
+
+  // Intercept bridge to inject an observe_session for the exhausted account and capture result.
+  const origRequest = runtime.bridge.request.bind(runtime.bridge);
+  runtime.bridge.request = async (method, path, body, opts) => {
+    if (path === "/v1/operations/claim") {
+      return claimCount++ === 0 ? observeOp : undefined;
+    }
+    if (path.endsWith("/result")) { results.push(structuredClone(body)); return {}; }
+    return origRequest(method, path, body, opts);
+  };
+
+  // Drive a tick so the worker processes the injected observe operation.
+  const deadline = Date.now() + 3_000;
+  while (results.length === 0 && Date.now() < deadline) {
+    await runtime.worker.tick();
+    if (results.length === 0) await new Promise((r) => setTimeout(r, 20));
+  }
+
+  assert.ok(results.length > 0, "observe_session must produce a result for exhausted account");
+  assert.equal(results[0].outcome, "accepted",
+    "observation from exhausted account must be accepted (isAccountObservable bypasses quota)");
+  assert.notEqual(results[0].errorClass, "account_unavailable",
+    "exhausted account must not be blocked from observing");
 });
 
  test("runtime accepts explicit large worker ceilings and deployed shared membership without inventing sessions", async (t) => {

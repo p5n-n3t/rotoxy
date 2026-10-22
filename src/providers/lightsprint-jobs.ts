@@ -622,16 +622,22 @@ export class LightSprintJobsAdapter {
     if (catalogMissing || description === undefined) return unknownDiscovery(this.accountId, "catalog_missing");
 
     const descriptionSha256 = createHash("sha256").update(description, "utf8").digest("hex");
-    const hasTaskCreation = hasDocumentedRoute(description, "POST", "/api/tasks");
+    // The live catalog explicitly defines its ellipsis shorthand. Do not infer a
+    // workspace prefix from arbitrary prose or use this metadata to authorize I/O.
+    const workspaceShorthand = description.includes("Every path starts /api/workspaces/{workspaceId}/, written `…/` below");
+    const workspaceRoute = (method: "GET" | "POST", path: string): boolean =>
+      hasDocumentedRoute(description, method, `/api/workspaces/{workspaceId}${path}`) ||
+      workspaceShorthand && hasDocumentedRoute(description, method, `…${path}`);
+    const hasTaskCreation = hasDocumentedRoute(description, "POST", "/api/tasks") || workspaceRoute("POST", "/tasks");
     const hasLegacyLaunch = hasDocumentedRoute(description, "POST", LEGACY_LAUNCH_ROUTE);
-    const hasWorkspaceLaunch = hasDocumentedRoute(description, "POST", WORKSPACE_LAUNCH_ROUTE);
+    const hasWorkspaceLaunch = hasDocumentedRoute(description, "POST", WORKSPACE_LAUNCH_ROUTE) || workspaceRoute("POST", "/agent-sessions");
     if (!hasTaskCreation || hasLegacyLaunch === hasWorkspaceLaunch) {
       return unknownDiscovery(this.accountId, "contract_unrecognized", descriptionSha256);
     }
     const family: Exclude<ProvisioningContractFamily, "unknown"> = hasLegacyLaunch ? "legacy-task" : "workspace-task";
     const listRouteAvailable = family === "legacy-task"
       ? hasDocumentedRoute(description, "GET", LEGACY_LIST_ROUTE)
-      : hasDocumentedRoute(description, "GET", WORKSPACE_LIST_ROUTE);
+      : hasDocumentedRoute(description, "GET", WORKSPACE_LIST_ROUTE) || workspaceRoute("GET", "/agent-sessions");
     return {
       accountId: this.accountId,
       family,

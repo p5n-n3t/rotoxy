@@ -16,6 +16,21 @@ const workspaceDescription = [
   "GET /api/agent-sessions",
 ].join("\n");
 
+test("recognizes the observed workspace catalog shorthand only with its explicit prefix declaration", async () => {
+  const routes=["POST …/tasks", "POST …/agent-sessions", "GET …/agent-sessions"].join("\n");
+  const description="Every path starts /api/workspaces/{workspaceId}/, written `…/` below — send it in full.\n"+routes;
+  const h=harness({description});
+  const result=await h.adapter.discoverProvisioningContract();
+  assert.equal(result.family,"workspace-task");
+  assert.equal(result.launchRouteAvailable,true);
+  assert.equal(result.listRouteAvailable,true);
+  assert.deepEqual(h.calls.map(c=>c.method),["tools/list"]);
+  assert.equal((await harness({description:routes}).adapter.discoverProvisioningContract()).family,"unknown");
+  const full=await harness({description:routes.replaceAll("…/","/api/workspaces/{workspaceId}/")}).adapter.discoverProvisioningContract();
+  assert.equal(full.family,"workspace-task");
+  assert.equal(full.listRouteAvailable,true);
+});
+
 function harness({ accountId = ACCOUNT_A, description, pages, error, provider = "lightsprint" } = {}) {
   const calls = [];
   const factoryOptions = [];
