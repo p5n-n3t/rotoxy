@@ -5,7 +5,7 @@ description: Delegate project work through a connected ROTOXY MCP gateway, track
 
 # ROTOXY orchestration
 
-Use the client's configured ROTOXY connection. Never read another client's tokens or treat an admin password as a bearer token. Inspect discovered tool schemas: permissions and installed adapters determine available operations.
+Use the client's configured ROTOXY connection. Never read another client's tokens or treat an admin password as a bearer token. Inspect discovered tool schemas: permissions and installed adapters determine available operations. Start with the gateway's read-only `rotoxy_guide` tool when it is advertised; it provides the deployment's current operational boundaries. Read [scenario examples](references/scenarios.md) before dispatching unfamiliar work.
 
 ## Discover before dispatch
 

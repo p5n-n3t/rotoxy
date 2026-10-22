@@ -86,12 +86,12 @@ test("OAuth advertises and enforces separate web scopes for local MCP discovery 
   const tokenWithScope = await token("mcp web:search");
   const call = (access, message) => fetch(base + "/mcp", { method: "POST", headers: { authorization: `Bearer ${access}`, "content-type": "application/json" }, body: JSON.stringify(message) });
   const listed = await (await call(tokenWithScope.access_token, { jsonrpc: "2.0", id: 1, method: "tools/list" })).json();
-  assert.deepEqual(listed.result.tools.map((x) => x.name), ["web_search"]);
+  assert.deepEqual(listed.result.tools.map((x) => x.name), ["rotoxy_guide", "web_search"]);
   const result = await (await call(tokenWithScope.access_token, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "web_search", arguments: { provider: "exa", query: "test" } } })).json();
   assert.deepEqual(JSON.parse(result.result.content[0].text), { ok: true });
   const noScope = await token("mcp");
   const emptyDiscovery = await (await call(noScope.access_token, { jsonrpc: "2.0", id: 4, method: "tools/list" })).json();
-  assert.deepEqual(emptyDiscovery.result.tools, []);
+  assert.deepEqual(emptyDiscovery.result.tools.map((x) => x.name), ["rotoxy_guide"]);
   const denied = await call(noScope.access_token, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "web_search", arguments: { provider: "exa", query: "test" } } });
   assert.equal(denied.status, 403);
 });

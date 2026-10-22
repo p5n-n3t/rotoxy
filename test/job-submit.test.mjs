@@ -128,7 +128,8 @@ test("job tools are scope-filtered and intercepted before upstream while ordinar
     assert.equal(deniedAck.status, 403, "read-only job scope cannot acknowledge inbox events");
     assert.equal((await deniedAck.json()).error.data.requiredScope, "jobs:write");
     const legacyListing = await mcp(base, legacy, { jsonrpc: "2.0", id: 5, method: "tools/list" });
-    assert.equal(legacyListing.status, 503, "clients without job scopes still need a configured upstream");
+    assert.equal(legacyListing.status, 200, "MCP-scoped clients can discover the local ROTOXY guide without an upstream");
+    assert.deepEqual((await legacyListing.json()).result.tools.map((tool) => tool.name), ["rotoxy_guide"]);
     assert.deepEqual(upstreamCalls, [], "unconfigured gateway makes no upstream network request");
 
     const initialized = await mcp(base, readOnly, { jsonrpc: "2.0", id: "init", method: "initialize",
@@ -146,10 +147,10 @@ test("job tools are scope-filtered and intercepted before upstream while ordinar
 
     const listing = await mcp(base, readOnly, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     const listed = (await listing.json()).result.tools.map((tool) => tool.name);
-    assert.deepEqual(listed, ["job_status", "job_workers", "job_results", "job_inbox"]);
+    assert.deepEqual(listed, ["rotoxy_guide", "job_status", "job_workers", "job_results", "job_inbox"]);
     assert.ok(!listed.includes("job_submit") && !listed.includes("job_control") && !listed.includes("job_inbox_ack"));
     const writerListing = await mcp(base, writer, { jsonrpc: "2.0", id: 6, method: "tools/list" });
-    assert.deepEqual((await writerListing.json()).result.tools.map((tool) => tool.name), names);
+    assert.deepEqual((await writerListing.json()).result.tools.map((tool) => tool.name), ["rotoxy_guide", ...names]);
 
     const accepted = await mcp(base, writer, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "job_submit", arguments: validJob() } });
     assert.equal(accepted.status, 200);
@@ -166,7 +167,7 @@ test("job tools are scope-filtered and intercepted before upstream while ordinar
 
     await store.update((state) => { state.config.upstreamUrl = `http://127.0.0.1:${upstreamAddress.port}/mcp`; });
     const legacyWithUpstream = await mcp(base, legacy, { jsonrpc: "2.0", id: 8, method: "tools/list" });
-    assert.deepEqual((await legacyWithUpstream.json()).result.tools.map((tool) => tool.name), ["ordinary"], "legacy consent gains no job scopes");
+    assert.deepEqual((await legacyWithUpstream.json()).result.tools.map((tool) => tool.name), ["ordinary", "rotoxy_guide"], "legacy consent gains no job scopes but retains the MCP guide");
 
     const ordinary = await mcp(base, writer, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "ordinary", arguments: {} } });
     assert.match((await ordinary.json()).result.content[0].text, /ordinary upstream result/);
