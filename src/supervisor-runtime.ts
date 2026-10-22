@@ -17,6 +17,7 @@ import type { SupervisorAccountUsage, SupervisorEvent, SupervisorJob, Supervisor
 import { evaluateToolCall } from "./tool-policy.js";
 import { normalizeParkedQuestion } from "./worker-observation.js";
 import { WorkerGuidanceLedger, WorkerGuidanceService, type WorkerGuidanceInput, type WorkerGuidanceResult } from "./worker-guidance.js";
+import { safeClientId } from "./oauth-client-id.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -39,7 +40,7 @@ export function runtimeStatePath(group: RuntimeStateGroup, ...parts: string[]): 
 type RegisteredSession = { sessionId: string; accountId: string; model: string; workspaceId: string };
 type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[] };
 /** An operator-opted-in shared provider workspace, distinct from project folders. */
-type SharedWorkspacePolicy = { projectId: string; membership: "consented_oauth" };
+type SharedWorkspacePolicy = { projectId: string; membership: "consented_oauth" | "authenticated_mcp" };
 export interface SupervisorRuntimeConfig {
   version: 1;
   projects: ProjectPolicy[];
@@ -122,16 +123,21 @@ function accountSignal(account: UpstreamAccount | undefined, nativeTarget: boole
   const providerOk = account?.provider === "lightsprint" || (account?.provider === "generic-bearer-mcp" && nativeTarget);
   const enabled = account?.enabled === true;
   const authFailed = account?.stats?.state === "auth-failed" || account?.stats?.lastStatus === 401;
-  const health = authFailed ? "auth_failed" : account?.stats?.state === "healthy" || account?.stats?.state === "exhausted" ? "healthy" : "degraded";
+  const cooldownUntil = account?.stats?.cooldownUntil;
+  const finiteCooldown = typeof cooldownUntil === "number" && Number.isFinite(cooldownUntil);
+  const cooling = finiteCooldown && cooldownUntil > Date.now();
+  const cooldownExpired = account?.stats?.state === "cooldown" && finiteCooldown && cooldownUntil <= Date.now();
+  const health = authFailed ? "auth_failed" : !cooling && (account?.stats?.state === "healthy" || account?.stats?.state === "exhausted" || cooldownExpired) ? "healthy" : "degraded";
   // A 429 is a rate-limit observation, not proof that account credits are depleted.
   const quota = account?.stats?.state === "exhausted" || account?.stats?.lastStatus === 402 ? "depleted" : "unknown";
   return { providerOk, enabled, authorized: !!providerOk && !authFailed, health, quota };
 }
 
-type CreditReadiness = { kind: "strict"; accounts: Map<string, { available: number | null; operationUpperBound: number | null; boundVerified: boolean }> } | { kind: "legacy" | "malformed" | "unavailable" };
+type CreditReadiness = { kind: "strict"; accounts: Map<string, { available: number | null; operationUpperBound: number | null; boundVerified: boolean }> } | { kind: "disabled" | "legacy" | "malformed" | "unavailable" };
 function creditReadinessShape(value: unknown, projectAccounts: ReadonlySet<string>): CreditReadiness {
   if (!object(value)) return { kind: "malformed" };
   if (value.mode === "legacy") return { kind: "legacy" };
+  if (value.mode === "disabled") return { kind: "disabled" };
   if (value.mode !== "strict" || !Array.isArray(value.accounts)) return { kind: "malformed" };
   const accounts = new Map<string, { available: number | null; operationUpperBound: number | null; boundVerified: boolean }>();
   for (const item of value.accounts) {
@@ -156,7 +162,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
   const raw: unknown = JSON.parse(await readFile(absolute, "utf8"));
   if (!object(raw)) throw new Error("Supervisor config must be an object");
   assertKeys(raw, ["version", "projects", "sharedWorkspace", "maxWorkers", "allowUnknownQuota", "localLimits"], "root");
-  if (raw.version !== 1 || raw.allowUnknownQuota !== true || !Number.isInteger(raw.maxWorkers) || Number(raw.maxWorkers) < 1 || Number(raw.maxWorkers) > 8 || !Array.isArray(raw.projects) || !object(raw.localLimits)) throw new Error("Invalid supervisor config");
+  if (raw.version !== 1 || raw.allowUnknownQuota !== true || !Number.isInteger(raw.maxWorkers) || Number(raw.maxWorkers) < 1 || Number(raw.maxWorkers) > 32 || !Array.isArray(raw.projects) || !object(raw.localLimits)) throw new Error("Invalid supervisor config");
   assertKeys(raw.localLimits, ["maxTasks", "maxJobBytes", "maxOutputBytes"], "localLimits");
   if (!Number.isInteger(raw.localLimits.maxTasks) || Number(raw.localLimits.maxTasks) < 1 || Number(raw.localLimits.maxTasks) > 100 ||
       !Number.isInteger(raw.localLimits.maxJobBytes) || Number(raw.localLimits.maxJobBytes) < 1024 || Number(raw.localLimits.maxJobBytes) > 1_048_576 ||
@@ -165,7 +171,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     if (!object(candidate)) throw new Error("Invalid project policy");
     assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions"], "project");
     const projectId = candidate.projectId, rawClientIds = candidate.clientIds, rawAccountIds = candidate.accountIds, rawSessions = candidate.registeredSessions;
-    if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeId) || new Set(rawClientIds).size !== rawClientIds.length ||
+    if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeClientId) || new Set(rawClientIds).size !== rawClientIds.length ||
         !Array.isArray(rawAccountIds) || rawAccountIds.length > 50 || !rawAccountIds.every(safeId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
     const accountIds = rawAccountIds as string[];
     const registeredSessions: RegisteredSession[] = rawSessions.map((item: unknown): RegisteredSession => {
@@ -183,11 +189,11 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
   if (raw.sharedWorkspace !== undefined) {
     if (!object(raw.sharedWorkspace)) throw new Error("Invalid shared workspace policy");
     assertKeys(raw.sharedWorkspace, ["projectId", "membership"], "sharedWorkspace");
-    if (!safeId(raw.sharedWorkspace.projectId) || raw.sharedWorkspace.membership !== "consented_oauth" ||
+    if (!safeId(raw.sharedWorkspace.projectId) || !["consented_oauth", "authenticated_mcp"].includes(String(raw.sharedWorkspace.membership)) ||
         !projects.some((project) => project.projectId === (raw.sharedWorkspace as Record<string, unknown>).projectId)) {
-      throw new Error("Shared workspace must reference a configured project and consented OAuth membership");
+      throw new Error("Shared workspace must reference a configured project and supported membership policy");
     }
-    sharedWorkspace = { projectId: raw.sharedWorkspace.projectId, membership: "consented_oauth" };
+    sharedWorkspace = { projectId: raw.sharedWorkspace.projectId, membership: raw.sharedWorkspace.membership as SharedWorkspacePolicy["membership"] };
   }
   const sessionIds = projects.flatMap((p) => p.registeredSessions.map((s) => s.sessionId));
   if (new Set(sessionIds).size !== sessionIds.length) throw new Error("A registered session may be owned by only one project");
@@ -352,8 +358,9 @@ export class SupervisorRuntime implements SupervisorBackend {
         await this.bridge.request("POST", "/v1/accounts", {
           accountId, enabled: signal.enabled, authorized: signal.authorized,
           allowUnknownQuota: this.config.allowUnknownQuota, health: signal.health, quota: signal.quota,
-          // One active task per account guarantees its registered session is never reused concurrently.
-          localCapacity: 1,
+          // Local capacity reflects concrete registered sessions; session locks prevent reuse.
+          // This is an operator ceiling, not a claim about upstream entitlement.
+          localCapacity: Math.min(16, Math.max(1, (sessionsByAccount.get(accountId) ?? []).length)),
           registeredSessions: (sessionsByAccount.get(accountId) ?? []).map((session) => ({ id: session.sessionId, model: session.model, workspace: session.workspaceId })),
         });
       }
@@ -419,8 +426,15 @@ export class SupervisorRuntime implements SupervisorBackend {
           const signal = accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl));
           return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
         },
+        isAccountObservable: async (accountId) => {
+          const latest = await this.options.store.load();
+          const signal = accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl));
+          // Observations bypass quota and transient health; disabled accounts and
+          // revoked auth (including provider identity mismatch) remain blocked.
+          return signal.enabled && signal.authorized;
+        },
         workerId: `token2oauth-${createHash("sha256").update(this.options.configDir).digest("hex").slice(0, 12)}`,
-        allowedModels: [...new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.model)))], maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.accountIds)).size)),
+        allowedModels: [...new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.model)))], maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size)),
         allowFreshOperations: false, ...this.options.workerOptions,
       });
       this.worker.start();
@@ -508,7 +522,19 @@ export class SupervisorRuntime implements SupervisorBackend {
           eligible: signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota),
           quota: signal.quota, capacity: "unknown" };
       });
-      return boundedJson({ projectId: project.projectId, workers, maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
+      // Inventory includes connected accounts outside the legacy static dispatch binding.
+      // Account visibility never grants dispatch or manufactures worker capacity.
+      const accounts = state.accounts.filter((account) => accountSignal(account, nativeTarget).providerOk).map((account) => {
+        const signal = accountSignal(account, nativeTarget);
+        const sessions = project.registeredSessions.filter((session) => session.accountId === account.id);
+        const bound = project.accountIds.includes(account.id);
+        return { accountId: account.id, label: redactString(typeof account.label === "string" ? account.label : account.id, 120), enabled: signal.enabled,
+          dispatchBound: bound, health: signal.health, quota: signal.quota,
+          registeredSessionCount: sessions.length, providerSlotLimit: null, availableSlots: null,
+          provisioningState: !signal.enabled ? "disabled" : !bound ? "not_bound" : !sessions.length ? "needs_sessions" : "registered_sessions",
+          automaticProvisioning: false };
+      });
+      return boundedJson({ projectId: project.projectId, accounts, workers, maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
     }
     if (name === "job_inbox") {
       const after = (args.after ?? "0") as string;
@@ -529,14 +555,30 @@ export class SupervisorRuntime implements SupervisorBackend {
       if (raw.eventId !== eventId || raw.acknowledged !== true) throw new JobInputError("inbox event is unavailable");
       return boundedJson({ projectId: project.projectId, eventId, acknowledged: true });
     }
+    if (name === "job_control" && args.action === "reconcile_task") {
+      const jobId = String(args.jobId);
+      const taskId = String(args.taskId);
+      const expectedRevision = Number(args.expectedRevision);
+      const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${jobId}`, undefined, owner));
+      if (row.projectId !== project.projectId) throw new JobInputError("job is not available");
+      return boundedJson(await this.bridge.request("POST", `/v1/assignments/${jobId}/reconcile`,
+        { taskId, expectedRevision }, owner));
+    }
     if (name === "job_control" && args.action === "cancel_job") {
       const jobId = String(args.jobId);
       const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${jobId}`, undefined, owner));
       if (row.projectId !== project.projectId || !Number.isInteger(row.revision)) throw new JobInputError("job is not available");
       return boundedJson(await this.bridge.request("POST", `/v1/assignments/${jobId}/cancel`, { expectedRevision: row.revision }, owner));
     }
-    // R21's event and global control endpoints have no project-scoped read/write contract.
-    throw new JobInputError("global supervisor controls are unavailable through project-scoped MCP");
+    if (name === "job_control") {
+      const controlRoute = `/admin/api/v1/projects/${encodeURIComponent(project.projectId)}/control`;
+      const control = parseJson(await this.bridge.request("GET", controlRoute, undefined, owner));
+      if (control.projectId !== project.projectId || !Number.isInteger(control.revision)) throw new JobInputError("project control is unavailable");
+      return boundedJson(await this.bridge.request("POST", controlRoute, {
+        action: args.action, expectedRevision: control.revision,
+      }, owner));
+    }
+    throw new JobInputError("unsupported job control action");
   }
 
   async workspaceResources(projectId: string): Promise<unknown> {
@@ -557,6 +599,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       else if (signal.health !== "healthy") executionAvailability = "Account health unavailable";
       else if (signal.quota === "depleted") executionAvailability = "Account quota reported depleted";
       else if (signal.quota === "unknown" && !this.config.allowUnknownQuota) executionAvailability = "Blocked: quota is unknown and policy disallows unknown quota";
+      else if (credit.kind === "disabled") executionAvailability = "Manual credit gate disabled; live session readiness not checked";
       else if (credit.kind !== "strict") executionAvailability = credit.kind === "unavailable" ? "Unknown: credit admission unavailable" : credit.kind === "malformed" ? "Unknown: credit admission response malformed" : "Unknown: legacy credit admission";
       else {
         const policy = credit.accounts.get(session.accountId);
@@ -577,7 +620,8 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   /** Registration alone is insufficient: an unexpired, issued OAuth refresh grant proves consent. */
   private async consentedSharedClient(clientId: string): Promise<boolean> {
-    if (!this.config.sharedWorkspace || !safeId(clientId)) return false;
+    if (!this.config.sharedWorkspace || !safeClientId(clientId)) return false;
+    if (this.config.sharedWorkspace.membership === "authenticated_mcp") return true;
     const state = await this.options.store.load();
     if (!Array.isArray(state.oauthClients) || !state.oauthClients.some((client) => client.clientId === clientId)) return false;
     return Array.isArray(state.refreshTokens) && state.refreshTokens.some((grant) =>
@@ -587,7 +631,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   async authorizeWorkspace(projectId: string, clientId: string): Promise<void> {
     await this.refreshWorkspacePolicy();
-    if (!safeId(projectId) || !safeId(clientId)) throw new JobInputError("project is not authorized for this OAuth client");
+    if (!safeId(projectId) || !safeClientId(clientId)) throw new JobInputError("project is not authorized for this OAuth client");
     const project = this.config.projects.find((item) => item.projectId === projectId);
     if (!project) throw new JobInputError("project is not authorized for this OAuth client");
     if (project.clientIds.includes(clientId)) return;
@@ -597,7 +641,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   async workspaceProjects(clientId: string): Promise<Array<{ projectId: string }>> {
     await this.refreshWorkspacePolicy();
-    if (!safeId(clientId)) return [];
+    if (!safeClientId(clientId)) return [];
     const shared = this.config.sharedWorkspace;
     const consented = shared ? await this.consentedSharedClient(clientId) : false;
     return this.config.projects.filter((project) =>
@@ -606,7 +650,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   private async accessSnapshot(rawConfig?: string, editable = false): Promise<WorkspaceAccessSnapshot> {
     const state = await this.options.store.load();
-    const clients = state.oauthClients.filter((client) => safeId(client.clientId)).slice(0, 100).map((client) => ({
+    const clients = state.oauthClients.filter((client) => safeClientId(client.clientId)).slice(0, 100).map((client) => ({
       clientId: client.clientId,
       label: redactString(typeof client.clientName === "string" ? client.clientName : "Unnamed client", 120) || "Unnamed client",
     }));
@@ -637,7 +681,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     const configPath = this.options.configPath;
     if (!configPath) throw new Error("workspace_access_not_persisted");
     if (!safeId(input.projectId) || !Array.isArray(input.clientIds) || input.clientIds.length > 50 ||
-        !input.clientIds.every(safeId) || new Set(input.clientIds).size !== input.clientIds.length ||
+        !input.clientIds.every(safeClientId) || new Set(input.clientIds).size !== input.clientIds.length ||
         typeof input.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(input.expectedRevision)) {
       throw new Error("workspace_access_invalid");
     }
@@ -652,7 +696,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       const rawText = await readFile(configPath, "utf8");
       const parsed = await readSupervisorRuntimeConfig(configPath);
       const state = await this.options.store.load();
-      const clients = state.oauthClients.filter((client) => safeId(client.clientId)).slice(0, 100).map((client) => ({
+      const clients = state.oauthClients.filter((client) => safeClientId(client.clientId)).slice(0, 100).map((client) => ({
         clientId: client.clientId,
         label: redactString(typeof client.clientName === "string" ? client.clientName : "Unnamed client", 120) || "Unnamed client",
       }));
@@ -801,7 +845,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     if (object(supervision)) supervision = { ...supervision, recovery };
     if (object(supervision)) supervision = { ...supervision, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 }) } };
     const rawCredit = parseJson(await this.bridge.request("GET", "/admin/api/v1/credit-admission"));
-    const creditAdmission = { mode: rawCredit.mode === "strict" ? "strict" : "legacy", accounts: (Array.isArray(rawCredit.accounts) ? rawCredit.accounts.filter(object) : [])
+    const creditAdmission = { mode: rawCredit.mode === "strict" || rawCredit.mode === "disabled" ? rawCredit.mode : "legacy", accounts: (Array.isArray(rawCredit.accounts) ? rawCredit.accounts.filter(object) : [])
       .filter(account => accountIds.includes(String(account.accountId)))
       .map(account => ({ accountId: account.accountId, unit: typeof account.unit === "string" ? redactString(account.unit, 64) : "unknown",
         available: typeof account.available === "number" && Number.isSafeInteger(account.available) && account.available >= 0 ? account.available : null,

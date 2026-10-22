@@ -20,12 +20,19 @@ from snooze.agent_workspace import AgentWorkspace, WorkspaceError
 MAX_INPUT = 2_200_000  # Original and namespaced submissions share one private request.
 MAX_OUTPUT = 2_000_000
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 STATES = {"pending", "accepted", "needs_reconciliation", "draft", "queued", "running", "held", "paused", "emergency_stopped", "complete", "completed", "blocked", "failed", "cancelled", "unknown"}
 
 
 def _id(value, field):
     if not isinstance(value, str) or not ID_RE.fullmatch(value):
         raise WorkspaceError("invalid_" + field)
+    return value
+
+
+def _client_id(value):
+    if not isinstance(value, str) or not CLIENT_ID_RE.fullmatch(value):
+        raise WorkspaceError("invalid_client_id")
     return value
 
 
@@ -108,7 +115,7 @@ def handle(path, request):
         if command == "reserve":
             job = _id(request["jobId"], "job_id")
             remote_job = _id(request["remoteJobId"], "remote_job_id")
-            client = _id(request["clientId"], "client_id")
+            client = _client_id(request["clientId"])
             actor = "client:" + client
             if request["actor"] != actor or not isinstance(request["submission"], dict) or not isinstance(request["remoteSubmission"], dict):
                 raise WorkspaceError("invalid_owner")
@@ -140,7 +147,7 @@ def handle(path, request):
                 raise
         if command == "set_state":
             job = _id(request["jobId"], "job_id")
-            client = _id(request["clientId"], "client_id")
+            client = _client_id(request["clientId"])
             state = request["state"]
             if state not in STATES:
                 raise WorkspaceError("invalid_state")
@@ -153,7 +160,7 @@ def handle(path, request):
             return _summary(row)
         if command == "get":
             job = _id(request["jobId"], "job_id")
-            client = _id(request["clientId"], "client_id")
+            client = _client_id(request["clientId"])
             row = db.execute("SELECT * FROM workspace_execution_bindings WHERE project_id=? AND job_id=? AND client_id=?", (project, job, client)).fetchone()
             if row is None:
                 raise WorkspaceError("execution_not_found")
@@ -186,7 +193,7 @@ def handle(path, request):
         if command == "settle_reconciliation":
             project = _id(request["projectId"], "project_id")
             job = _id(request["jobId"], "job_id")
-            client = _id(request["clientId"], "client_id")
+            client = _client_id(request["clientId"])
             db.execute("BEGIN IMMEDIATE")
             try:
                 changed = db.execute("UPDATE workspace_execution_bindings SET settled=1,lease_until=0 WHERE project_id=? AND job_id=? AND client_id=?",

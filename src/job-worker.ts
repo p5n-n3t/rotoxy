@@ -49,6 +49,8 @@ export interface JobWorkerOptions {
   operationAdapterFactory?: (operation: JobOperation, limits: { timeoutMs: number }) => PinnedJobsAdapter | undefined | Promise<PinnedJobsAdapter | undefined>;
   /** Includes current enabled/auth/quota eligibility; this must be rechecked immediately before mutation. */
   isAccountEligible: (accountId: string) => boolean | Promise<boolean>;
+  /** Observation eligibility: enabled and authorized only, ignoring quota and transient health. Falls back to isAccountEligible when absent. Observe operations use this; mutations always use isAccountEligible. */
+  isAccountObservable?: (accountId: string) => boolean | Promise<boolean>;
   workerId: string;
   allowedModels: readonly string[];
   maxConcurrent?: number;
@@ -239,7 +241,9 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
     let mutationStarted = false;
     const input = op.input;
     try {
-      if (!await options.isAccountEligible(op.selectedAccountId)) { errorClass = "account_unavailable"; return await submit(op, outcome, result, errorClass); }
+      const checkEligible = op.kind === "observe_session" && options.isAccountObservable !== undefined
+        ? options.isAccountObservable : options.isAccountEligible;
+      if (!await checkEligible(op.selectedAccountId)) { errorClass = "account_unavailable"; return await submit(op, outcome, result, errorClass); }
       const sessionId = text(op.sessionId ?? input.sessionId, 128);
       const message = op.kind === "chat_session" ? text(input.instructions, 20_000) : undefined;
       const clientMessageId = op.kind === "chat_session" ? text(input.clientMessageId, 128) : undefined;
@@ -265,9 +269,10 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
         const registeredModel = field(status, "registeredModel", "model", "reportedModel");
         const expectedModel = input.model === undefined ? MODEL : text(input.model, 128);
         const state = field(status, "sessionStatus", "status", "state");
+        const observed = normalizeSessionObservation(status);
         if (!status || checked.result.classification !== "accepted" || field(status, "isOwner") !== true ||
             field(status, "canSendMessage") !== true || !expectedModel || registeredModel !== expectedModel || !options.allowedModels.includes(String(registeredModel)) ||
-            typeof state !== "string" || state.toLowerCase() !== "idle") {
+            typeof state !== "string" || state.toLowerCase() !== "idle" || observed.state !== "idle" || observed.needsInput) {
           errorClass = checked.result.classification === "ambiguous" ? "session_preflight_ambiguous" : "session_not_sendable";
           return await submit(op, checked.result.classification === "ambiguous" ? "ambiguous" : "rejected", {}, errorClass);
         }

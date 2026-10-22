@@ -235,6 +235,21 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 self._reply(202, registry.cancel_assignment(urllib.parse.unquote(match.group(1)), body["expectedRevision"],
                                                               *self._owner_context(required=True)))
                 return
+            match = re.fullmatch(r"/v1/assignments/([^/]+)/reconcile", route)
+            if self.command == "POST" and match:
+                body = self._body()
+                if set(body) != {"taskId", "expectedRevision"} or not isinstance(body.get("taskId"), str) or not body["taskId"]:
+                    raise ValueError("taskId and expectedRevision are required")
+                if type(body["expectedRevision"]) is not int or body["expectedRevision"] < 1:
+                    raise ValueError("expectedRevision must be a positive integer")
+                owner, client = self._owner_context(required=True)
+                self._reply(202, registry.reconcile_task(
+                    urllib.parse.unquote(match.group(1)),
+                    body["taskId"],
+                    body["expectedRevision"],
+                    owner, client,
+                ))
+                return
             if self.command == "GET" and route == "/admin/api/v1/events":
                 after = int(query.get("after", ["0"])[0])
                 limit = int(query.get("limit", ["100"])[0])

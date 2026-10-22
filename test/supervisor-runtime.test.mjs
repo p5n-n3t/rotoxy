@@ -27,6 +27,27 @@ const currentState = {
 };
 const store = { async load() { return currentState; } };
 const caller = { clientId: "client-a", projectId: "project-a" };
+
+test("expired transient cooldown restores eligibility without clearing auth or quota blocks", async t=>{
+  const dir=await mkdtemp(join(tmpdir(),"rx-expired-cooldown-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const state=structuredClone(currentState);
+  const runtime=new SupervisorRuntime(config,{configDir:dir,supervisorCwd:join(process.cwd(),"supervisor"),
+    supervisionDbPath:join(dir,"inbox.sqlite"),recoveryDbPath:join(dir,"recovery.sqlite"),
+    oracleConfigPath:join(dir,"oracle.json"),oracleDbPath:join(dir,"oracle.sqlite"),store:{load:async()=>state}});
+  runtime.started=true;
+  for(const [stats,eligible] of [
+    [{state:"cooldown",cooldownUntil:Date.now()-10000},true],
+    [{state:"cooldown",cooldownUntil:Date.now()+3600000},false],
+    [{state:"exhausted",cooldownUntil:Date.now()-10000},false],
+    [{state:"auth-failed",cooldownUntil:Date.now()-10000},false],
+    [{state:"healthy",cooldownUntil:Date.now()+3600000},false],
+  ]){
+    state.accounts[0].stats=stats;
+    const snapshot=await runtime.callTool("job_workers",{projectId:"project-a"},caller);
+    assert.equal(snapshot.workers.find(w=>w.accountId==="acct-a").eligible,eligible,stats.state);
+  }
+});
 const submission = {
   schemaVersion: 1, jobId: "job-one", idempotencyKey: "idem-one", projectId: "project-a",
   eligibleAccountIds: ["acct-a", "acct-b"], scheduling: { profile: "custom", maxConcurrency: 2 },
@@ -104,12 +125,25 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   await assert.rejects(runtime.callTool("job_results", { projectId: "project-a", jobId: "job-one" }, { clientId: "client-b", projectId: "project-a" }));
   const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
   assert.equal(workers.workers.length, 2);
+  assert.equal(workers.accounts.length, 3, "connected account inventory is distinct from dispatch binding");
+  const unbound = workers.accounts.find(account => account.accountId === "acct-c");
+  assert.equal(unbound.dispatchBound, false);
+  assert.equal(unbound.provisioningState, "not_bound");
+  assert.equal(unbound.providerSlotLimit, null);
+  assert.equal(unbound.availableSlots, null);
+  assert.ok(workers.accounts.every(account => !("secret" in account)));
   const supervision = await runtime.readSupervision("project-a", 0, 10);
   assert.equal(supervision.project, "project-a");
   assert.ok(Array.isArray(supervision.events));
   assert.ok(Array.isArray(supervision.models));
   assert.equal(supervision.recovery.project, "project-a");
   assert.equal(supervision.recovery.available, false, "the scoped snapshot uses the injected temporary recovery database");
+  const paused = await runtime.callTool("job_control", {projectId:"project-a", action:"pause_dispatch"}, caller);
+  assert.equal(paused.projectId,"project-a");
+  assert.equal(paused.state,"paused");
+  const dispatchResumed = await runtime.callTool("job_control", {projectId:"project-a", action:"resume_dispatch"}, caller);
+  assert.equal(dispatchResumed.state,"running");
+  assert.ok(dispatchResumed.revision > paused.revision);
   currentState.accounts.find((account) => account.id === "acct-b").stats.state = "auth-failed";
   const narrowed = await runtime.callTool("job_submit", { ...submission, jobId: "job-two", idempotencyKey: "idem-two", tasks: [submission.tasks[0]] }, caller);
   assert.equal(narrowed.assignmentId, "job-two");
@@ -285,5 +319,139 @@ test("runtime config rejects permissive fields, missing workspace bindings, and 
     { projectId: "workspace-only", clientIds: ["client-c"], accountIds: [], registeredSessions: [] });
   await writeFile(path, JSON.stringify(config), { mode: 0o644 });
   await chmod(path, 0o644);
+  await assert.rejects(readSupervisorRuntimeConfig(path));
+});
+
+test("reconcile_task action verifies project ownership and passes caller revision without auto-refresh", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-reconcile-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const runtime = new SupervisorRuntime(config, { configDir: dir,
+    supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"),
+    recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"),
+    oracleDbPath: join(dir, "oracle.sqlite"), store });
+  runtime.started = true; // bypass bridge start; bridge.request is fully mocked below
+  const bridgeCalls = [];
+  runtime.bridge.request = async (method, path, body) => {
+    bridgeCalls.push({ method, path, body });
+    if (method === "GET" && path.startsWith("/admin/api/v1/assignments/")) {
+      return { assignmentId: "job-x", projectId: "project-b", revision: 7 };
+    }
+    return {};
+  };
+  // reconcile_task with a job that belongs to project-b must be rejected
+  await assert.rejects(
+    runtime.callTool("job_control", { projectId: "project-a", action: "reconcile_task",
+      jobId: "job-x", taskId: "task-1", expectedRevision: 7 }, caller),
+    /job is not available/,
+  );
+  // The reconcile bridge write must NOT have been called
+  assert.ok(!bridgeCalls.some((c) => c.path.endsWith("/reconcile")),
+    "bridge reconcile route must not be reached on project mismatch");
+  // Now test that a matching project passes the caller-supplied revision (not the fetched one)
+  runtime.bridge.request = async (method, path, body) => {
+    bridgeCalls.push({ method, path, body });
+    if (method === "GET" && path.startsWith("/admin/api/v1/assignments/")) {
+      return { assignmentId: "job-y", projectId: "project-a", revision: 5 };
+    }
+    if (method === "POST" && path.endsWith("/reconcile")) {
+      return { assignmentId: "job-y", taskId: "task-1", state: "awaiting_output", revision: 6 };
+    }
+    return {};
+  };
+  bridgeCalls.length = 0;
+  const result = await runtime.callTool("job_control", { projectId: "project-a", action: "reconcile_task",
+    jobId: "job-y", taskId: "task-1", expectedRevision: 3 }, caller);
+  assert.equal(result.state, "awaiting_output");
+  const reconcileCall = bridgeCalls.find((c) => c.path.endsWith("/reconcile"));
+  assert.ok(reconcileCall, "bridge reconcile route must be called");
+  // Caller-supplied expectedRevision (3) must be passed, not the fetched one (5)
+  assert.equal(reconcileCall.body.expectedRevision, 3, "caller-supplied revision must be forwarded");
+  assert.equal(reconcileCall.body.taskId, "task-1");
+});
+
+test("exhausted account shows ineligible for dispatch but isAccountObservable allows it", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "t2o-obs-predicate-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "runtime.json");
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+
+  // acct-a is quota-exhausted; all others are healthy
+  const exhaustedState = {
+    config: { upstreamUrl: "https://app.lightsprint.ai/mcp" },
+    accounts: [
+      { id: "acct-a", provider: "lightsprint", enabled: true, stats: { state: "exhausted" } },
+      { id: "acct-b", provider: "lightsprint", enabled: true, stats: { state: "healthy" } },
+      { id: "acct-c", provider: "lightsprint", enabled: true, stats: { state: "healthy" } },
+    ],
+  };
+
+  const results = [];
+  let claimCount = 0;
+  const observeOp = {
+    operationId: "obs-exhausted-predicate", attemptId: "attempt-obs-p", generation: 1,
+    selectedAccountId: "acct-a", kind: "observe_session", sessionId: "session-a",
+    input: { sessionId: "session-a", clientMessageId: "client-obs-p", dispatchAt: 100, expectedMarker: "DONE" },
+  };
+
+  const options = {
+    configPath, configDir: dir,
+    supervisorCwd: join(process.cwd(), "supervisor"),
+    supervisionDbPath: join(dir, "inbox.sqlite"),
+    recoveryDbPath: join(dir, "recovery.sqlite3"),
+    oracleConfigPath: join(dir, "oracle-config.json"),
+    oracleDbPath: join(dir, "oracle.sqlite"),
+    store: { async load() { return exhaustedState; } },
+    adapterFactory: (accountId) => fakeAdapter(accountId),
+    workerOptions: { pollIntervalMs: 20, adapterTimeoutMs: 1000 },
+  };
+
+  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
+  await runtime.start();
+  t.after(() => runtime.close());
+
+  // Exhaust-quoted account must not be eligible for chat dispatch.
+  const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
+  const exhaustedWorker = workers.workers.find((w) => w.accountId === "acct-a");
+  assert.equal(exhaustedWorker?.eligible, false, "exhausted account must not be dispatch-eligible");
+  const healthyWorker = workers.workers.find((w) => w.accountId === "acct-b");
+  assert.equal(healthyWorker?.eligible, true, "healthy account must remain dispatch-eligible");
+
+  // Intercept bridge to inject an observe_session for the exhausted account and capture result.
+  const origRequest = runtime.bridge.request.bind(runtime.bridge);
+  runtime.bridge.request = async (method, path, body, opts) => {
+    if (path === "/v1/operations/claim") {
+      return claimCount++ === 0 ? observeOp : undefined;
+    }
+    if (path.endsWith("/result")) { results.push(structuredClone(body)); return {}; }
+    return origRequest(method, path, body, opts);
+  };
+
+  // Drive a tick so the worker processes the injected observe operation.
+  const deadline = Date.now() + 3_000;
+  while (results.length === 0 && Date.now() < deadline) {
+    await runtime.worker.tick();
+    if (results.length === 0) await new Promise((r) => setTimeout(r, 20));
+  }
+
+  assert.ok(results.length > 0, "observe_session must produce a result for exhausted account");
+  assert.equal(results[0].outcome, "accepted",
+    "observation from exhausted account must be accepted (isAccountObservable bypasses quota)");
+  assert.notEqual(results[0].errorClass, "account_unavailable",
+    "exhausted account must not be blocked from observing");
+});
+
+ test("runtime accepts explicit large worker ceilings and deployed shared membership without inventing sessions", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-capacity-"));
+  t.after(() => rm(dir, {recursive:true, force:true}));
+  const path = join(dir, "runtime.json");
+  const policy = {...structuredClone(config), maxWorkers:32, sharedWorkspace:{projectId:"project-a", membership:"authenticated_mcp"}};
+  await writeFile(path, JSON.stringify(policy), {mode:0o600});
+  const parsed = await readSupervisorRuntimeConfig(path);
+  assert.equal(parsed.maxWorkers,32);
+  assert.equal(parsed.sharedWorkspace.membership,"authenticated_mcp");
+  assert.equal(parsed.projects[0].registeredSessions.length,2);
+  policy.maxWorkers=33;
+  await writeFile(path, JSON.stringify(policy), {mode:0o600});
   await assert.rejects(readSupervisorRuntimeConfig(path));
 });

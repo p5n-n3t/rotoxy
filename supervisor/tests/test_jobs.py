@@ -603,6 +603,839 @@ class JobRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Credential-like"):
             self.registry.submit(body)
 
+    def test_expired_mutation_lease_does_not_freeze_independent_task(self):
+        """An expired lease makes the mutating task ambiguous; independent sibling must still run.
+
+        Verified:
+        - Independent task is claimable after lease expires (assignment stays queued).
+        - Ambiguous task's session remains locked (ACTIVE_TASK_STATES includes ambiguous).
+        - Completing the independent task does not mark the assignment complete while the
+          ambiguous task is still unresolved.
+        - After registry restart the ambiguous task is still ambiguous — no blind re-dispatch.
+        """
+        self.register("account-b")
+        tasks = [task("task-a", account="account-a"), task("task-b", account="account-b")]
+        body = assignment("job-1", "key-1", tasks, accounts=["account-a", "account-b"], max_workers=3)
+        self.registry.submit(body, now=1)
+
+        # Claim task-a with a short lease; do not record any result.
+        op_a = self.registry.claim_operation("worker-a", lease_seconds=5, now=2)
+        self.assertEqual(op_a["kind"], "chat_session")
+        self.assertEqual(op_a["input"]["sessionId"], "session-account-a")
+
+        # At now=8 the lease (expires at 7) is stale.  claim_operation processes the
+        # expiry, marks task-a ambiguous, and must then queue + return task-b's op.
+        op_b = self.registry.claim_operation("worker-b", lease_seconds=30, now=8)
+        self.assertIsNotNone(op_b, "independent task-b must be claimable after task-a lease expires")
+        self.assertEqual(op_b["kind"], "chat_session")
+        self.assertEqual(op_b["input"]["sessionId"], "session-account-b")
+
+        # task-a is ambiguous; assignment must NOT be held while task-b is in flight.
+        snap = self.registry.get_assignment("job-1")
+        task_states = {t["taskId"]: t["state"] for t in snap["tasks"]}
+        self.assertEqual(task_states["task-a"], "ambiguous")
+        self.assertIn(task_states["task-b"], ("reserved", "starting", "running", "awaiting_output"))
+        self.assertNotEqual(snap["state"], "held", "assignment must remain queued while task-b is in flight")
+
+        # session-account-a must still be locked by the ambiguous task.
+        self.registry.submit(assignment("job-x", "key-x", [task("tx", account="account-a")]), now=9)
+        self.assertIsNone(
+            self.registry.claim_operation("worker-x", now=9),
+            "session-account-a must be locked by the ambiguous task",
+        )
+
+        # Complete task-b; the ambiguous task keeps the assignment from completing.
+        self.registry.record_result(op_b["operationId"], {"workerId": "worker-b", "outcome": "accepted"}, now=9)
+        obs_b = self.registry.claim_operation("worker-b", now=11)
+        self.assertEqual(obs_b["kind"], "observe_session")
+        self.registry.record_result(obs_b["operationId"], {"workerId": "worker-b", "outcome": "accepted", "result": {
+            "status": "complete", "assistantText": "DONE", "assistantAt": 10,
+            "sessionId": "session-account-b",
+        }}, now=12)
+        snap2 = self.registry.get_assignment("job-1")
+        ambi_state = next(t["state"] for t in snap2["tasks"] if t["taskId"] == "task-a")
+        self.assertEqual(ambi_state, "ambiguous")
+        self.assertNotEqual(snap2["state"], "complete")
+
+        # No duplicate dispatch of the ambiguous task after restart.
+        restarted = JobRegistry(self.db)
+        self.assertIsNone(restarted.claim_operation("worker-restart", now=13))
+        with restarted.connection() as db:
+            row = db.execute("SELECT state FROM job_tasks WHERE assignment='job-1' AND task_id='task-a'").fetchone()
+        self.assertEqual(row["state"], "ambiguous")
+
+    def test_ambiguous_result_independent_task_executes_dependent_waits_no_duplicate(self):
+        """A worker-reported ambiguous result must not freeze independent siblings.
+
+        Verified:
+        - Independent task-b is claimable after task-a is explicitly marked ambiguous.
+        - task-c, which depends on task-a, must NOT be dispatched (dep unsatisfied).
+        - After task-b completes task-c is still blocked (task-a remains ambiguous).
+        - task-a's session lock (ACTIVE_TASK_STATES) is retained throughout.
+        - After registry restart task-a is still ambiguous — no blind re-dispatch.
+        """
+        self.register("account-b")
+        tasks = [
+            task("task-a", account="account-a"),
+            task("task-b", account="account-b"),
+            task("task-c", account="account-b", depends=["task-a"]),
+        ]
+        body = assignment("job-1", "key-1", tasks, accounts=["account-a", "account-b"], max_workers=3)
+        self.registry.submit(body, now=1)
+
+        # Dispatch task-a and let the worker report an ambiguous outcome.
+        op_a = self.registry.claim_operation("worker-a", now=2)
+        self.assertEqual(op_a["kind"], "chat_session")
+        self.assertEqual(op_a["input"]["sessionId"], "session-account-a")
+        self.registry.record_result(op_a["operationId"], {
+            "workerId": "worker-a", "outcome": "ambiguous", "errorClass": "provider_timeout",
+        }, now=3)
+
+        # Independent task-b must be claimable; assignment must not be held.
+        op_b = self.registry.claim_operation("worker-b", now=4)
+        self.assertIsNotNone(op_b, "independent task-b must not be frozen by ambiguous task-a")
+        self.assertEqual(op_b["kind"], "chat_session")
+        self.assertEqual(op_b["input"]["sessionId"], "session-account-b")
+
+        # task-c depends on task-a (ambiguous ≠ complete) → must not be dispatched.
+        self.assertIsNone(
+            self.registry.claim_operation("worker-c", now=5),
+            "task-c must not run while its dependency task-a is ambiguous",
+        )
+
+        # Verify per-task states and session lock on task-a.
+        snap = self.registry.get_assignment("job-1")
+        task_states = {t["taskId"]: t["state"] for t in snap["tasks"]}
+        self.assertEqual(task_states["task-a"], "ambiguous")
+        self.assertIn(task_states["task-b"], ("reserved", "starting", "running", "awaiting_output"))
+        self.assertEqual(task_states["task-c"], "queued")
+        self.assertNotEqual(snap["state"], "held", "assignment must remain queued while task-b is in flight")
+
+        # session-account-a is held by the ambiguous task.
+        self.registry.submit(assignment("job-x", "key-x", [task("tx", account="account-a")]), now=5)
+        self.assertIsNone(
+            self.registry.claim_operation("worker-x", now=5),
+            "session-account-a must remain locked by the ambiguous task",
+        )
+
+        # Complete task-b; task-c still cannot run because task-a is ambiguous.
+        self.registry.record_result(op_b["operationId"], {"workerId": "worker-b", "outcome": "accepted"}, now=5)
+        obs_b = self.registry.claim_operation("worker-b", now=7)
+        self.assertEqual(obs_b["kind"], "observe_session")
+        self.registry.record_result(obs_b["operationId"], {"workerId": "worker-b", "outcome": "accepted", "result": {
+            "status": "complete", "assistantText": "DONE", "assistantAt": 6,
+            "sessionId": "session-account-b",
+        }}, now=8)
+        self.assertIsNone(
+            self.registry.claim_operation("worker-c", now=9),
+            "task-c must still wait while task-a is ambiguous",
+        )
+        snap2 = self.registry.get_assignment("job-1")
+        task_states2 = {t["taskId"]: t["state"] for t in snap2["tasks"]}
+        self.assertEqual(task_states2["task-a"], "ambiguous")
+        self.assertEqual(task_states2["task-b"], "complete")
+        self.assertEqual(task_states2["task-c"], "queued")
+
+        # No duplicate dispatch of the ambiguous task after restart.
+        restarted = JobRegistry(self.db)
+        self.assertIsNone(restarted.claim_operation("worker-restart", now=10))
+        with restarted.connection() as db:
+            row = db.execute("SELECT state FROM job_tasks WHERE assignment='job-1' AND task_id='task-a'").fetchone()
+        self.assertEqual(row["state"], "ambiguous")
+
+
+    def test_large_bounded_output_within_contract_succeeds_over_contract_is_rejected(self):
+        """assistantText up to 32 KiB passes record_result; text exceeding output.maxBytes blocks."""
+        # --- Success path: 2900-byte text within a 5000-byte contract ---
+        big_task = task("big-t")
+        big_task["output"]["maxBytes"] = 5000
+        self.registry.submit(assignment("big-job", "big-key", [big_task]), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        observe = self.registry.claim_operation("worker", now=5)
+        self.assertEqual(observe["kind"], "observe_session")
+        large_text = "A" * 2900 + " DONE"  # 2905 bytes — above old 2048 scalar cap, within 5000-byte contract
+        self.registry.record_result(observe["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {
+            "status": "complete", "assistantText": large_text, "assistantAt": 4,
+            "sessionId": "session-account-a"}}, now=6)
+        self.assertEqual(self.registry.get_assignment("big-job")["tasks"][0]["state"], "complete")
+        results = self.registry.assignment_results("big-job")["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["text"], large_text)
+
+        # --- Rejection path: 1504-byte text exceeds 1024-byte contract ---
+        small_task = task("small-t")
+        small_task["output"]["maxBytes"] = 1024
+        self.registry.submit(assignment("small-job", "small-key", [small_task]), now=7)
+        chat2 = self.registry.claim_operation("worker", now=8)
+        self.assertEqual(chat2["kind"], "chat_session")
+        self.registry.record_result(chat2["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=9)
+        observe2 = self.registry.claim_operation("worker", now=11)
+        self.assertEqual(observe2["kind"], "observe_session")
+        over_text = "B" * 1500 + " DONE"  # 1504 bytes — within record_result 32 KiB limit, over 1024-byte contract
+        self.registry.record_result(observe2["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {
+            "status": "complete", "assistantText": over_text, "assistantAt": 10,
+            "sessionId": "session-account-a"}}, now=12)
+        self.assertEqual(self.registry.get_assignment("small-job")["tasks"][0]["state"], "blocked")
+
+    def test_ambiguous_task_dto_includes_reconciliation_hint_across_restart(self):
+        """get_assignment must emit a machine-readable reconciliation object for ambiguous tasks."""
+        self.registry.submit(assignment(), now=1)
+        op = self.registry.claim_operation("worker", lease_seconds=5, now=2)
+        self.assertEqual(op["kind"], "chat_session")
+        # Lease expires at now=7; process expiry by calling claim at now=8.
+        none_op = self.registry.claim_operation("worker-2", now=8)
+        self.assertIsNone(none_op)
+
+        snap = self.registry.get_assignment("job-1")
+        task_dto = snap["tasks"][0]
+        self.assertEqual(task_dto["state"], "ambiguous")
+
+        rec = task_dto.get("reconciliation")
+        self.assertIsNotNone(rec, "ambiguous task must carry a reconciliation object")
+        self.assertTrue(rec["required"])
+        self.assertFalse(rec["redispatchAllowed"])
+        self.assertEqual(rec["nextAction"], "inspect_original_execution")
+        self.assertIsNotNone(rec.get("operationId"), "operationId must be bound when known")
+        self.assertEqual(rec["operationId"], op["operationId"])
+        self.assertEqual(rec["attempt"], op["attemptId"])
+        self.assertEqual(rec["generation"], op["generation"])
+        self.assertEqual(rec["selectedAccountId"], op["selectedAccountId"])
+        self.assertEqual(rec["sessionId"], op["sessionId"])
+
+        # Reconciliation must not leak instructions, prompts, or credentials.
+        serialized = str(rec)
+        self.assertNotIn("instruction", serialized.lower())
+        self.assertNotIn("bearer", serialized.lower())
+
+        # Hint must survive a registry restart (reads from durable DB).
+        restarted = JobRegistry(self.db)
+        snap2 = restarted.get_assignment("job-1")
+        rec2 = snap2["tasks"][0].get("reconciliation")
+        self.assertIsNotNone(rec2, "reconciliation hint must persist across restart")
+        self.assertEqual(rec2["operationId"], op["operationId"])
+        self.assertEqual(rec2["attempt"], op["attemptId"])
+        self.assertEqual(rec2["generation"], op["generation"])
+
+    def test_two_sessions_same_account_capacity_two_run_concurrently_exclusive_per_session(self):
+        """Two distinct registered sessions on one account (capacity 3) dispatch concurrently;
+        a second task for an already-occupied session is blocked by the session lock."""
+        sessions = [
+            {"id": "session-c1", "model": "model-a", "workspace": "workspace-a"},
+            {"id": "session-c2", "model": "model-a", "workspace": "workspace-a"},
+            {"id": "session-c3", "model": "model-a", "workspace": "workspace-a"},
+        ]
+        self.register("account-c", sessions=sessions, capacity=3)
+
+        # Two tasks on *different* sessions of the same account.
+        self.registry.submit(assignment("cj-1", "ck-1", [task("ct-1", account="account-c", session_id="session-c1")],
+                                        accounts=["account-c"]), now=1)
+        self.registry.submit(assignment("cj-2", "ck-2", [task("ct-2", account="account-c", session_id="session-c2")],
+                                        accounts=["account-c"]), now=2)
+
+        op1 = self.registry.claim_operation("worker-1", now=3)
+        self.assertIsNotNone(op1, "first session on account-c must be claimable")
+        self.assertEqual(op1["selectedAccountId"], "account-c")
+        op2 = self.registry.claim_operation("worker-2", now=4)
+        self.assertIsNotNone(op2, "second session on same account must be claimable with capacity 3")
+        self.assertEqual(op2["selectedAccountId"], "account-c")
+        self.assertNotEqual(op1["sessionId"], op2["sessionId"],
+                            "each task must hold its own session")
+        self.assertEqual({op1["sessionId"], op2["sessionId"]}, {"session-c1", "session-c2"})
+
+        # Submit a third task targeting session-c1 which is already occupied.
+        self.registry.submit(assignment("cj-3", "ck-3", [task("ct-3", account="account-c", session_id="session-c1")],
+                                        accounts=["account-c"]), now=5)
+        self.assertIsNone(
+            self.registry.claim_operation("worker-3", now=6),
+            "session-c1 must remain exclusive while op1 is active (capacity would allow it)",
+        )
+
+
+    # ------------------------------------------------------------------ #
+    # Explicit reconciliation (reconcile_task)                           #
+    # ------------------------------------------------------------------ #
+
+    def _make_ambiguous(self, assignment_id="job-1", lease_seconds=5, now_start=1):
+        """Submit, dispatch, expire the lease so the task becomes ambiguous."""
+        self.registry.submit(assignment(assignment_id, assignment_id + "-key"), now=now_start)
+        chat_op = self.registry.claim_operation("worker", lease_seconds=lease_seconds, now=now_start + 1)
+        self.assertEqual(chat_op["kind"], "chat_session")
+        # Trigger expiry: now > dispatch_at + lease_seconds
+        self.registry.claim_operation("worker2", now=now_start + 1 + lease_seconds + 1)
+        return chat_op
+
+    def test_reconcile_denied_for_cancelled_assignment(self):
+        """reconcile_task must raise RuntimeError for a cancelled assignment."""
+        chat_op = self._make_ambiguous(now_start=1)
+        snap = self.registry.get_assignment("job-1")
+        self.assertEqual(snap["tasks"][0]["state"], "ambiguous")
+        self.registry.cancel_assignment("job-1", expected_revision=snap["revision"], now=20)
+        snap2 = self.registry.get_assignment("job-1")
+        self.assertEqual(snap2["state"], "cancelled")
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            self.registry.reconcile_task("job-1", "task-1", snap2["revision"])
+
+    def test_reconcile_denied_for_owner_mismatch(self):
+        """reconcile_task with wrong owner_principal_id must raise KeyError."""
+        body = assignment()
+        body["ownerPrincipalId"] = "alice"
+        body["clientId"] = "client-a"
+        self.registry.submit(body, now=1)
+        self.registry.claim_operation("worker", lease_seconds=5, now=2)
+        self.registry.claim_operation("worker2", now=9)
+        snap = self.registry.get_assignment("job-1", "alice", "client-a")
+        with self.assertRaises(KeyError):
+            self.registry.reconcile_task(
+                "job-1", "task-1", snap["revision"],
+                owner_principal_id="bob", client_id="client-a",
+            )
+        # Correct owner succeeds
+        result = self.registry.reconcile_task(
+            "job-1", "task-1", snap["revision"],
+            owner_principal_id="alice", client_id="client-a", now=15,
+        )
+        self.assertEqual(result["state"], "awaiting_output")
+
+    def test_reconcile_denied_for_stale_revision(self):
+        """reconcile_task with wrong expected_revision must raise RuntimeError."""
+        self._make_ambiguous(now_start=1)
+        with self.assertRaisesRegex(RuntimeError, "Stale"):
+            self.registry.reconcile_task("job-1", "task-1", 9999)
+
+    def test_reconcile_queues_one_observe_after_ambiguity_and_restart(self):
+        """After lease expiry and registry restart, one observe is queued with original dispatchAt."""
+        chat_op = self._make_ambiguous(now_start=1)
+        # Restart
+        restarted = JobRegistry(self.db)
+        snap = restarted.get_assignment("job-1")
+        self.assertEqual(snap["tasks"][0]["state"], "ambiguous")
+
+        result = restarted.reconcile_task("job-1", "task-1", snap["revision"], now=20)
+        self.assertEqual(result["state"], "awaiting_output")
+        self.assertEqual(result["assignmentState"], "queued")
+        self.assertEqual(result["assignmentId"], "job-1")
+        self.assertEqual(result["taskId"], "task-1")
+        self.assertEqual(result["attempt"], chat_op["attemptId"])
+        self.assertEqual(result["sessionId"], chat_op["sessionId"])
+
+        with restarted.connection() as db:
+            obs_ops = db.execute(
+                "SELECT kind, state, input FROM operations "
+                "WHERE assignment='job-1' AND kind='observe_session'"
+            ).fetchall()
+        self.assertEqual(len(obs_ops), 1, "exactly one observe_session must be queued")
+        self.assertEqual(obs_ops[0]["state"], "queued")
+
+        # Original dispatchAt must be preserved (not replaced with reconcile timestamp)
+        obs_input = json.loads(obs_ops[0]["input"])
+        self.assertEqual(obs_input["dispatchAt"], chat_op["input"]["dispatchAt"],
+                         "observe must carry the original dispatch timestamp")
+        self.assertIn("instructionsHash", obs_input, "instructions hash must be present")
+
+        # Task and assignment states
+        snap2 = restarted.get_assignment("job-1")
+        self.assertEqual(snap2["tasks"][0]["state"], "awaiting_output")
+        self.assertEqual(snap2["state"], "queued")
+
+        # Audit event emitted
+        events = restarted.events()["events"]
+        kinds = [e["kind"] for e in events]
+        self.assertIn("reconciliation_queued", kinds)
+
+    def test_reconcile_does_not_requeue_original_chat(self):
+        """reconcile_task must never add a second chat_session operation."""
+        self._make_ambiguous(now_start=1)
+        snap = self.registry.get_assignment("job-1")
+        self.registry.reconcile_task("job-1", "task-1", snap["revision"], now=20)
+        with self.registry.connection() as db:
+            chats = db.execute(
+                "SELECT id FROM operations WHERE assignment='job-1' AND kind='chat_session'"
+            ).fetchall()
+        self.assertEqual(len(chats), 1, "exactly one chat_session must exist (the original)")
+
+    def test_reconcile_retains_original_session_reservation(self):
+        """After reconcile the original session remains locked; a competing task cannot claim it.
+
+        After reconcile, job-1's task is ``awaiting_output`` (ACTIVE_TASK_STATES) and its
+        session remains occupied.  The only claimable operation is job-1's reconcile observe;
+        job-2's chat targeting the same session must be blocked for as long as job-1 holds it.
+        """
+        chat_op = self._make_ambiguous(now_start=1)
+        snap = self.registry.get_assignment("job-1")
+        self.registry.reconcile_task("job-1", "task-1", snap["revision"], now=20)
+
+        # Competing assignment targeting the same session
+        self.registry.submit(
+            assignment("job-2", "key-2", [task("task-2", session_id=chat_op["sessionId"])]),
+            now=21,
+        )
+
+        # The only claimable operation is job-1's reconcile observe (session is held by job-1)
+        obs = self.registry.claim_operation("worker", now=22)
+        self.assertIsNotNone(obs)
+        self.assertEqual(obs["kind"], "observe_session")
+        self.assertEqual(obs["sessionId"], chat_op["sessionId"])
+        # Verify this is job-1's operation, not job-2's chat
+        with self.registry.connection() as db:
+            obs_row = db.execute("SELECT assignment FROM operations WHERE id=?", (obs["operationId"],)).fetchone()
+        self.assertEqual(obs_row["assignment"], "job-1",
+                         "claimed observe must belong to job-1 -- session is still exclusively reserved")
+
+        # While job-1's observe is active (claimed) job-2's task still cannot grab the session
+        self.assertIsNone(
+            self.registry.claim_operation("worker-2", now=23),
+            "original session must remain exclusively reserved while job-1 holds awaiting_output",
+        )
+
+    def test_reconcile_duplicate_rejected_while_observe_pending(self):
+        """A second reconcile call while the first observe is still queued/claimed must be rejected."""
+        self._make_ambiguous(now_start=1)
+        snap = self.registry.get_assignment("job-1")
+        self.registry.reconcile_task("job-1", "task-1", snap["revision"], now=20)
+        snap2 = self.registry.get_assignment("job-1")
+        with self.assertRaisesRegex(RuntimeError, "[Pp]ending observation"):
+            self.registry.reconcile_task("job-1", "task-1", snap2["revision"], now=21)
+        with self.registry.connection() as db:
+            queued_obs = db.execute(
+                "SELECT COUNT(*) FROM operations "
+                "WHERE assignment='job-1' AND kind='observe_session' AND state='queued'"
+            ).fetchone()[0]
+        self.assertEqual(queued_obs, 1, "only one queued observe_session must exist after duplicate rejection")
+
+    def test_reconcile_collects_upstream_result_after_exhausted_monitor(self):
+        """After poll budget exhaustion the task is blocked; reconcile allows one fresh observe
+        that succeeds when the upstream session completed while the monitor was waiting."""
+        body = assignment()
+        body["tasks"][0]["observationTimeoutSeconds"] = 665
+        self.registry.submit(body, now=1)
+        chat_op = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat_op["kind"], "chat_session")
+        self.registry.record_result(
+            chat_op["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3,
+        )
+
+        # Drive 20 "running" observations to exhaust the poll budget.
+        now = 5
+        for i in range(20):
+            obs = self.registry.claim_operation("worker", now=now)
+            self.assertIsNotNone(obs, f"poll #{i + 1} must be claimable")
+            self.assertEqual(obs["kind"], "observe_session")
+            self.registry.record_result(
+                obs["operationId"],
+                {"workerId": "worker", "outcome": "accepted",
+                 "result": {"status": "running", "sessionId": chat_op["sessionId"]}},
+                now=now + 1,
+            )
+            now += 35  # advance past exponential backoff delays
+
+        task_snap = self.registry.get_assignment("job-1")["tasks"][0]
+        self.assertEqual(task_snap["state"], "blocked", "poll budget must be exhausted")
+
+        snap = self.registry.get_assignment("job-1")
+        self.assertEqual(snap["state"], "held", "assignment must be held after exhaustion")
+
+        result = self.registry.reconcile_task("job-1", "task-1", snap["revision"], now=now)
+        self.assertEqual(result["state"], "awaiting_output")
+        self.assertEqual(result["assignmentState"], "queued")
+
+        # Worker picks up the reconcile observation and finds the upstream has completed.
+        obs = self.registry.claim_operation("worker", now=now + 1)
+        self.assertIsNotNone(obs)
+        self.assertEqual(obs["kind"], "observe_session")
+        complete_at = now + 0.5
+        self.registry.record_result(
+            obs["operationId"],
+            {"workerId": "worker", "outcome": "accepted",
+             "result": {
+                 "status": "complete",
+                 "assistantText": "DONE late",
+                 "assistantAt": complete_at,
+                 "sessionId": chat_op["sessionId"],
+                 "reportedModel": "model-a",
+             }},
+            now=now + 2,
+        )
+        snap2 = self.registry.get_assignment("job-1")
+        self.assertEqual(snap2["tasks"][0]["state"], "complete",
+                         "complete upstream result must succeed even after budget exhaustion")
+        results = self.registry.assignment_results("job-1")["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["text"], "DONE late")
+        self.assertEqual(snap2["state"], "complete")
+
+
+
+    def test_running_worker_is_monitored_beyond_twenty_observations(self):
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(chat["operationId"], {"workerId":"worker", "outcome":"accepted"}, now=3)
+        for index in range(25):
+            now = 5 + index * 35
+            obs = self.registry.claim_operation("worker", now=now)
+            self.assertIsNotNone(obs)
+            self.registry.record_result(obs["operationId"], {"workerId":"worker", "outcome":"accepted",
+                "result":{"status":"running", "sessionId":chat["sessionId"]}}, now=now+1)
+        self.assertEqual(self.registry.get_assignment("job-1")["tasks"][0]["state"], "awaiting_output")
+
+    def test_monitor_deadline_holds_execution_without_releasing_or_relaunching(self):
+        body = assignment()
+        body["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body, now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(chat["operationId"], {"workerId":"worker", "outcome":"accepted"}, now=3)
+        obs = self.registry.claim_operation("worker", now=100)
+        self.registry.record_result(obs["operationId"], {"workerId":"worker", "outcome":"accepted",
+            "result":{"status":"running", "sessionId":chat["sessionId"]}}, now=101)
+        task_dto = self.registry.get_assignment("job-1")["tasks"][0]
+        self.assertEqual(task_dto["state"], "blocked")
+        self.assertIsNone(task_dto["releasedAt"])
+        self.assertTrue(task_dto["reconciliation"]["required"])
+        self.assertFalse(task_dto["reconciliation"]["redispatchAllowed"])
+        self.assertIsNone(self.registry.claim_operation("worker", now=150))
+
+    def test_monitor_deadline_contract_rejects_invalid_values(self):
+        for value in [59,604801,True,1.5,"3600"]:
+            body = assignment()
+            body["tasks"][0]["observationTimeoutSeconds"] = value
+            with self.assertRaisesRegex(ValueError,"observationTimeoutSeconds"):
+                validate_assignment(body)
+
+    def test_reconcile_rejects_released_reservation_and_invalid_revision(self):
+        self._make_ambiguous()
+        snap = self.registry.get_assignment("job-1")
+        with self.assertRaises(ValueError):
+            self.registry.reconcile_task("job-1","task-1",True,now=20)
+        with self.registry.connection(write=True) as db:
+            db.execute("UPDATE job_tasks SET released_at=10 WHERE assignment='job-1'")
+        with self.assertRaisesRegex(RuntimeError,"retained execution"):
+            self.registry.reconcile_task("job-1","task-1",snap["revision"],now=20)
+
+    def test_reconcile_cli_does_not_create_a_missing_database(self):
+        from snooze.reconcile_job import main
+        from contextlib import redirect_stderr
+        from io import StringIO
+        missing = Path(self.temp.name) / "never-created"
+        with redirect_stderr(StringIO()):
+            rc = main(["--state-dir",str(missing),"--assignment-id","job-1","--task-id","task-1","--expected-revision","1"])
+        self.assertEqual(rc,1)
+        self.assertFalse(missing.exists())
+
+
+
+    def test_reconcile_refuses_unapproved_or_unknown_assignment_state(self):
+        self._make_ambiguous()
+        snap = self.registry.get_assignment("job-1")
+        for state, approved in [("error",1),("held",0)]:
+            with self.registry.connection(write=True) as db:
+                db.execute("UPDATE assignments SET state=?,approved=? WHERE id='job-1'",(state,approved))
+            with self.assertRaisesRegex(RuntimeError,"not approved"):
+                self.registry.reconcile_task("job-1","task-1",snap["revision"],now=20)
+
+    def test_reconcile_refuses_changed_original_session_binding(self):
+        self._make_ambiguous()
+        snap = self.registry.get_assignment("job-1")
+        with self.registry.connection(write=True) as db:
+            row = db.execute("SELECT id,input FROM operations WHERE kind='chat_session'").fetchone()
+            payload = json.loads(row["input"])
+            payload["sessionId"] = "different-session"
+            db.execute("UPDATE operations SET input=? WHERE id=?",(json.dumps(payload),row["id"]))
+        with self.assertRaisesRegex(RuntimeError,"binding"):
+            self.registry.reconcile_task("job-1","task-1",snap["revision"],now=20)
+
+    def test_reconcile_cli_uses_existing_snooze_database(self):
+        from snooze.reconcile_job import main
+        from contextlib import redirect_stdout
+        from io import StringIO
+        self._make_ambiguous()
+        snap = self.registry.get_assignment("job-1")
+        target = self.db.parent / "snooze.sqlite3"
+        import shutil
+        shutil.copyfile(self.db,target)
+        output = StringIO()
+        with redirect_stdout(output):
+            rc = main(["--state-dir",str(target.parent),"--assignment-id","job-1","--task-id","task-1","--expected-revision",str(snap["revision"])])
+        self.assertEqual(rc,0)
+        self.assertEqual(json.loads(output.getvalue())["taskState"],"awaiting_output")
+        self.assertEqual(JobRegistry(target).get_assignment("job-1")["tasks"][0]["state"],"awaiting_output")
+
+
+    # ------------------------------------------------------------------ #
+    # Retained-blocked execution-lock semantics (repository=None)        #
+    # ------------------------------------------------------------------ #
+
+    def _make_retained_blocked(self, assignment_id="job-1", key="key-1"):
+        """Submit, dispatch, then trigger observation timeout → blocked with dispatch_at set, released_at NULL."""
+        body = assignment(assignment_id, key)
+        body["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body, now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        obs = self.registry.claim_operation("worker", now=100)
+        self.assertEqual(obs["kind"], "observe_session")
+        # dispatch_at=2; now-dispatch_at=99 >= observationTimeoutSeconds=60 → blocked, released_at stays NULL
+        self.registry.record_result(obs["operationId"], {"workerId": "worker", "outcome": "accepted",
+            "result": {"status": "running", "sessionId": chat["sessionId"]}}, now=101)
+        return chat
+
+    def test_retained_blocked_locks_session_and_scope(self):
+        """A retained-blocked task (dispatch_at set, released_at NULL) must hold its session and scope."""
+        chat = self._make_retained_blocked()
+        with self.registry.connection() as db:
+            row = db.execute("SELECT state,dispatch_at,released_at FROM job_tasks WHERE assignment='job-1'").fetchone()
+        self.assertEqual(row["state"], "blocked")
+        self.assertIsNotNone(row["dispatch_at"])
+        self.assertIsNone(row["released_at"])
+
+        # Same session: must be locked
+        self.registry.submit(assignment("job-2", "key-2", [task("task-2")]), now=102)
+        self.assertIsNone(self.registry.claim_operation("worker-2", now=103),
+                          "retained-blocked task must hold the session lock")
+
+        # Overlapping scope on a different account/session: must also be blocked
+        self.register("account-b")
+        self.registry.submit(
+            assignment("job-3", "key-3", [task("task-3", account="account-b",
+                                               scope="path:src/task-1.txt")], accounts=["account-b"]),
+            now=102,
+        )
+        self.assertIsNone(self.registry.claim_operation("worker-3", now=103),
+                          "retained-blocked task must hold its scope lock")
+
+    def test_independent_session_eligible_within_capacity_when_retained_blocked(self):
+        """A retained-blocked task consumes one capacity slot but a different session stays eligible."""
+        sessions = [
+            {"id": "session-s1", "model": "model-a", "workspace": "workspace-a"},
+            {"id": "session-s2", "model": "model-a", "workspace": "workspace-a"},
+        ]
+        self.registry.register_account({
+            "accountId": "account-a", "enabled": True, "authorized": True,
+            "health": "healthy", "quota": "available", "allowUnknownQuota": False,
+            "localCapacity": 2,
+            "registeredSessions": sessions,
+        })
+        body = assignment(tasks=[task("t1", session_id="session-s1")])
+        body["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body, now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        obs = self.registry.claim_operation("worker", now=100)
+        self.registry.record_result(obs["operationId"], {"workerId": "worker", "outcome": "accepted",
+            "result": {"status": "running", "sessionId": "session-s1"}}, now=101)
+        # t1 is now retained-blocked on session-s1; slot 1 of 2 used
+
+        self.registry.submit(
+            assignment("job-2", "key-2", [task("t2", session_id="session-s2", scope="path:src/t2.txt")]),
+            now=102,
+        )
+        op = self.registry.claim_operation("worker-2", now=103)
+        self.assertIsNotNone(op, "task on independent session must be claimable within capacity")
+        self.assertEqual(op["sessionId"], "session-s2")
+
+    def test_predispatch_blocked_does_not_consume_occupancy_slot(self):
+        """A credit-denied (pre-dispatch) blocked task sets released_at and must not occupy any slot."""
+        class DenyAdmission:
+            def reserve(self, **_kwargs):
+                raise CreditDenied("insufficient credit")
+            def release_known_refusal(self, *_args, **_kwargs):
+                pass
+
+        self.registry.credit_admission = DenyAdmission()
+        self.registry.submit(assignment(), now=1)
+        self.assertIsNone(self.registry.claim_operation("worker", now=2))
+        with self.registry.connection() as db:
+            row = db.execute("SELECT state,released_at FROM job_tasks WHERE assignment='job-1'").fetchone()
+        self.assertEqual(row["state"], "blocked")
+        self.assertIsNotNone(row["released_at"])  # pre-dispatch: slot was released
+
+        # Same session must be claimable once credit restriction lifted
+        self.registry.credit_admission = None
+        self.registry.submit(assignment("job-2", "key-2", [task("task-2")]), now=3)
+        op = self.registry.claim_operation("worker-2", now=4)
+        self.assertIsNotNone(op, "pre-dispatch blocked must not occupy session or account slot")
+        self.assertEqual(op["kind"], "chat_session")
+
+    def test_max_workers_1_blocks_new_dispatch_while_retained_blocked_holds_slot(self):
+        """Retained-blocked task counts toward global cap; a separate account's task must not dispatch."""
+        self.register("account-b")
+        # Set global cap=1 up front so it governs both dispatch and scheduling.
+        self.registry.set_control("set_concurrency", 1, expected_revision=1)
+
+        # Job-1 uses account-a; drive t1 to retained-blocked while global cap is already 1.
+        body1 = assignment("job-1", "key-1", [task("t1")]) | {"scheduling": {"profile": "throughput"}}
+        body1["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body1, now=1)
+        chat = self.registry.claim_operation("worker-a", now=2)  # cap=1, active_count→1; ok to dispatch
+        self.assertEqual(chat["sessionId"], "session-account-a")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker-a", "outcome": "accepted"}, now=3)
+        obs = self.registry.claim_operation("worker-a", now=100)
+        self.registry.record_result(obs["operationId"], {"workerId": "worker-a", "outcome": "accepted",
+            "result": {"status": "running", "sessionId": "session-account-a"}}, now=101)
+        with self.registry.connection() as db:
+            t1 = db.execute("SELECT state,released_at FROM job_tasks WHERE task_id='t1'").fetchone()
+        self.assertEqual(t1["state"], "blocked")
+        self.assertIsNone(t1["released_at"])  # retained: dispatch_at set, released_at NULL
+
+        # Submit job-2 on account-b (different account/session, no scope conflict).
+        # With t1 retained-blocked counting as 1, active_count=1 >= cap=1 → must not dispatch.
+        self.registry.submit(
+            assignment("job-2", "key-2", [task("t2", account="account-b")], accounts=["account-b"]),
+            now=102,
+        )
+        self.assertIsNone(self.registry.claim_operation("worker-b", now=103),
+                          "retained-blocked t1 must fill the cap=1 slot, blocking t2 dispatch")
+
+    def test_predispatch_blocked_does_not_occupy_global_cap(self):
+        """A credit-denied (pre-dispatch) blocked task leaves the global slot free."""
+        class DenyAdmission:
+            def reserve(self, **_kwargs):
+                raise CreditDenied("insufficient credit")
+            def release_known_refusal(self, *_args, **_kwargs):
+                pass
+
+        self.register("account-b")
+        self.registry.set_control("set_concurrency", 1, expected_revision=1)
+        self.registry.credit_admission = DenyAdmission()
+        self.registry.submit(assignment(), now=1)
+        self.assertIsNone(self.registry.claim_operation("worker", now=2))
+        with self.registry.connection() as db:
+            row = db.execute("SELECT state,released_at FROM job_tasks WHERE assignment='job-1'").fetchone()
+        self.assertEqual(row["state"], "blocked")
+        self.assertIsNotNone(row["released_at"])  # pre-dispatch: slot free
+
+        # A different job can dispatch immediately because global cap is still open.
+        self.registry.credit_admission = None
+        self.registry.submit(assignment("job-2", "key-2",
+            [task("t2", account="account-b")], accounts=["account-b"]), now=3)
+        op = self.registry.claim_operation("worker-2", now=4)
+        self.assertIsNotNone(op, "global cap must remain open after pre-dispatch block")
+        self.assertEqual(op["kind"], "chat_session")
+
+    def test_reconcile_observe_claimable_at_capacity(self):
+        """observe_session for reconciliation must be claimable even when project capacity is exhausted."""
+        self.register("account-b")
+        body = assignment("job-1", "key-1", [task("t1")],
+                          accounts=["account-a"], max_workers=1) | {"scheduling": {"profile": "economy"}}
+        body["tasks"][0]["observationTimeoutSeconds"] = 60
+        self.registry.submit(body, now=1)
+
+        # Drive t1 to retained-blocked.
+        chat = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        obs = self.registry.claim_operation("worker", now=100)
+        self.registry.record_result(obs["operationId"], {"workerId": "worker", "outcome": "accepted",
+            "result": {"status": "running", "sessionId": chat["sessionId"]}}, now=101)
+
+        # Inject a second reserved task in the same project to simulate capacity full.
+        with self.registry.connection(write=True) as db:
+            db.execute(
+                "INSERT INTO assignments(id,project,idem,fingerprint,eligible,body,state,approved,revision,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("filler-job", "project-a", "filler-idem", "fp2", '["account-b"]', '{}', "queued", 1, 1, 50),
+            )
+            db.execute(
+                "INSERT INTO job_tasks(assignment,task_id,body,state,generation,selected_account,"
+                "attempt_id,session_id,dispatch_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("filler-job", "filler-t", '{"scopeKeys":["path:filler.txt"],"dependsOn":[],"instructions":"",'
+                 '"execution":{"mode":"existing-session","sessionId":"session-account-b","accountId":"account-b"},'
+                 '"output":{"kind":"text","maxBytes":512,"format":"plain","expectedMarker":"OK"}}',
+                 "reserved", 1, "account-b", "filler-attempt", "session-account-b", 50),
+            )
+
+        # With a reserved task in the project, project is "at capacity" (max_workers=1 for job-1, but
+        # the global control cap matters for dispatch). Reconcile t1 and verify observe is claimable.
+        snap = self.registry.get_assignment("job-1")
+        self.registry.reconcile_task("job-1", "t1", snap["revision"], now=102)
+
+        observe_op = self.registry.claim_operation("worker-reconcile", now=103)
+        self.assertIsNotNone(observe_op,
+                             "observe_session must be claimable at capacity for reconciliation")
+        self.assertEqual(observe_op["kind"], "observe_session")
+        self.assertEqual(observe_op["sessionId"], chat["sessionId"])
+
+    def test_reconcile_rejects_if_different_task_occupies_session(self):
+        """reconcile_task must raise RuntimeError when another live task already holds the session."""
+        self._make_retained_blocked()
+        snap = self.registry.get_assignment("job-1")
+        self.assertEqual(snap["tasks"][0]["state"], "blocked")
+
+        # Inject a live task on the same session (simulates a race that the fix prevents, but
+        # reconcile must still guard against it defensively).
+        task_body = json.dumps({
+            "scopeKeys": ["path:other.txt"], "dependsOn": [], "instructions": "",
+            "execution": {"mode": "existing-session", "sessionId": "session-account-a", "accountId": "account-a"},
+            "output": {"kind": "text", "maxBytes": 512, "format": "plain", "expectedMarker": "OK"},
+        })
+        with self.registry.connection(write=True) as db:
+            db.execute(
+                "INSERT INTO assignments(id,project,idem,fingerprint,eligible,body,state,approved,revision,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("other-job", "project-a", "other-idem", "fp", '["account-a"]', '{}', "queued", 1, 1, 100),
+            )
+            db.execute(
+                "INSERT INTO job_tasks(assignment,task_id,body,state,generation,selected_account,"
+                "attempt_id,session_id,dispatch_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("other-job", "other-task", task_body, "reserved", 1, "account-a",
+                 "other-attempt", "session-account-a", 100),
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "different live task"):
+            self.registry.reconcile_task("job-1", "task-1", snap["revision"], now=102)
+
+    # ------------------------------------------------------------------ #
+    # Observation eligibility: quota/health bypass for observe_session    #
+    # ------------------------------------------------------------------ #
+
+    def test_exhausted_account_observe_bypasses_quota_gate(self):
+        """observe_session is claimable for a quota-depleted account; chat_session dispatch is blocked."""
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        # Account becomes quota-exhausted after the chat dispatch.
+        self.register("account-a", quota="depleted")
+        # observe_session must still be claimable despite depleted quota.
+        obs = self.registry.claim_operation("worker", now=5)
+        self.assertIsNotNone(obs, "observe_session must bypass quota gate for depleted account")
+        self.assertEqual(obs["kind"], "observe_session")
+        # chat_session submission for a depleted account is blocked.
+        with self.assertRaisesRegex(RuntimeError, "quota"):
+            self.registry.submit(assignment("job-2", "key-2", [task("task-2")]), now=4)
+
+    def test_degraded_account_observe_bypasses_health_gate(self):
+        """observe_session is claimable for a health-degraded account."""
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        # Account health degrades after dispatch.
+        self.register("account-a", health="degraded")
+        obs = self.registry.claim_operation("worker", now=5)
+        self.assertIsNotNone(obs, "observe_session must bypass health gate for degraded account")
+        self.assertEqual(obs["kind"], "observe_session")
+
+    def test_disabled_account_observe_is_denied(self):
+        """A disabled account blocks observe_session."""
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        self.register("account-a", enabled=False)
+        with self.assertRaisesRegex(RuntimeError, "disabled"):
+            self.registry.claim_operation("worker", now=5)
+
+    def test_unauthorized_account_observe_is_denied(self):
+        """An unauthorized account blocks observe_session."""
+        self.registry.submit(assignment(), now=1)
+        chat = self.registry.claim_operation("worker", now=2)
+        self.assertEqual(chat["kind"], "chat_session")
+        self.registry.record_result(chat["operationId"], {"workerId": "worker", "outcome": "accepted"}, now=3)
+        self.register("account-a", authorized=False)
+        with self.assertRaisesRegex(RuntimeError, "authorized"):
+            self.registry.claim_operation("worker", now=5)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -451,3 +451,70 @@ test("typed transcript cannot complete without exact dispatched instruction hash
     assert.equal('assistantText' in resultBodies[0].result, hash === rightHash);
   }
 });
+
+test("isAccountObservable bypasses isAccountEligible for observe_session", async () => {
+  // isAccountEligible=false would normally block; isAccountObservable=true must allow observation.
+  let observableCalls = 0; let eligibleCalls = 0;
+  const obs = pythonObservation("obs-bypass", "account-a", Date.parse("2026-10-10T00:00:00Z") / 1_000);
+  const { worker, resultBodies } = harness([obs], {
+    isAccountEligible: () => { eligibleCalls++; return false; },
+    isAccountObservable: () => { observableCalls++; return true; },
+  });
+  worker.start(); await until(() => resultBodies.length === 1); await worker.stop();
+  assert.ok(observableCalls > 0, "isAccountObservable must be called for observe_session");
+  assert.equal(resultBodies[0].outcome, "accepted", "exhausted account must be allowed to observe");
+  assert.notEqual(resultBodies[0].errorClass, "account_unavailable");
+});
+
+test("an idle session with a failed relay or pending approval never receives a new task", async () => {
+  for (const extra of [{errorCode:"ACP_RELAY_DIED"},{parkedQuestion:{kind:"approval",text:"Approve this change?"}}]) {
+    let sends=0;
+    const {worker,resultBodies}=harness([op("unavailable-relay","account-a")],{
+      adapterFactory:id=>adapter(id,{
+        sessionStatus:async()=>ok(id,{status:{sessionStatus:"idle",isOwner:true,canSendMessage:true,model:"gpt-6-luna",...extra}}),
+        sendMessage:async()=>{sends++;return ok(id);},
+      }),
+    });
+    worker.start();
+    try {await until(()=>resultBodies.length===1);} finally {await worker.stop();}
+    assert.equal(sends,0);
+    assert.equal(resultBodies[0].outcome,"rejected");
+    assert.equal(resultBodies[0].errorClass,"session_not_sendable");
+  }
+});
+
+test("isAccountObservable=false denies observe_session with account_unavailable", async () => {
+  const obs = pythonObservation("obs-deny", "account-a", Date.parse("2026-10-10T00:00:00Z") / 1_000);
+  const { worker, resultBodies } = harness([obs], {
+    isAccountEligible: () => true,
+    isAccountObservable: () => false,
+  });
+  worker.start(); await until(() => resultBodies.length === 1); await worker.stop();
+  assert.equal(resultBodies[0].outcome, "rejected");
+  assert.equal(resultBodies[0].errorClass, "account_unavailable");
+});
+
+test("chat_session uses isAccountEligible even when isAccountObservable is provided and returns true", async () => {
+  let eligibleCalled = false;
+  const { worker, resultBodies } = harness([op("chat-gate", "account-a")], {
+    isAccountEligible: () => { eligibleCalled = true; return false; },
+    isAccountObservable: () => true,
+  });
+  worker.start(); await until(() => resultBodies.length === 1); await worker.stop();
+  assert.ok(eligibleCalled, "isAccountEligible must be called for chat_session");
+  assert.equal(resultBodies[0].outcome, "rejected");
+  assert.equal(resultBodies[0].errorClass, "account_unavailable");
+});
+
+test("observe_session falls back to isAccountEligible when isAccountObservable is absent", async () => {
+  let eligibleCalled = false;
+  const obs = pythonObservation("obs-fallback", "account-a", Date.parse("2026-10-10T00:00:00Z") / 1_000);
+  const { worker, resultBodies } = harness([obs], {
+    isAccountEligible: () => { eligibleCalled = true; return false; },
+    // no isAccountObservable
+  });
+  worker.start(); await until(() => resultBodies.length === 1); await worker.stop();
+  assert.ok(eligibleCalled, "isAccountEligible must be called as fallback for observe_session");
+  assert.equal(resultBodies[0].outcome, "rejected");
+  assert.equal(resultBodies[0].errorClass, "account_unavailable");
+});

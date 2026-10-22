@@ -193,6 +193,87 @@ class PrivateBridgeTests(unittest.TestCase):
         self.assertGreater(task["releasedAt"], 0)
         self.assertEqual(task["providerStatus"], "complete")
 
+    def _get_ambiguous_revision(self):
+        """Submit job, drive it to ambiguous state, return current assignment revision."""
+        body = assignment()
+        status, receipt = call(str(self.socket_path), method="POST", route="/v1/assignments",
+                               bearer=self.bearer, body=body, owner="principal-x", client="client-x")
+        self.assertEqual(status, 202)
+        _, operation = call(str(self.socket_path), method="POST", body={"workerId": "w1"},
+                            bearer=self.bearer, route="/v1/operations/claim")
+        self.assertIsNotNone(operation)
+        call(str(self.socket_path), method="POST",
+             body={"workerId": "w1", "outcome": "ambiguous"},
+             bearer=self.bearer, route=f"/v1/operations/{operation['operationId']}/result")
+        _, status_row = call(str(self.socket_path), bearer=self.bearer,
+                             route="/admin/api/v1/assignments/job-1")
+        return status_row["revision"]
+
+    def test_reconcile_task_requires_owner_and_rejects_wrong_owner(self):
+        rev = self._get_ambiguous_revision()
+        # Missing owner → 403
+        status, _ = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                         route="/v1/assignments/job-1/reconcile",
+                         body={"taskId": "task-1", "expectedRevision": rev})
+        self.assertEqual(status, 403)
+        # Wrong owner → 404 (assignment not found for this scope)
+        status, _ = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                         route="/v1/assignments/job-1/reconcile",
+                         body={"taskId": "task-1", "expectedRevision": rev},
+                         owner="wrong-owner", client="wrong-client")
+        self.assertEqual(status, 404)
+
+    def test_reconcile_task_parser_rejects_extraneous_and_invalid_args(self):
+        rev = self._get_ambiguous_revision()
+        # Extraneous field
+        status, _ = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                         route="/v1/assignments/job-1/reconcile",
+                         body={"taskId": "task-1", "expectedRevision": rev, "extra": True},
+                         owner="principal-x", client="client-x")
+        self.assertEqual(status, 400)
+        # Bool expectedRevision (not allowed)
+        status, _ = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                         route="/v1/assignments/job-1/reconcile",
+                         body={"taskId": "task-1", "expectedRevision": True},
+                         owner="principal-x", client="client-x")
+        self.assertEqual(status, 400)
+        # Zero revision
+        status, _ = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                         route="/v1/assignments/job-1/reconcile",
+                         body={"taskId": "task-1", "expectedRevision": 0},
+                         owner="principal-x", client="client-x")
+        self.assertEqual(status, 400)
+        # Missing taskId
+        status, _ = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                         route="/v1/assignments/job-1/reconcile",
+                         body={"expectedRevision": rev},
+                         owner="principal-x", client="client-x")
+        self.assertEqual(status, 400)
+
+    def test_reconcile_task_stale_revision_and_duplicate_guard(self):
+        rev = self._get_ambiguous_revision()
+        # Stale revision → 409
+        status, _ = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                         route="/v1/assignments/job-1/reconcile",
+                         body={"taskId": "task-1", "expectedRevision": 1},
+                         owner="principal-x", client="client-x")
+        self.assertEqual(status, 409)
+        # Valid reconcile → 202 and queues exactly one observation
+        status, result = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                              route="/v1/assignments/job-1/reconcile",
+                              body={"taskId": "task-1", "expectedRevision": rev},
+                              owner="principal-x", client="client-x")
+        self.assertEqual(status, 202)
+        self.assertEqual(result["taskId"], "task-1")
+        self.assertEqual(result["state"], "awaiting_output")
+        new_rev = result["revision"]
+        # Duplicate with updated revision → 409 (pending observation already exists)
+        status, _ = call(str(self.socket_path), method="POST", bearer=self.bearer,
+                         route="/v1/assignments/job-1/reconcile",
+                         body={"taskId": "task-1", "expectedRevision": new_rev},
+                         owner="principal-x", client="client-x")
+        self.assertEqual(status, 409)
+
     def test_auth_pipe_reads_only_a_bounded_bearer(self):
         read_fd, write_fd = os.pipe()
         os.write(write_fd, b"z" * 43 + b"\n")

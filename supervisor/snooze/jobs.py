@@ -34,13 +34,25 @@ SAFE_CHAT_PREFLIGHT_REJECTIONS = {
 ASSIGNMENT_KEYS = {"schemaVersion", "assignmentId", "idempotencyKey", "projectId", "eligibleAccountIds", "tasks"}
 ASSIGNMENT_OPTIONAL_KEYS = {"ownerPrincipalId", "clientId", "maxWorkers", "scheduling"}
 TASK_KEYS = {"taskId", "dependsOn", "scopeKeys", "instructions", "execution", "output"}
-TASK_OPTIONAL_KEYS = {"inputRef", "inputSha256", "providerTaskId", "stackId", "provider", "priority"}
+TASK_OPTIONAL_KEYS = {"inputRef", "inputSha256", "providerTaskId", "stackId", "provider", "priority", "observationTimeoutSeconds"}
 OUTPUT_KEYS = {
     "json-records": {"kind", "validator", "ids", "requiredFields"},
     "text": {"kind", "maxBytes", "format", "expectedMarker"},
     "coding-artifact": {"kind", "repository", "allowedPaths", "requirePullRequest"},
 }
 ACTIVE_TASK_STATES = ("reserved", "starting", "running", "awaiting_output", "ambiguous", "cancel_pending")
+# SQL predicate for job_tasks rows that hold an execution slot.  Covers all
+# ACTIVE_TASK_STATES plus retained-blocked rows (dispatched but not yet released).
+# Pre-dispatch blocked rows (released_at IS NOT NULL) must not count as occupied.
+_SLOT_SQL = (
+    "state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')"
+    " OR (state='blocked' AND dispatch_at IS NOT NULL AND released_at IS NULL)"
+)
+# Same predicate with explicit table alias for JOIN queries.
+_SLOT_SQL_T = (
+    "t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')"
+    " OR (t.state='blocked' AND t.dispatch_at IS NOT NULL AND t.released_at IS NULL)"
+)
 
 
 def _text(value, name, maximum=256):
@@ -133,6 +145,8 @@ def validate_assignment(body):
         task_id = _text(task["taskId"], "taskId")
         if "priority" in task and (type(task["priority"]) is not int or not -100 <= task["priority"] <= 100):
             raise ValueError("priority must be an integer from -100 to 100")
+        if "observationTimeoutSeconds" in task and (type(task["observationTimeoutSeconds"]) is not int or not 60 <= task["observationTimeoutSeconds"] <= 604800):
+            raise ValueError("observationTimeoutSeconds must be an integer from 60 to 604800")
         ids.append(task_id)
         dependencies = task["dependsOn"]
         if not isinstance(dependencies, list) or len(dependencies) > MAX_DEPENDENCIES or any(not isinstance(v, str) for v in dependencies):
@@ -385,8 +399,8 @@ class JobRegistry:
             requested_sessions = {item["id"]: item for item in clean_sessions}
             for session_id, old in old_sessions.items():
                 busy = db.execute(
-                    "SELECT 1 FROM job_tasks WHERE session_id=? AND state IN (?,?,?,?,?,?) LIMIT 1",
-                    (session_id, *ACTIVE_TASK_STATES),
+                    "SELECT 1 FROM job_tasks WHERE session_id=? AND (" + _SLOT_SQL + ") LIMIT 1",
+                    (session_id,),
                 ).fetchone()
                 if not busy and self.repository is not None:
                     busy = db.execute("SELECT 1 FROM attempts WHERE session=? AND released_at IS NULL LIMIT 1", (session_id,)).fetchone()
@@ -403,8 +417,8 @@ class JobRegistry:
                     other_sessions = json.loads(other["data"])["registeredSessions"]
                     if any(item["id"] == session_id for item in other_sessions):
                         busy = db.execute(
-                            "SELECT 1 FROM job_tasks WHERE session_id=? AND state IN (?,?,?,?,?,?) LIMIT 1",
-                            (session_id, *ACTIVE_TASK_STATES),
+                            "SELECT 1 FROM job_tasks WHERE session_id=? AND (" + _SLOT_SQL + ") LIMIT 1",
+                            (session_id,),
                         ).fetchone()
                         if not busy and self.repository is not None:
                             busy = db.execute("SELECT 1 FROM attempts WHERE session=? AND released_at IS NULL LIMIT 1", (session_id,)).fetchone()
@@ -417,15 +431,21 @@ class JobRegistry:
             return {"accountId": account_id, "revision": revision}
 
     @staticmethod
-    def _account(db, account_id, session_id=None):
+    def _account(db, account_id, session_id=None, *, observation=False):
         row = db.execute("SELECT data FROM registered_accounts WHERE account_id=?", (account_id,)).fetchone()
         if not row:
             raise RuntimeError("Account is not registered")
         account = json.loads(row["data"])
-        if not account["enabled"] or not account["authorized"] or account["health"] != "healthy":
-            raise RuntimeError("Account is disabled or not authorized/healthy")
-        if account["quota"] == "depleted" or (account["quota"] == "unknown" and not account["allowUnknownQuota"]):
-            raise RuntimeError("Account quota policy blocks dispatch")
+        if not account["enabled"] or not account["authorized"]:
+            raise RuntimeError("Account is disabled or not authorized")
+        if not observation:
+            # Health and quota gates are bypassed for read-only observe_session operations
+            # so that an already-dispatched session can be monitored even when the account
+            # becomes exhausted or degraded after dispatch.
+            if account["health"] != "healthy":
+                raise RuntimeError("Account is disabled or not authorized/healthy")
+            if account["quota"] == "depleted" or (account["quota"] == "unknown" and not account["allowUnknownQuota"]):
+                raise RuntimeError("Account quota policy blocks dispatch")
         session = next((item for item in account["registeredSessions"] if item["id"] == session_id), None) if session_id else None
         if session_id and session is None:
             raise RuntimeError("Session is not registered to this account")
@@ -554,6 +574,25 @@ class JobRegistry:
                 usage = self._task_usage(db, task)
                 if usage is not None:
                     dto["usage"] = usage
+                if task["state"] == "ambiguous" or (task["state"] == "blocked" and task["dispatch_at"] is not None and task["released_at"] is None):
+                    # Provide a machine-readable reconciliation hint so callers can
+                    # inspect the original execution without re-dispatching. Contains
+                    # IDs only; no instructions, prompts, or credentials.
+                    amb_op = db.execute(
+                        "SELECT id FROM operations WHERE assignment=? AND task_id=? AND generation=? "
+                        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                        (assignment_id, task["task_id"], task["generation"]),
+                    ).fetchone()
+                    dto["reconciliation"] = {
+                        "required": True,
+                        "redispatchAllowed": False,
+                        "nextAction": "inspect_original_execution",
+                        "operationId": amb_op["id"] if amb_op else None,
+                        "attempt": task["attempt_id"],
+                        "generation": task["generation"],
+                        "selectedAccountId": task["selected_account"],
+                        "sessionId": task["session_id"],
+                    }
                 tasks.append(dto)
             policy = json.loads(row["body"]).get("scheduling", {"profile": "balanced"})
             return {"schemaVersion": 1, **self._receipt(row), "eligibleAccountIds": json.loads(row["eligible"]),
@@ -716,12 +755,12 @@ class JobRegistry:
             if project_control["paused"] or project_control["emergency_stop"]:
                 continue
             max_workers = min(max_workers, project_control["max_workers"])
-            active_count = db.execute("SELECT COUNT(*) FROM job_tasks WHERE state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')").fetchone()[0]
-            job_active = db.execute("SELECT COUNT(*) FROM job_tasks WHERE assignment=? AND state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')", (row["id"],)).fetchone()[0]
+            active_count = db.execute("SELECT COUNT(*) FROM job_tasks WHERE (" + _SLOT_SQL + ")").fetchone()[0]
+            job_active = db.execute("SELECT COUNT(*) FROM job_tasks WHERE assignment=? AND (" + _SLOT_SQL + ")", (row["id"],)).fetchone()[0]
             if active_count >= control_row["max_workers"] or job_active >= max_workers:
                 continue
             project_active = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
-                                        "WHERE a.project=? AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')",
+                                        "WHERE a.project=? AND (" + _SLOT_SQL_T + ")",
                                         (row["project"],)).fetchone()[0]
             if project_active >= project_control["max_workers"]:
                 continue
@@ -731,7 +770,9 @@ class JobRegistry:
                     account_data, _ = self._account(db, candidate)
                 except RuntimeError:
                     continue
-                job_occupancy = db.execute("SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')", (candidate,)).fetchone()[0]
+                job_occupancy = db.execute(
+                    "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND (" + _SLOT_SQL + ")",
+                    (candidate,)).fetchone()[0]
                 external_occupancy = 0
                 if self.repository is not None:
                     for active_attempt in db.execute("SELECT data FROM attempts WHERE account=? AND released_at IS NULL", (candidate,)):
@@ -745,8 +786,8 @@ class JobRegistry:
                 available = [account for account in available if account == pinned]
                 session_id = spec["execution"]["sessionId"]
                 session_occupancy = db.execute(
-                    "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND state IN (?,?,?,?,?,?)",
-                    (session_id, *ACTIVE_TASK_STATES),
+                    "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND (" + _SLOT_SQL + ")",
+                    (session_id,),
                 ).fetchone()[0]
                 # This check is inside BEGIN IMMEDIATE alongside the reservation,
                 # so claims from other projects/accounts cannot win concurrently.
@@ -799,8 +840,36 @@ class JobRegistry:
             return operation_id
         return None
 
+    @staticmethod
+    def _has_runnable_tasks(db, assignment_id):
+        """Return True when the assignment still has tasks that can make forward progress.
+
+        A task is considered runnable if it is actively in-flight (reserved/starting/
+        running/awaiting_output) *or* if it is queued/retry_due and every dependency is
+        already complete.  Tasks in ambiguous/blocked/cancel_pending state do not count.
+
+        This guards every ``UPDATE assignments SET state='held'`` so that an uncertain
+        or blocked task does not freeze independent sibling nodes.  The ambiguous task
+        and all its locks (session, scope, dependency, generation) are left untouched.
+        """
+        rows = db.execute(
+            "SELECT task_id, state, body FROM job_tasks WHERE assignment=?", (assignment_id,)
+        ).fetchall()
+        states = {row["task_id"]: row["state"] for row in rows}
+        for row in rows:
+            if row["state"] in ("reserved", "starting", "running", "awaiting_output"):
+                return True
+            if row["state"] in ("queued", "retry_due"):
+                spec = json.loads(row["body"])
+                if all(states.get(dep) == "complete" for dep in spec["dependsOn"]):
+                    return True
+        return False
+
     def _has_scope_conflict(self, db, project, scopes, assignment, task_id):
-        for row in db.execute("SELECT a.id,a.project,t.task_id,t.body AS task_body,t.state FROM assignments a JOIN job_tasks t ON t.assignment=a.id WHERE a.state NOT IN ('complete','cancelled') AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending')"):
+        for row in db.execute(
+            "SELECT a.id,a.project,t.task_id,t.body AS task_body,t.state FROM assignments a "
+            "JOIN job_tasks t ON t.assignment=a.id WHERE a.state NOT IN ('complete','cancelled') "
+            "AND (" + _SLOT_SQL_T + ")"):
             if row["project"] == project and (row["id"], row["task_id"]) != (assignment, task_id):
                 if self._scopes_overlap(scopes, json.loads(row["task_body"])["scopeKeys"]):
                     return True
@@ -827,7 +896,10 @@ class JobRegistry:
                 if state == "ambiguous":
                     db.execute("UPDATE job_tasks SET state='ambiguous' WHERE assignment=? AND task_id=? AND generation=?",
                                (op["assignment"], op["task_id"], op["generation"]))
-                    db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
+                    # Only hold the assignment when no sibling task can still progress.
+                    # An ambiguous task retains its session/scope/generation locks regardless.
+                    if not self._has_runnable_tasks(db, op["assignment"]):
+                        db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
                     self._event(db, op["assignment"], "operation_ambiguous", {"state": state,
                                   "taskId": op["task_id"], "generation": op["generation"], "operationId": op["id"]}, when)
             self._queue_one_ready(db, when)
@@ -848,25 +920,39 @@ class JobRegistry:
             if control["paused"] or control["emergency_stop"] or project_control["paused"] or project_control["emergency_stop"] or assignment["state"] != "queued":
                 return None
             task_spec = json.loads(task_row["body"])
-            active_in_project = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
-                                           "WHERE a.project=? AND t.state IN ('reserved','starting','running','awaiting_output','ambiguous','cancel_pending') "
-                                           "AND NOT (t.assignment=? AND t.task_id=?)",
-                                           (assignment["project"], op["assignment"], op["task_id"])).fetchone()[0]
-            if active_in_project >= project_control["max_workers"]:
-                return None
-            account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"])
-            occupied = db.execute("SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) AND state IN (?,?,?,?,?,?)",
-                                  (op["account"], op["assignment"], op["task_id"], *ACTIVE_TASK_STATES)).fetchone()[0]
-            if occupied >= account_data["localCapacity"]:
-                return None
+            # observe_session is a read-only poll; it must remain claimable even when retained
+            # uncertain executions fill or exceed a lowered capacity limit, otherwise explicit
+            # reconciliation deadlocks.  Mutation dispatch caps stay enforced for all other kinds.
+            if op["kind"] != "observe_session":
+                active_in_project = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
+                                               "WHERE a.project=? AND (" + _SLOT_SQL_T + ") "
+                                               "AND NOT (t.assignment=? AND t.task_id=?)",
+                                               (assignment["project"], op["assignment"], op["task_id"])).fetchone()[0]
+                if active_in_project >= project_control["max_workers"]:
+                    return None
+                account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"])
+                occupied = db.execute(
+                    "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) "
+                    "AND (" + _SLOT_SQL + ")",
+                    (op["account"], op["assignment"], op["task_id"])).fetchone()[0]
+                if occupied >= account_data["localCapacity"]:
+                    return None
+            else:
+                account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"], observation=True)
             session_id = task_spec["execution"]["sessionId"]
-            session_occupancy = db.execute("SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND NOT (assignment=? AND task_id=?) AND state IN (?,?,?,?,?,?)",
-                                           (session_id, op["assignment"], op["task_id"], *ACTIVE_TASK_STATES)).fetchone()[0]
+            session_occupancy = db.execute(
+                "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND NOT (assignment=? AND task_id=?) "
+                "AND (" + _SLOT_SQL + ")",
+                (session_id, op["assignment"], op["task_id"])).fetchone()[0]
             if session_occupancy:
                 return None
             if self.repository is not None:
                 external = 0
-                for attempt_row in db.execute("SELECT data FROM attempts WHERE (account=? OR session=?) AND released_at IS NULL", (op["account"], session_id)):
+                # Registered sessions are independent execution lanes. An active
+                # attempt on another session of the same provider account must not
+                # block this task; the durable per-session lock above still prevents
+                # two operations from sharing one session.
+                for attempt_row in db.execute("SELECT data FROM attempts WHERE session=? AND released_at IS NULL", (session_id,)):
                     identity = json.loads(attempt_row["data"] or "{}")
                     if identity.get("r21Assignment") == op["assignment"] and identity.get("r21TaskId") == op["task_id"]:
                         continue
@@ -895,7 +981,9 @@ class JobRegistry:
                         if self.repository is not None:
                             db.execute("UPDATE attempts SET state='blocked',released_at=? WHERE id=? AND released_at IS NULL",
                                        (when, op["attempt_id"]))
-                        db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
+                        # Only hold the assignment when no sibling task can still progress.
+                        if not self._has_runnable_tasks(db, op["assignment"]):
+                            db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
                         self._event(db, op["assignment"], "credit_admission_denied", {
                             "taskId": op["task_id"], "generation": op["generation"], "operationId": op["id"]
                         }, when)
@@ -937,7 +1025,12 @@ class JobRegistry:
                     raise ValueError("Invalid provider credit debit verification")
                 continue
             if isinstance(value, str):
-                _text(value, key, 2048)
+                # Assistant output is intentionally bounded separately by the
+                # assignment's `output.maxBytes` contract (at most 32 KiB).
+                # Applying the small scalar-metadata limit here left valid
+                # evidence packages perpetually claimed after the provider had
+                # already finished them.
+                _text(value, key, 32768 if key == "assistantText" else 2048)
                 if re.search(r"(?i)bearer\s+\S+|lsat_[A-Za-z0-9_-]+", value):
                     raise ValueError("Credential-like result values are not accepted")
             elif isinstance(value, list):
@@ -1041,7 +1134,10 @@ class JobRegistry:
                     if changed:
                         self._event(db, op["assignment"], "assignment_complete", {"state": "complete"}, when)
             if state in {"ambiguous", "blocked"}:
-                db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
+                # Only hold the assignment when no sibling task can still progress.
+                # The ambiguous/blocked task retains its reservations and locks.
+                if not self._has_runnable_tasks(db, op["assignment"]):
+                    db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
             self._event(db, op["assignment"], "operation_" + state, {"state": state, "taskId": op["task_id"],
                           "generation": op["generation"], "operationId": operation_id}, when)
             return {"operationId": operation_id, "state": state, "replayed": False}
@@ -1078,7 +1174,8 @@ class JobRegistry:
         # A stale or absent assistant result is not completion; poll again with bounded backoff.
         if status in {"running", "pending"} or not isinstance(text, str) or type(assistant_at) not in {int, float} or assistant_at < payload["dispatchAt"]:
             count = task["poll_count"]
-            if count >= 20:
+            spec = json.loads(task["body"])
+            if now - payload["dispatchAt"] >= spec.get("observationTimeoutSeconds", 21600):
                 return "blocked", False
             self._queue_observation(db, op, payload, now, min(30, 2 ** min(count, 5)))
             return "awaiting_output", False
@@ -1104,6 +1201,149 @@ class JobRegistry:
                 raise KeyError("Assignment not found")
             results = db.execute("SELECT task_id,generation,text,assistant_at,reported_model,created_at FROM job_results WHERE assignment=? ORDER BY task_id,generation", (assignment_id,)).fetchall()
             return {"assignmentId": assignment_id, "results": [dict(item) for item in results]}
+
+    def reconcile_task(self, assignment_id, task_id, expected_revision,
+                       owner_principal_id=None, client_id=None, now=None):
+        """Explicit operator reconciliation for an ambiguous or blocked task.
+
+        Queues exactly one fresh ``observe_session`` reusing the original dispatch
+        timestamp and instructions hash.  Never re-dispatches ``chat_session`` or
+        any launch operation; never increments generation, account, attempt, or
+        session reservations.  Transitions the affected task to ``awaiting_output``
+        and returns the assignment to ``queued`` when it was ``held`` — both in one
+        atomic transaction.  Emits a ``reconciliation_queued`` audit event.
+
+        Rejects:
+          - cancelled or complete assignments
+          - owner / revision mismatches
+          - tasks whose attempt or session was never recorded
+          - any call while a ``queued`` or ``claimed`` observe_session for the same
+            attempt/generation is already present (duplicate-reconcile guard)
+          - tasks not in ``ambiguous`` or ``blocked`` state
+
+        An explicit observation is permitted after the original monitoring deadline.
+        A completed receipt may settle it, but a running worker remains subject to
+        the unchanged deadline. This never extends paid execution authority.
+        """
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("expected_revision must be a positive integer")
+        when = time.time() if now is None else now
+        with self.connection(write=True) as db:
+            row = db.execute("SELECT * FROM assignments WHERE id=?", (assignment_id,)).fetchone()
+            if not row or not self._owner_matches(row, owner_principal_id, client_id):
+                raise KeyError("Assignment not found")
+            if row["revision"] != expected_revision:
+                raise RuntimeError("Stale assignment revision")
+            if row["state"] in ("cancelled", "complete"):
+                raise RuntimeError(
+                    f"Assignment is {row['state']} and cannot be reconciled"
+                )
+            if row["state"] not in ("queued", "held") or row["approved"] != 1:
+                raise RuntimeError("Assignment is not approved for reconciliation")
+            task_row = db.execute(
+                "SELECT * FROM job_tasks WHERE assignment=? AND task_id=?",
+                (assignment_id, task_id),
+            ).fetchone()
+            if not task_row:
+                raise KeyError("Task not found in assignment")
+            if not task_row["attempt_id"] or not task_row["session_id"] or not task_row["selected_account"]:
+                raise RuntimeError(
+                    "Task has no recorded attempt or session; "
+                    "reconciliation requires original execution context"
+                )
+            if task_row["released_at"] is not None or task_row["dispatch_at"] is None:
+                raise RuntimeError("Task has no retained execution reservation")
+            # Reject if a different live task already occupies the original session.
+            session_conflict = db.execute(
+                "SELECT 1 FROM job_tasks WHERE session_id=? AND NOT (assignment=? AND task_id=?) "
+                "AND (" + _SLOT_SQL + ") LIMIT 1",
+                (task_row["session_id"], assignment_id, task_id),
+            ).fetchone()
+            if session_conflict:
+                raise RuntimeError(
+                    "A different live task already occupies the original session; "
+                    "reconciliation rejected"
+                )
+            # Duplicate-reconcile guard: checked BEFORE state gate so that a task
+            # already transitioned to awaiting_output by a prior reconcile call
+            # (pending observe still outstanding) produces the correct error message.
+            pending = db.execute(
+                "SELECT id FROM operations "
+                "WHERE assignment=? AND task_id=? AND attempt_id=? AND generation=? "
+                "AND kind='observe_session' AND state IN ('queued','claimed') LIMIT 1",
+                (assignment_id, task_id, task_row["attempt_id"], task_row["generation"]),
+            ).fetchone()
+            if pending:
+                raise RuntimeError(
+                    "A pending observation already exists; "
+                    "reconciliation would be duplicate or concurrent"
+                )
+            if task_row["state"] not in ("ambiguous", "blocked"):
+                raise RuntimeError(
+                    f"Task state '{task_row['state']}' is not eligible for reconciliation"
+                )
+            # Recover original dispatch context from the chat_session operation that
+            # established this attempt/generation.  _queue_observation reads:
+            # sessionId, clientMessageId, dispatchAt, expectedMarker, instructions
+            # (to derive instructionsHash).  All are present in the chat input.
+            chat_op = db.execute(
+                "SELECT * FROM operations "
+                "WHERE assignment=? AND task_id=? AND attempt_id=? AND generation=? "
+                "AND kind='chat_session' ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                (assignment_id, task_id, task_row["attempt_id"], task_row["generation"]),
+            ).fetchone()
+            if not chat_op:
+                raise RuntimeError(
+                    "Original chat operation not found; "
+                    "cannot derive dispatch context for reconciliation"
+                )
+            chat_payload = json.loads(chat_op["input"])
+            if (chat_op["account"] != task_row["selected_account"] or
+                    chat_payload.get("sessionId") != task_row["session_id"] or
+                    chat_payload.get("dispatchAt") != task_row["dispatch_at"]):
+                raise RuntimeError("Original execution binding does not match task")
+            # Proxy object carrying the identifiers _queue_observation reads via [].
+            op_proxy = {
+                "assignment": assignment_id,
+                "task_id": task_id,
+                "attempt_id": task_row["attempt_id"],
+                "generation": task_row["generation"],
+                "account": task_row["selected_account"],
+            }
+            # Queue one observe_session with delay=0 (immediately claimable).
+            # Keep the original monitoring deadline and dispatch attribution.
+            self._queue_observation(db, op_proxy, chat_payload, when, delay=0)
+            # Transition task back to awaiting_output; all original IDs unchanged.
+            db.execute(
+                "UPDATE job_tasks SET state='awaiting_output' "
+                "WHERE assignment=? AND task_id=? AND generation=?",
+                (assignment_id, task_id, task_row["generation"]),
+            )
+            # If assignment was held (because this was the last/only runnable task),
+            # return it to queued so the fresh observe_session can be claimed.
+            # This is an intentional explicit operator action; no other assignments
+            # or historical records are touched.
+            db.execute(
+                "UPDATE assignments SET state='queued', revision=revision+1 WHERE id=?",
+                (assignment_id,),
+            )
+            self._event(
+                db, assignment_id, "reconciliation_queued",
+                {"taskId": task_id, "generation": task_row["generation"], "state": "awaiting_output",
+                 "reason": "local_operator_reconciliation" if owner_principal_id is None and client_id is None else "authorized_client_reconciliation"},
+                when,
+            )
+            updated = db.execute("SELECT * FROM assignments WHERE id=?", (assignment_id,)).fetchone()
+            return {
+                "assignmentId": assignment_id,
+                "taskId": task_id,
+                "state": "awaiting_output",
+                "assignmentState": updated["state"],
+                "revision": updated["revision"],
+                "generation": task_row["generation"],
+                "attempt": task_row["attempt_id"],
+                "sessionId": task_row["session_id"],
+            }
 
     def cancel_assignment(self, assignment_id, expected_revision, owner_principal_id=None, client_id=None, now=None):
         when = time.time() if now is None else now
