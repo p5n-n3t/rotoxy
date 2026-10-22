@@ -104,6 +104,13 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   await assert.rejects(runtime.callTool("job_results", { projectId: "project-a", jobId: "job-one" }, { clientId: "client-b", projectId: "project-a" }));
   const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
   assert.equal(workers.workers.length, 2);
+  assert.equal(workers.accounts.length, 3, "connected account inventory is distinct from dispatch binding");
+  const unbound = workers.accounts.find(account => account.accountId === "acct-c");
+  assert.equal(unbound.dispatchBound, false);
+  assert.equal(unbound.provisioningState, "not_bound");
+  assert.equal(unbound.providerSlotLimit, null);
+  assert.equal(unbound.availableSlots, null);
+  assert.ok(workers.accounts.every(account => !("secret" in account)));
   const supervision = await runtime.readSupervision("project-a", 0, 10);
   assert.equal(supervision.project, "project-a");
   assert.ok(Array.isArray(supervision.events));
@@ -285,5 +292,20 @@ test("runtime config rejects permissive fields, missing workspace bindings, and 
     { projectId: "workspace-only", clientIds: ["client-c"], accountIds: [], registeredSessions: [] });
   await writeFile(path, JSON.stringify(config), { mode: 0o644 });
   await chmod(path, 0o644);
+  await assert.rejects(readSupervisorRuntimeConfig(path));
+});
+
+ test("runtime accepts explicit large worker ceilings and deployed shared membership without inventing sessions", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-capacity-"));
+  t.after(() => rm(dir, {recursive:true, force:true}));
+  const path = join(dir, "runtime.json");
+  const policy = {...structuredClone(config), maxWorkers:32, sharedWorkspace:{projectId:"project-a", membership:"authenticated_mcp"}};
+  await writeFile(path, JSON.stringify(policy), {mode:0o600});
+  const parsed = await readSupervisorRuntimeConfig(path);
+  assert.equal(parsed.maxWorkers,32);
+  assert.equal(parsed.sharedWorkspace.membership,"authenticated_mcp");
+  assert.equal(parsed.projects[0].registeredSessions.length,2);
+  policy.maxWorkers=33;
+  await writeFile(path, JSON.stringify(policy), {mode:0o600});
   await assert.rejects(readSupervisorRuntimeConfig(path));
 });
