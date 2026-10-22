@@ -242,13 +242,16 @@ export class DurableSessionProvisioningCoordinator {
   }
 
   private async bind(record: ProvisioningRecord, evidence: ProviderSessionEvidence): Promise<ProvisioningResult> {
+    const pinUnconfirmed = record.requestedModel !== undefined && record.requestedModel !== evidence.reportedModel ||
+      record.requestedEffort !== undefined && record.requestedEffort !== evidence.reportedEffort;
     try {
       const settled = await this.ledger.settle(record.id, record.revision, {
-        state: "started", providerSessionId: evidence.providerSessionId,
+        state: pinUnconfirmed ? "needs_reconciliation" : "started", providerSessionId: evidence.providerSessionId,
         ...(evidence.reportedModel === undefined ? {} : { reportedModel: evidence.reportedModel }),
         ...(evidence.reportedEffort === undefined ? {} : { reportedEffort: evidence.reportedEffort }),
       });
-      return { state: "started", record: settled };
+      return pinUnconfirmed ? { state: "needs_reconciliation", record: settled, reason: "requested_pin_unconfirmed" }
+        : { state: "started", record: settled };
     } catch { return this.unknownAfterRead(record, "session_binding_unconfirmed"); }
   }
 

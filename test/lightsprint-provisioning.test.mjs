@@ -83,12 +83,34 @@ test("concurrent duplicate provisions launch once and keep requested/reported pi
   assert.equal(duplicate.state, "needs_reconciliation");
   releaseLaunch();
   const result = await first;
-  assert.equal(result.state, "started");
+  assert.equal(result.state, "needs_reconciliation");
+  assert.equal(result.reason, "requested_pin_unconfirmed");
   assert.equal(adapter.launches, 1);
   assert.equal(result.record.requestedModel, "requested-model");
   assert.equal(result.record.reportedModel, "actual-model");
   assert.equal(result.record.requestedEffort, "low");
   assert.equal(result.record.reportedEffort, "high");
+  assert.equal(result.record.providerSessionId, "session-1");
+  assert.equal((await coordinator.provision(request({ model: "requested-model", effort: "low" }))).state, "needs_reconciliation");
+  assert.equal(adapter.launches, 1);
+});
+
+test("exact pins require matching provider evidence during launch and reconciliation", async () => {
+  const adapter = makeAdapter();
+  const coordinator = new DurableSessionProvisioningCoordinator(new MemoryLedger(), adapter);
+  const result = await coordinator.provision(request({ model: "provider-model", effort: "medium" }));
+  assert.equal(result.state, "started");
+  const missing = makeAdapter({ async launch(input) {
+    this.launches++;
+    return { kind: "started", evidence: { ...input.identity, providerSessionId: "session-2" } };
+  } });
+  const uncertain = new DurableSessionProvisioningCoordinator(new MemoryLedger(), missing);
+  assert.equal((await uncertain.provision(request({ model: "pinned" }))).reason, "requested_pin_unconfirmed");
+  missing.candidates = [{ ...identity, providerSessionId: "session-2", reportedModel: "other" }];
+  assert.equal((await uncertain.reconcile("key-1")).state, "needs_reconciliation");
+  missing.candidates[0].reportedModel = "pinned";
+  assert.equal((await uncertain.reconcile("key-1")).state, "started");
+  assert.equal(missing.launches, 1);
 });
 
 test("a pre-existing reserved row is unknown after restart and is never replayed", async () => {
