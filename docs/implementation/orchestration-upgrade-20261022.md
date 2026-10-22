@@ -3,6 +3,34 @@
 User approved implementation after the read-only audit. Branch:
 `codex/recovery-provisioning-20261022`, based on `065a2d5`.
 
+## Current status after Desktop restart
+
+The user resumed on 2026-10-22. This section supersedes earlier chronological
+worker states and pending-artifact notes below; do not repeat those assignments.
+
+- Branch `codex/recovery-provisioning-20261022`, committed HEAD `e1bb72d`;
+  draft PR [#14](https://github.com/p5n-n3t/rotoxy/pull/14). Not merged/deployed.
+- All cloud assignments listed below completed; their coordinator, ledger and
+  discovery artifacts were retrieved, reviewed and integrated. The original
+  held module execution was recovered by observation without redispatch.
+- Build plus 87 focused Node tests, 65 Python job tests and 10 bridge tests
+  passed before the interrupted OAuth-ID patch, including production Python.
+- PR CI is not green: Node 22 passed 526/527 tests. Concurrent workspace
+  dispatch returned `invalid_input`; Node 24 was cancelled by fail-fast.
+- RX-OAUTH-ID-CI completed source review and focused verification with local
+  Claude Opus: 11 Python tests and 17 existing focused Node tests passed. The
+  integration lead added 3 deterministic dispatch/input regressions, all passed.
+  Generic resource-ID validation and ownership fences remain unchanged.
+- Twelve enabled LightSprint accounts passed catalog and exact repository
+  availability checks. Balance, entitlement and execution-slot limits remain
+  unknown. Fresh provisioning remains disabled; coordinator/ledger/discovery
+  components still require runtime admission and workspace-route integration.
+- No production service restart or credential modification has occurred.
+
+Earlier sections are milestone history, not instructions to relaunch finished
+work. The root pause checkpoint identifies the interrupted source files and
+exact next verification. Do not infer production behavior from source tests.
+
 ## Required behavior
 
 - Shared fleet across trusted clients and repository folders. Preserve internal
@@ -186,3 +214,25 @@ reset and provider credits were not inferred.
 Fresh-session dispatch remains disabled. Production deployment is being prepared
 as a full versioned bundle for the gateway and its private supervisor bridge,
 with rollback and preserved state; no deployment is yet claimed by this entry.
+
+## Resumed OAuth client-ID fix and agent onboarding
+
+The former random dispatch failure is caused by using resource-ID validation on
+opaque OAuth client identifiers. Gateway-issued base64url identifiers may start
+with `_` or `-`. A separate bounded client-ID validator now covers workspace
+dispatch, sync, reconciliation, configuration and membership paths in TypeScript
+and Python. Resource/project/task identifiers retain their existing grammar.
+
+Verification: fresh full local Node suite 527/527 passed; 3 additional deterministic
+Node regressions passed; delegated focused Node checks 17 passed and Python
+workspace-execution regressions 11 passed. Offline package audit passed, including
+22 Python module imports and the actual tarball inventory. CI matrix rerun is
+pending; no deployment has occurred.
+
+The user additionally requested portable onboarding for agents connecting from
+other projects: versioned concise MCP guidance, a read-only guide fallback and
+an installable skill with scenario references. This is queued for implementation;
+connection alone must not be described as automatic skill loading or mastery.
+Official protocol references checked on 2026-10-22:
+- https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle
+- https://modelcontextprotocol.io/specification/2025-06-18/server/resources

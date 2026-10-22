@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import type { StateStore } from "./store.js";
 import type { SupervisorBackend, SupervisorCaller } from "./supervisor-api.js";
 import { JOB_TOOL_DEFINITIONS, validateJobSubmission, type JobSubmission } from "./job-submit.js";
+import { safeClientId } from "./oauth-client-id.js";
 
 const PYTHON = "/usr/bin/python3";
 const CWD = fileURLToPath(new URL("../supervisor/", import.meta.url));
@@ -96,7 +97,7 @@ export class WorkspaceExecutionService {
   async dispatch(raw: unknown, caller: SupervisorCaller): Promise<{ dispatch: WorkspaceExecutionSummary; accepted: boolean; replayed: boolean; providerError?: string }> {
     if (!this.backend) throw new WorkspaceExecutionError("supervisor_unavailable");
     const submission = validateJobSubmission(raw);
-    if (submission.projectId !== caller.projectId || !safeId(caller.clientId)) throw new WorkspaceExecutionError("invalid_input");
+    if (submission.projectId !== caller.projectId || !safeClientId(caller.clientId)) throw new WorkspaceExecutionError("invalid_input");
     await this.backend.authorizeWorkspace?.(caller.projectId, caller.clientId);
     const requestHash = createHash("sha256").update(canonical(submission)).digest("hex");
     const remoteJobId = workspaceId("job", caller.projectId, caller.clientId, submission.jobId);
@@ -138,7 +139,7 @@ export class WorkspaceExecutionService {
     if (!Array.isArray(result.bindings)) throw new WorkspaceExecutionError("bridge_output_invalid");
     const seen = new Set<string>();
     return result.bindings.slice(0, limit).filter((row) => {
-      if (!isObject(row) || !safeId(row.projectId) || !safeId(row.jobId) || !safeId(row.clientId)) return false;
+      if (!isObject(row) || !safeId(row.projectId) || !safeId(row.jobId) || !safeClientId(row.clientId)) return false;
       const key = `${row.projectId}\0${row.clientId}\0${row.jobId}`;
       if (seen.has(key)) return false;
       seen.add(key);
@@ -147,13 +148,13 @@ export class WorkspaceExecutionService {
   }
 
   private async settleReconciliation(binding: WorkspaceReconciliationBinding): Promise<void> {
-    if (!binding || !safeId(binding.projectId) || !safeId(binding.jobId) || !safeId(binding.clientId)) throw new WorkspaceExecutionError("invalid_input");
+    if (!binding || !safeId(binding.projectId) || !safeId(binding.jobId) || !safeClientId(binding.clientId)) throw new WorkspaceExecutionError("invalid_input");
     const result = await this.ledger<{ settled?: boolean }>({ command: "settle_reconciliation", ...binding });
     if (result.settled !== true) throw new WorkspaceExecutionError("bridge_output_invalid");
   }
 
   async sync(projectId: string, jobId: string, caller: SupervisorCaller): Promise<{ dispatch: WorkspaceExecutionSummary; status: { state: string; revision?: number; error?: string; tasks: { taskId: string; state?: string; error?: string }[] }; results: { taskId: string; text: string; truncated?: boolean; reportedModel?: string; assistantAt?: number }[]; resultsUnavailable: boolean; resultsTruncated: boolean; resultError?: string }> {
-    if (!this.backend || projectId !== caller.projectId || !safeId(jobId) || !safeId(caller.clientId)) throw new WorkspaceExecutionError("invalid_input");
+    if (!this.backend || projectId !== caller.projectId || !safeId(jobId) || !safeClientId(caller.clientId)) throw new WorkspaceExecutionError("invalid_input");
     await this.backend.authorizeWorkspace?.(projectId, caller.clientId);
     const binding = await this.getOwned(projectId, jobId, caller.clientId);
     let rawStatus: unknown;

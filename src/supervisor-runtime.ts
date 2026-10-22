@@ -17,6 +17,7 @@ import type { SupervisorAccountUsage, SupervisorEvent, SupervisorJob, Supervisor
 import { evaluateToolCall } from "./tool-policy.js";
 import { normalizeParkedQuestion } from "./worker-observation.js";
 import { WorkerGuidanceLedger, WorkerGuidanceService, type WorkerGuidanceInput, type WorkerGuidanceResult } from "./worker-guidance.js";
+import { safeClientId } from "./oauth-client-id.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -170,7 +171,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     if (!object(candidate)) throw new Error("Invalid project policy");
     assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions"], "project");
     const projectId = candidate.projectId, rawClientIds = candidate.clientIds, rawAccountIds = candidate.accountIds, rawSessions = candidate.registeredSessions;
-    if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeId) || new Set(rawClientIds).size !== rawClientIds.length ||
+    if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeClientId) || new Set(rawClientIds).size !== rawClientIds.length ||
         !Array.isArray(rawAccountIds) || rawAccountIds.length > 50 || !rawAccountIds.every(safeId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
     const accountIds = rawAccountIds as string[];
     const registeredSessions: RegisteredSession[] = rawSessions.map((item: unknown): RegisteredSession => {
@@ -619,7 +620,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   /** Registration alone is insufficient: an unexpired, issued OAuth refresh grant proves consent. */
   private async consentedSharedClient(clientId: string): Promise<boolean> {
-    if (!this.config.sharedWorkspace || !safeId(clientId)) return false;
+    if (!this.config.sharedWorkspace || !safeClientId(clientId)) return false;
     if (this.config.sharedWorkspace.membership === "authenticated_mcp") return true;
     const state = await this.options.store.load();
     if (!Array.isArray(state.oauthClients) || !state.oauthClients.some((client) => client.clientId === clientId)) return false;
@@ -630,7 +631,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   async authorizeWorkspace(projectId: string, clientId: string): Promise<void> {
     await this.refreshWorkspacePolicy();
-    if (!safeId(projectId) || !safeId(clientId)) throw new JobInputError("project is not authorized for this OAuth client");
+    if (!safeId(projectId) || !safeClientId(clientId)) throw new JobInputError("project is not authorized for this OAuth client");
     const project = this.config.projects.find((item) => item.projectId === projectId);
     if (!project) throw new JobInputError("project is not authorized for this OAuth client");
     if (project.clientIds.includes(clientId)) return;
@@ -640,7 +641,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   async workspaceProjects(clientId: string): Promise<Array<{ projectId: string }>> {
     await this.refreshWorkspacePolicy();
-    if (!safeId(clientId)) return [];
+    if (!safeClientId(clientId)) return [];
     const shared = this.config.sharedWorkspace;
     const consented = shared ? await this.consentedSharedClient(clientId) : false;
     return this.config.projects.filter((project) =>
@@ -649,7 +650,7 @@ export class SupervisorRuntime implements SupervisorBackend {
 
   private async accessSnapshot(rawConfig?: string, editable = false): Promise<WorkspaceAccessSnapshot> {
     const state = await this.options.store.load();
-    const clients = state.oauthClients.filter((client) => safeId(client.clientId)).slice(0, 100).map((client) => ({
+    const clients = state.oauthClients.filter((client) => safeClientId(client.clientId)).slice(0, 100).map((client) => ({
       clientId: client.clientId,
       label: redactString(typeof client.clientName === "string" ? client.clientName : "Unnamed client", 120) || "Unnamed client",
     }));
@@ -680,7 +681,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     const configPath = this.options.configPath;
     if (!configPath) throw new Error("workspace_access_not_persisted");
     if (!safeId(input.projectId) || !Array.isArray(input.clientIds) || input.clientIds.length > 50 ||
-        !input.clientIds.every(safeId) || new Set(input.clientIds).size !== input.clientIds.length ||
+        !input.clientIds.every(safeClientId) || new Set(input.clientIds).size !== input.clientIds.length ||
         typeof input.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(input.expectedRevision)) {
       throw new Error("workspace_access_invalid");
     }
@@ -695,7 +696,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       const rawText = await readFile(configPath, "utf8");
       const parsed = await readSupervisorRuntimeConfig(configPath);
       const state = await this.options.store.load();
-      const clients = state.oauthClients.filter((client) => safeId(client.clientId)).slice(0, 100).map((client) => ({
+      const clients = state.oauthClients.filter((client) => safeClientId(client.clientId)).slice(0, 100).map((client) => ({
         clientId: client.clientId,
         label: redactString(typeof client.clientName === "string" ? client.clientName : "Unnamed client", 120) || "Unnamed client",
       }));
