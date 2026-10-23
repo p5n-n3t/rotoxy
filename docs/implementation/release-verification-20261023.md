@@ -1,5 +1,53 @@
 # ROTOXY release verification — 2026-10-23
 
+## Current release: pool controls and confirmed quota snapshots
+
+PR #19 merged as `b9896fb`; immutable runtime `146ccc2` is active. The Desktop
+checkout is on main. Confirmed used-credit readings were reconciled in the private
+snapshot ledger, including the additional zero-usage account. Four depleted
+credentials remain disabled. Exact balances and credentials are excluded here.
+
+Final CI run `40017208433` passed on Node 22 and 24: 570 Node tests, installed
+OAuth/Python wiring smoke, and 507 Python tests. Local focused runs passed 74
+checks before the account-removal safeguard and 41 checks afterward. A later
+local integration probe timed out at the Python bridge on the memory-starved
+host; it is not reported as a pass. The default full suite now limits execution
+to two concurrent files. The final CI passed with the original recovery deadline
+and assertions, not an increased timeout.
+
+Post-activation evidence:
+
+- Gateway, workforce monitor, Oracle pool and Funnel services are active.
+- Public `/healthz` reports healthy.
+- Native MCP discovers ROTOXY Fleet; its inventory contains 13 accounts and seven
+  registered sessions. These are inventory counts, not active worker capacity.
+- Claude Code reports the consolidated server connected.
+- A credential-pinned, read-only legacy LightSprint session-status request succeeds.
+- The authenticated browser session expired on restart. Live visual verification
+  awaits sign-in; a disposable local browser preview also timed out. Neither is
+  reported as a visual pass.
+
+See `docs/operations/pool-dispatch-controls.md` for supported pool switches and
+account ceilings. Provider-reported quota enums may remain unavailable while the
+separately sourced manual monthly snapshot is present; manual snapshots are not
+live provider measurements. Dollar-to-credit conversion remains unverified.
+
+The upstream MCP description now documents workspace-scoped LightSprint routes.
+A read-only scoped stacks request was rejected by the existing gateway allowlist;
+the legacy pinned status request succeeded. See
+`docs/operations/lightsprint-api-compatibility.md` before changing adapters or
+repeating capability research.
+
+Rollback code to `51b007c` using the private `*.before-pool-controls.conf` service
+overrides under `~/.local/state/rotoxy/backups/release-20261023/`, restore the CLI
+symlink, daemon-reload and restart the same three services. Preserve the private
+quota ledger; rolling back code does not require undoing corrected readings.
+
+## Earlier release evidence (historical)
+
+The sections below describe earlier releases; their runtime hashes, test counts
+and browser state are superseded by the current release evidence above.
+
 ## Integrated and activated
 
 PR #15 merged to main as `a0f5a1c`. Follow-up PR #16 merged as `88fe7cc`;
