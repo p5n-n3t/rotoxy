@@ -455,3 +455,24 @@ test("exhausted account shows ineligible for dispatch but isAccountObservable al
   await writeFile(path, JSON.stringify(policy), {mode:0o600});
   await assert.rejects(readSupervisorRuntimeConfig(path));
 });
+
+
+test("dispatch policy hot reload clamps account ceiling and preserves observation while paused",async t=>{
+ const dir=await mkdtemp(join(tmpdir(),"rx-policy-hot-"));t.after(()=>rm(dir,{recursive:true,force:true}));
+ const registrations=[];
+ const localState=structuredClone(currentState);
+ const runtime=new SupervisorRuntime(config,{configDir:dir,supervisorCwd:join(process.cwd(),"supervisor"),store:{load:async()=>localState}});
+ runtime.bridge={request:async(method,path,body)=>{assert.equal(path,"/v1/accounts");registrations.push(body);}};
+ await runtime.syncDispatchPolicy();assert.equal(registrations.length,3);
+ assert.equal(registrations[0].localCapacity,1);
+ await runtime.syncDispatchPolicy();assert.equal(registrations.length,3,"unchanged rules do not rewrite accounts");
+ await writeFile(join(dir,"resource-routing-rules.json"),JSON.stringify({version:1,pools:{lightsprint:{enabled:false}},resources:{"acct-a":{capacity:12}}}));
+ await runtime.syncDispatchPolicy();
+ assert.equal(registrations.at(-3).localCapacity,1,"manual ceiling cannot invent registered slots");
+ assert.equal(registrations.at(-3).health,"degraded");
+ assert.equal(registrations.at(-3).enabled,true,"monitor authorization remains enabled");
+ localState.accounts=localState.accounts.filter(a=>a.id!=="acct-a");
+ await runtime.syncDispatchPolicy();
+ assert.equal(registrations.at(-3).enabled,false,"removed account is disabled without stopping healthy registrations");
+ assert.equal(registrations.at(-2).enabled,true);
+});

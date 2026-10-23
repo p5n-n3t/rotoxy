@@ -518,3 +518,16 @@ test("observe_session falls back to isAccountEligible when isAccountObservable i
   assert.equal(resultBodies[0].outcome, "rejected");
   assert.equal(resultBodies[0].errorClass, "account_unavailable");
 });
+
+
+test("policy refresh failure prevents claiming new operations and recovers on a later tick",async()=>{
+  let blocked=true,refreshes=0;
+  const {worker,resultBodies,claims}=harness([op("policy-one","account-a")],{beforeClaim:async()=>{refreshes++;if(blocked)throw new Error("policy unreadable");}});
+  worker.start();
+  try{
+    await until(()=>refreshes>=2);
+    assert.equal(claims.length,1);assert.equal(resultBodies.length,0);
+    blocked=false;await until(()=>resultBodies.length===1);
+    assert.equal(resultBodies[0].outcome,"accepted");
+  }finally{await worker.stop();}
+});

@@ -119,4 +119,24 @@ test("routing editor enforces admin CSRF and rules alter real Cloudflare/Ollama 
   const ollamaAWeight = countA(ollamaCalls, ollamaStart, "Bearer synthetic-ollama-key-aaaa");
   assert.ok(cfAWeight >= 28 && cfAWeight <= 32, `Cloudflare weight 3:1 share was ${cfAWeight}/40`);
   assert.ok(ollamaAWeight >= 28 && ollamaAWeight <= 32, `Ollama weight 3:1 share was ${ollamaAWeight}/40`);
+  const {ResourceRoutingRulesStore}=await import("../dist/resource-routing.js");
+  const policyStore=new ResourceRoutingRulesStore(store);
+  const controls=(fields)=>fetch(base+"/admin/routing/controls",{method:"POST",redirect:"manual",headers:{cookie,"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({_csrf:csrf,...fields})});
+  const revision=JSON.stringify(await policyStore.read());
+  assert.equal((await controls({pool:"cloudflare",enabled:"false",expected:revision,_csrf:""})).status,403);
+  assert.equal((await controls({pool:"cloudflare",enabled:"false",expected:revision})).status,303);
+  assert.equal((await controls({pool:"ollama",enabled:"false",expected:revision})).status,409,"stale form cannot overwrite pool state");
+  const cfBeforePause=cfCalls.length;
+  await assert.rejects(cfAdapter.run({model,input:{prompt:"paused"}}),e=>e.code==="no_eligible_account");
+  assert.equal(cfCalls.length,cfBeforePause,"paused pool never calls provider");
+  assert.equal((await controls({pool:"ollama",enabled:"false",expected:JSON.stringify(await policyStore.read())})).status,303);
+  const ollamaBeforePause=ollamaCalls.length;
+  assert.equal((await invokeModel("gpt-oss:20b")).status,503);
+  assert.equal(ollamaCalls.length,ollamaBeforePause);
+  assert.equal((await controls({accountId:modelA.id,enabled:"true",capacity:"1",expected:JSON.stringify(await policyStore.read())})).status,303);
+  const final=await policyStore.read();
+  assert.equal(final.resources[modelA.id].capacity,1);
+  assert.equal(final.resources[modelA.id].weight,3);
+  assert.equal(final.pools.cloudflare.enabled,false);
+
 });

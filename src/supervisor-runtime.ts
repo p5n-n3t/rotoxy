@@ -1,3 +1,4 @@
+import {ResourceRoutingRulesStore, boundedAccountCapacity} from "./resource-routing.js";
 import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -342,31 +343,30 @@ export class SupervisorRuntime implements SupervisorBackend {
     }
   }
 
+  private dispatchPolicyFingerprint = "";
+  private async syncDispatchPolicy():Promise<void>{
+    const [state,rules]=await Promise.all([this.options.store.load(),new ResourceRoutingRulesStore(this.options.store,this.options.configDir).read()]);
+    const payloads=[...new Set(this.config.projects.flatMap(p=>p.accountIds))].map(accountId=>{
+      const account=state.accounts.find(a=>a.id===accountId);
+      const signal=accountSignal(account,nativeLightSprintTarget(state.config.upstreamUrl));
+      const sessions=this.config.projects.flatMap(p=>p.registeredSessions).filter(s=>s.accountId===accountId);
+      if(sessions.length>100)throw new Error("Supervisor config exceeds 100 sessions per account");
+      const rule=rules.resources[accountId];const paused=rules.pools?.lightsprint?.enabled===false||rule?.enabled===false;
+      return {accountId,enabled:signal.enabled,authorized:signal.authorized,allowUnknownQuota:this.config.allowUnknownQuota,health:paused?"degraded":signal.health,quota:signal.quota,
+        localCapacity:boundedAccountCapacity(rule?.capacity,Math.min(16,Math.max(1,sessions.length))),
+        registeredSessions:sessions.map(s=>({id:s.sessionId,model:s.model,workspace:s.workspaceId}))};
+    });
+    const fingerprint=JSON.stringify(payloads);if(fingerprint===this.dispatchPolicyFingerprint)return;
+    for(const payload of payloads)await this.bridge.request("POST","/v1/accounts",payload);
+    this.dispatchPolicyFingerprint=fingerprint;
+  }
+
   async start(): Promise<void> {
     if (this.started) return;
     if (this.closed) throw new Error("supervisor_closed");
-    const state = await this.options.store.load();
-    const sessionsByAccount = new Map<string, RegisteredSession[]>();
-    for (const project of this.config.projects) for (const session of project.registeredSessions) {
-      sessionsByAccount.set(session.accountId, [...(sessionsByAccount.get(session.accountId) ?? []), session]);
-    }
-    if ([...sessionsByAccount.values()].some((sessions) => sessions.length > 100)) throw new Error("Supervisor config exceeds 100 sessions per account");
-    const supportedTarget = nativeLightSprintTarget(state.config.upstreamUrl);
     await this.bridge.start();
     try {
-      for (const accountId of new Set(this.config.projects.flatMap((project) => project.accountIds))) {
-        const account = state.accounts.find((row) => row.id === accountId);
-        if (!account) throw new Error("Configured supervisor account is unavailable");
-        const signal = accountSignal(account, supportedTarget);
-        await this.bridge.request("POST", "/v1/accounts", {
-          accountId, enabled: signal.enabled, authorized: signal.authorized,
-          allowUnknownQuota: this.config.allowUnknownQuota, health: signal.health, quota: signal.quota,
-          // Local capacity reflects concrete registered sessions; session locks prevent reuse.
-          // This is an operator ceiling, not a claim about upstream entitlement.
-          localCapacity: Math.min(16, Math.max(1, (sessionsByAccount.get(accountId) ?? []).length)),
-          registeredSessions: (sessionsByAccount.get(accountId) ?? []).map((session) => ({ id: session.sessionId, model: session.model, workspace: session.workspaceId })),
-        });
-      }
+      await this.syncDispatchPolicy();
     const adapters = this.options.adapterFactory ?? ((accountId, limits) => {
       let adapter = this.adapterCache.get(accountId);
       if (!adapter) { adapter = new LightSprintJobsAdapter(this.options.store, accountId, { timeoutMs: limits.timeoutMs }); this.adapterCache.set(accountId, adapter); }
@@ -426,10 +426,13 @@ export class SupervisorRuntime implements SupervisorBackend {
       if (registeredModels.length) {
       this.worker = createJobWorker({
         bridge: workerBridge,
+        beforeClaim: () => this.syncDispatchPolicy(),
         adapterFactory: adapters,
         operationAdapterFactory: operationAdapters,
         isAccountEligible: async (accountId) => {
           const latest = await this.options.store.load();
+          const rules=await new ResourceRoutingRulesStore(this.options.store,this.options.configDir).read();
+          if(rules.pools?.lightsprint?.enabled===false||rules.resources[accountId]?.enabled===false)return false;
           const signal = accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl));
           return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
         },
@@ -774,14 +777,14 @@ export class SupervisorRuntime implements SupervisorBackend {
         const session = sessionId ? sessionById.get(sessionId) : undefined;
         const usage = usageProjection(task.usage);
         const generation = Number.isInteger(task.generation) && Number(task.generation) >= 0 ? Number(task.generation) : undefined;
-        tasks.push({ id: `${assignmentId}:${taskId}`, label: taskId, status: typeof task.state === "string" ? task.state : "unknown",
+        tasks.push({ id: `${assignmentId}:${taskId}`, label: typeof task.summary === "string" ? redactString(task.summary,160) : "Task summary not provided", status: typeof task.state === "string" ? task.state : "unknown",
           ...(session ? { workspace: session.workspaceId, worker: session.sessionId } : {}),
           ...(typeof task.selectedAccountId === "string" ? { accountId: task.selectedAccountId } : {}),
           ...(typeof task.modelReported === "string" ? { reportedModel: redactString(task.modelReported, 64) } : {}),
           ...(generation !== undefined ? { generation } : {}), ...(usage ? { usage } : {}) });
       }
       const accounts = [...new Set(taskRows.flatMap((task) => typeof task.selectedAccountId === "string" ? [task.selectedAccountId] : []))];
-      return { id: assignmentId, label: `${taskRows.length} task${taskRows.length === 1 ? "" : "s"}`, status: typeof assignment.state === "string" ? assignment.state : "unknown",
+      return { id: assignmentId, label: `Work batch · ${taskRows.length} task${taskRows.length === 1 ? "" : "s"}`, status: typeof assignment.state === "string" ? assignment.state : "unknown",
         provider: "LightSprint", ...(accounts.length ? { account: accounts.join(", ") } : {}), dependencies };
     });
     const accountIds = [...new Set(project.accountIds)];

@@ -8,6 +8,7 @@ import type { Request, Response } from "express";
 import type { AccessClaims, GatewayConfig, UpstreamAccount } from "./types.js";
 import { CredentialPool } from "./pool.js";
 import { StateStore } from "./store.js";
+import { ResourceRoutingRulesStore } from "./resource-routing.js";
 import { isReplaySafeRequest, mergeIncomingQuery, taskIdFromResponse } from "./routing-safety.js";
 import {
   compileToolPolicy,
@@ -322,6 +323,24 @@ export class McpProxy {
         ? state.accounts.find((a) => a.id === pinned!.id)
         : this.pool.pick(state, { sessionId: affinityKey, exclude: attempted });
       if (!account) break;
+      // A direct MCP call must not bypass the pool/account dispatch pause.
+      // Read-only observation and explicit session stop remain available.
+      const lightSprintMutation = rpc?.messages.some(message => {
+        if (message.method !== "tools/call" || message.params?.name !== "lightsprint_api") return false;
+        const args = message.params.arguments as Record<string, unknown> | undefined;
+        const method = typeof args?.method === "string" ? args.method.toUpperCase() : "";
+        return !["GET", "HEAD"].includes(method) && !(method === "POST" && typeof args?.path === "string" && /^\/api\/agent-sessions\/[A-Za-z0-9_-]+\/stop$/.test(args.path));
+      });
+      if (lightSprintMutation && (account.provider === "lightsprint" || state.config.upstreamUrl === "https://app.lightsprint.ai/mcp")) {
+        let rules;
+        try { rules = await new ResourceRoutingRulesStore(this.store).read(); }
+        catch { return res.status(503).json({ error: "dispatch_policy_unavailable", message: "New work is paused until routing policy can be read." }); }
+        if (rules.pools?.lightsprint?.enabled === false || rules.resources[account.id]?.enabled === false) {
+          if (!pinned && rules.pools?.lightsprint?.enabled !== false) { attempted.add(account.id); attempt--; continue; }
+          record({status:409,attempts:0,errorClass:"dispatch-paused"});
+          return res.status(409).json({error:"dispatch_paused",message:"New work is paused for this LightSprint pool or account. Observation and session stop remain available."});
+        }
+      }
       attempted.add(account.id);
       attempts += 1;
       lastAccountId = account.id;

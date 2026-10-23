@@ -201,7 +201,7 @@ export class CloudflareAIAdapter {
   private async acquire(model?: string): Promise<{ view: CloudflareCredentialView; token: string; release: () => void }> {
     const [all, rules] = await Promise.all([this.credentials.listCredentials(), this.credentials.routingRules.read()]);
     const ruleFor = (id: string) => rules.resources[id];
-    const eligible = all.filter((account) => account.enabled && ruleFor(account.id)?.enabled !== false && (account.cooldownUntil === undefined || account.cooldownUntil <= this.now()) &&
+    const eligible = all.filter((account) => rules.pools?.cloudflare?.enabled !== false && account.enabled && ruleFor(account.id)?.enabled !== false && (account.cooldownUntil === undefined || account.cooldownUntil <= this.now()) &&
       (model === undefined || account.allowedModels.includes(model) && routingRuleAllowsModel(ruleFor(account.id), model)) &&
       (this.inflight.get(account.id) ?? 0) < boundedAccountCapacity(ruleFor(account.id)?.capacity, this.maxInflight));
     if (!eligible.length) {

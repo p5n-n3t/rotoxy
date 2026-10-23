@@ -51,6 +51,7 @@ export interface JobWorkerOptions {
   isAccountEligible: (accountId: string) => boolean | Promise<boolean>;
   /** Observation eligibility: enabled and authorized only, ignoring quota and transient health. Falls back to isAccountEligible when absent. Observe operations use this; mutations always use isAccountEligible. */
   isAccountObservable?: (accountId: string) => boolean | Promise<boolean>;
+  beforeClaim?: () => Promise<void>;
   workerId: string;
   allowedModels: readonly string[];
   maxConcurrent?: number;
@@ -432,6 +433,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
     if (!running || tickPromise) return tickPromise ?? Promise.resolve();
     tickPromise = (async () => {
       for (const [id, receipt] of receipts) await postResult(id, receipt.body);
+      try { await options.beforeClaim?.(); } catch { diagnostic("dispatch_policy_unavailable"); return; }
       while (running && active.size + receipts.size < maxConcurrent) {
         const claimController = new AbortController();
         controller = claimController;

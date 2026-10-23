@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
-import { normalizeSupervisorSnapshot, renderSupervisorDashboard } from "../dist/supervisor-ui.js";
+import { normalizeSupervisorSnapshot, renderSupervisorDashboard, renderSupervisorWorkerView } from "../dist/supervisor-ui.js";
 import { normalizeSupervisionInbox } from "../dist/admin.js";
 
 test("dispatch controls retain mounted paths and render only authoritative revision data", () => {
@@ -25,8 +25,8 @@ test("ROTOXY supervisor uses worker-first tabs and honest attribution/status fie
   assert.match(html, /assignment-1:task-1/);
   assert.match(html, /Waiting on a human/);
   assert.match(html, /question or approval context was not captured/i);
-  assert.match(html, /Session resumption: unknown; heartbeat does not prove wake/);
-  assert.match(html, /Next check: unknown; schedule not reported/);
+  assert.match(html, /Session resumption: no supported resume interface reported/);
+  assert.match(html, /Next check: schedule not reported/);
   assert.match(html, /@media\(max-width:700px\)/);
   assert.match(html, /\.table-wrap\{overflow:auto\}/);
   assert.match(html, /ArrowRight/);
@@ -145,7 +145,7 @@ test("empty/loading/error states are explicit, records are bounded, and no write
 test("time series use only supplied points and malformed timestamps degrade safely", () => {
   const html = renderSupervisorDashboard({ observedAt: 9e99, series: [{ label: "Queue depth", unit: "jobs", points: [{ value: 2 }, { value: 5 }] }] });
   assert.match(html, /Measured values: 2jobs · 5jobs/);
-  assert.match(html, /Time unavailable/);
+  assert.match(html, /Invalid provider timestamp/);
   assert.doesNotMatch(html, /setInterval|Math\.random|Loading traffic/);
 });
 
@@ -239,7 +239,8 @@ test("Python assignment receipts normalize into visible jobs without fabricating
   assert.equal(snapshot.jobs[0].revision, 3);
   assert.equal(snapshot.jobs[0].workspace, undefined);
   const html = renderSupervisorDashboard(snapshot);
-  assert.match(html, /Assignment batch-1/);
+  assert.match(html, /Job summary not supplied/);
+  assert.match(html, /<code>batch-1<\/code>/);
   assert.match(html, /2 tasks · revision 3/);
   assert.match(html, /No provider groups are available/);
   assert.doesNotMatch(html, /snapshot supplied|no actions are implied|unknown denominator/i);
@@ -309,7 +310,7 @@ test("brand system, snapshot ledger, and project-scoped supervision inbox are re
 
 test("overview ledger keeps missing snapshot sections unknown, not zero", () => {
   const html = renderSupervisorDashboard({});
-  assert.equal((html.match(/Not reported/g) || []).length, 4);
+  assert.equal((html.match(/listed<\/dt><dd class="unknown">Not reported<\/dd>/g) || []).length, 4);
   assert.doesNotMatch(html, /Providers listed<\/dt><dd[^>]*>0<\/dd>/);
   assert.match(html, /authenticated project API is not available/);
   const emptyKnownLists = renderSupervisorDashboard({ providers: [], jobs: [], workers: [] });
@@ -407,4 +408,16 @@ test("inbox acknowledgment sends same-origin CSRF header and project-scoped endp
   assert.match(page("idle"), /data-prompt-count="3"/);
   assert.doesNotMatch(page("running"), /<form class="guidance-form"/);
   assert.doesNotMatch(page("unobserved"), /<form class="guidance-form"/);
+});
+
+
+test("human timestamps preserve exact machine heartbeat and explain missing attribution",()=>{
+ const heartbeat=1792756800;
+ const view=renderSupervisorWorkerView([{id:"session-human",status:"unknown",heartbeatAt:heartbeat}]);
+ assert.equal(view.latestHeartbeat,new Date(heartbeat*1000).toISOString());
+ assert.match(view.html,/data-timestamp="2026-/);
+ assert.match(view.html,/Oct 2026/);
+ assert.match(view.html,/Account not attributed/);
+ assert.match(view.html,/not reported by provider/);
+ assert.doesNotMatch(view.html,/>Unknown</);
 });

@@ -10,9 +10,11 @@ User readings are stored in the existing owner-private credit snapshot ledger,
 with observation time, refresh date and source. Four user-declared depleted
 accounts were disabled on 2026-10-23 regardless of the provider allowing overage.
 A zero usage reading for jqthefoo is a full 10M balance, not depletion.
-Seven readings await confirmation of whether their values mean used or remaining;
-raw values are retained privately, rather than silently choosing an interpretation.
-The omitted maryjoebake account has no fresh balance established by this update.
+The user confirmed on 2026-10-23 that the seven other readings are credits used.
+Their remaining balances are calculated as 10M minus used credits, retaining the
+original observation times. The additional maryjoebake reading is zero usage,
+with a November 11 renewal date. Exact per-account readings remain private.
+These are manual account snapshots, not provider-verified live balances.
 
 ## Session cost monitoring
 

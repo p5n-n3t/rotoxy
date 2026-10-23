@@ -193,3 +193,19 @@ test("HTTP 200 protocol quota errors cool the owner without replaying or rewriti
     await env.teardown();
   }
 });
+
+
+test("direct LightSprint MCP mutation respects pool pause while status and stop remain available",async()=>{
+ const h=await setup();
+ try{
+  await h.store.update(state=>{state.accounts.forEach(a=>{a.provider="lightsprint";});});
+  const {ResourceRoutingRulesStore}=await import("../dist/resource-routing.js");
+  await new ResourceRoutingRulesStore(h.store).replace({version:1,pools:{lightsprint:{enabled:false}}});
+  const invoke=async(method,path)=>fetch(h.base+"/mcp",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"lightsprint_api",arguments:{method,path}}})});
+  assert.equal((await invoke("POST","/api/agent-sessions/session-a/chat")).status,409);
+  assert.equal(h.upstream.calls.length,0);
+  assert.equal((await invoke("GET","/api/agent-sessions/session-a/status")).status,200);
+  assert.equal((await invoke("POST","/api/agent-sessions/session-a/stop")).status,200);
+  assert.equal(h.upstream.calls.length,2);
+ }finally{await h.teardown();}
+});
