@@ -196,7 +196,25 @@ test("Supervisor entry requires admin auth and lists only safe configured projec
   const response = await fetch(f.base + "/admin/supervisor", { headers: headers(f.cookie) });
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /supervisor\/token2oauth/);
+  assert.match(html, /admin\/fleet/);
+  assert.match(html, /ROTOXY Fleet/);
   assert.doesNotMatch(html, /<script>bad/);
   assert.match(response.headers.get("content-security-policy"), /img-src 'self' data:/);
+});
+
+
+test("Fleet page uses a branded address while preserving durable identity and authenticated legacy links", async (t) => {
+  const reads = [];
+  const f = await fixture(t, { callTool: async () => ({}), readAdmin: async id => { reads.push(id); return { workers: [] }; } });
+  const denied = await fetch(f.base + "/admin/fleet", { redirect: "manual" });
+  assert.equal(denied.status, 302);
+  assert.deepEqual(reads, []);
+  const legacy = await fetch(f.base + "/admin/supervisor/token2oauth?severity=warning", { redirect: "manual", headers: headers(f.cookie) });
+  assert.equal(legacy.status, 302);
+  assert.equal(legacy.headers.get("location"), "/admin/fleet?severity=warning");
+  assert.deepEqual(reads, []);
+  const current = await fetch(f.base + legacy.headers.get("location"), { headers: headers(f.cookie) });
+  assert.equal(current.status, 200);
+  assert.match(await current.text(), /Workforce control desk · ROTOXY Fleet/);
+  assert.deepEqual(reads, ["token2oauth"]);
 });

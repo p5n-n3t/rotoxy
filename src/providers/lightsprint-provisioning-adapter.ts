@@ -62,6 +62,7 @@ export interface LightSprintProvisioningClient {
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const VALUE = /^[^\u0000-\u001f\u007f]{1,128}$/;
 
@@ -77,7 +78,7 @@ function validIdentity(value: unknown): value is ProvisioningIdentity {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
   return Object.keys(item).sort().join(",") === "accountId,taskId,workspaceId" &&
-    validId(item.accountId) && validId(item.workspaceId) && validId(item.taskId);
+    typeof item.accountId === "string" && ACCOUNT_ID.test(item.accountId) && validId(item.workspaceId) && validId(item.taskId);
 }
 
 function sameIdentity(left: ProvisioningIdentity, right: ProvisioningIdentity): boolean {
@@ -142,7 +143,7 @@ function safeCode(value: unknown): string {
 }
 
 function completeContract(contract: LightSprintProvisioningContract): boolean {
-  return contract.status === "documented" && validId(contract.accountId) &&
+  return contract.status === "documented" && typeof contract.accountId === "string" && ACCOUNT_ID.test(contract.accountId) &&
     contract.semantics.accountPinned === true && contract.semantics.workspaceScoped === true &&
     contract.semantics.taskCreate === true && contract.semantics.sessionLaunch === true &&
     contract.semantics.correlationLookup === true;
