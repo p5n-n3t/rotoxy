@@ -101,7 +101,8 @@ test("backend snapshots are redacted and bounded; unknown backend failures stay 
   assert.equal(page.status, 404);
   assert.match(html, /Project snapshot is unavailable/);
   assert.doesNotMatch(html, /private internal details/);
-  assert.match(html, />Unknown</);
+  assert.match(html, /No heartbeat received/);
+  assert.doesNotMatch(html, />Unknown</);
 });
 
 test("existing revision-fenced admin control still rejects missing CSRF and delegates only valid project/action/revision", async (t) => {
