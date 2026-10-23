@@ -65,6 +65,26 @@ class OraclePoolTests(unittest.TestCase):
         self.transport = FakeTransport()
         self.pool = OraclePool(self.root / "config.json", self.root / "queue.sqlite3", self.transport)
 
+    def test_daemon_refreshes_failed_host_catalog_before_dispatching_new_work(self):
+        self.transport.catalog_failures = {"ora3", "ora5"}
+        self.pool.catalog(refresh=True)
+        self.transport.catalog_failures.clear()
+        self.pool.register_daemon()
+        for index in range(3):
+            self.pool.submit("bounded review", job_id=f"refresh-{index}")
+        stopped = threading.Event()
+        run_once = self.pool.run_once
+
+        def finish_batch():
+            result = run_once()
+            stopped.set()
+            return result
+
+        with patch.object(self.pool, "run_once", side_effect=finish_batch), contextlib.redirect_stdout(io.StringIO()):
+            _serve_loop(self.pool, stopped)
+        self.assertEqual({host for host, _model, _prompt in self.transport.calls}, {"ora1", "ora3", "ora5"})
+        self.assertTrue(all(row["error_code"] is None for row in self.pool.catalog()["hosts"]))
+
     def test_cli_batch_is_atomic_and_cancellation_is_structured(self):
         def cli(command, payload=None):
             result = subprocess.run([sys.executable, "-m", "snooze.oracle_pool",

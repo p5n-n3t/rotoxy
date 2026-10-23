@@ -287,5 +287,5 @@ export function renderDiagnosticsView(
     ? `<p role="status">${entries.length - shown.length} older entr${entries.length - shown.length === 1 ? "y was" : "ies were"} omitted by the display limit.</p>`
     : "";
   const empty = shown.length ? "" : "<p>No diagnostic entries are available.</p>";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title></head><body><main><section aria-labelledby="diagnostics-heading"><h1 id="diagnostics-heading">${escapeHtml(title)}</h1><p>Upstream provider log availability is unknown. This view displays only records supplied to Token2OAuth.</p>${omitted}${empty}<ol aria-label="Diagnostic log entries">${items}</ol></section></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title></head><body><main><section aria-labelledby="diagnostics-heading"><h1 id="diagnostics-heading">${escapeHtml(title)}</h1><p>Upstream provider log availability is unknown. This view displays only records supplied to ROTOXY.</p>${omitted}${empty}<ol aria-label="Diagnostic log entries">${items}</ol></section></main></body></html>`;
 }

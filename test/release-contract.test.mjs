@@ -28,6 +28,8 @@ test("published tarball includes install, runtime, and rollback guidance", async
     "install.sh", "install-rotoxy.sh", "scripts/rotoxy-control.mjs", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service", "uninstall.sh", "supervisor/install.sh",
     "docs/deployment/unified-supervisor.md", "docs/RELEASE-VERIFICATION.md", "dist/worker-observation.js",
     "supervisor/snooze/static/index.html",
+    "skills/rotoxy-orchestrate/SKILL.md", "skills/rotoxy-orchestrate/references/scenarios.md",
+    "dist/agent-onboarding.js", "dist/fleet-identity.js", "dist/lightsprint-session-bindings.js",
   ]) assert.ok(files.has(required), `release tarball omits ${required}`);
   assert.ok(![...files].some((path) => /(^|\/)frontend\//.test(path)), "frontend development sources must stay out of the public package");
 });

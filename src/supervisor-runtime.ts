@@ -11,6 +11,7 @@ import { LightSprintJobsAdapter } from "./providers/lightsprint-jobs.js";
 import type { StateStore } from "./store.js";
 import type { UpstreamAccount } from "./types.js";
 import { redactString } from "./telemetry.js";
+import { fleetLabel, isPrimaryFleet } from "./fleet-identity.js";
 import { SupervisorBridge, type SupervisorBridgeOptions } from "./supervisor-bridge.js";
 import type { SupervisorBackend, SupervisorCaller, WorkspaceAccessSnapshot, WorkspaceAccessUpdate } from "./supervisor-api.js";
 import type { SupervisorAccountUsage, SupervisorEvent, SupervisorJob, SupervisorSnapshot, SupervisorTask, SupervisorUsage, SupervisorWorker } from "./supervisor-ui.js";
@@ -20,6 +21,7 @@ import { WorkerGuidanceLedger, WorkerGuidanceService, type WorkerGuidanceInput, 
 import { safeClientId } from "./oauth-client-id.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const MAX_CONFIG = 64 * 1024;
 type RuntimeStateGroup = "supervision" | "oracle-pool";
@@ -84,6 +86,7 @@ function usageProjection(value: unknown): SupervisorUsage | undefined {
   };
   return Object.values(usage).some((item) => item !== undefined) ? usage : undefined;
 }
+function safeAccountId(value: unknown): value is string { return typeof value === "string" && ACCOUNT_ID.test(value); }
 function safeId(value: unknown): value is string { return typeof value === "string" && ID.test(value); }
 function inboxEvent(value: unknown): Record<string, unknown> | undefined {
   if (!object(value) || !Number.isSafeInteger(value.id) || Number(value.id) < 1 ||
@@ -141,7 +144,7 @@ function creditReadinessShape(value: unknown, projectAccounts: ReadonlySet<strin
   if (value.mode !== "strict" || !Array.isArray(value.accounts)) return { kind: "malformed" };
   const accounts = new Map<string, { available: number | null; operationUpperBound: number | null; boundVerified: boolean }>();
   for (const item of value.accounts) {
-    if (!object(item) || !safeId(item.accountId)) return { kind: "malformed" };
+    if (!object(item) || !safeAccountId(item.accountId)) return { kind: "malformed" };
     if (!projectAccounts.has(item.accountId)) continue;
     if (typeof item.unit !== "string" || item.unit.length > 64 ||
         !(item.available === null || Number.isSafeInteger(item.available) && Number(item.available) >= 0) ||
@@ -172,12 +175,12 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions"], "project");
     const projectId = candidate.projectId, rawClientIds = candidate.clientIds, rawAccountIds = candidate.accountIds, rawSessions = candidate.registeredSessions;
     if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeClientId) || new Set(rawClientIds).size !== rawClientIds.length ||
-        !Array.isArray(rawAccountIds) || rawAccountIds.length > 50 || !rawAccountIds.every(safeId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
+        !Array.isArray(rawAccountIds) || rawAccountIds.length > 50 || !rawAccountIds.every(safeAccountId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
     const accountIds = rawAccountIds as string[];
     const registeredSessions: RegisteredSession[] = rawSessions.map((item: unknown): RegisteredSession => {
       if (!object(item)) throw new Error("Invalid registered session");
       assertKeys(item, ["sessionId", "accountId", "model", "workspaceId"], "registeredSession");
-      if (!safeId(item.sessionId) || !safeId(item.accountId) || !accountIds.includes(item.accountId) || typeof item.model !== "string" || !MODEL_ID.test(item.model) || !safeId(item.workspaceId)) throw new Error("Registered sessions must be bound to an eligible account, workspace, and declared model");
+      if (!safeId(item.sessionId) || !safeAccountId(item.accountId) || !accountIds.includes(item.accountId) || typeof item.model !== "string" || !MODEL_ID.test(item.model) || !safeId(item.workspaceId)) throw new Error("Registered sessions must be bound to an eligible account, workspace, and declared model");
       return { sessionId: item.sessionId, accountId: item.accountId, model: item.model, workspaceId: item.workspaceId };
     });
     if (registeredSessions.length * rawClientIds.length > 1000) throw new Error("Project has too many registered monitoring bindings");
@@ -374,7 +377,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       // Bind its single chat mutation to one private runtime registration; never infer
       // authority from the operation's project/client fields or caller-supplied headers.
       if (op.kind !== "chat_session" || !safeId(op.operationId) || !safeId(op.attemptId) ||
-          !Number.isSafeInteger(op.generation) || op.generation < 1 || !safeId(op.selectedAccountId)) return undefined;
+          !Number.isSafeInteger(op.generation) || op.generation < 1 || !safeAccountId(op.selectedAccountId)) return undefined;
       const sessionId = op.sessionId ?? op.input.sessionId;
       const message = op.input.instructions;
       const clientMessageId = op.input.clientMessageId;
@@ -417,6 +420,10 @@ export class SupervisorRuntime implements SupervisorBackend {
         return this.bridge.request<T>(method, route, body, requestOptions);
       },
     };
+      const registeredModels = [...new Set(this.config.projects.flatMap(project => project.registeredSessions.map(session => session.model)))];
+      // Fleet discovery and collaboration work before the first worker is bound.
+      // Empty fleets have no dispatch worker; do not invent an allowed model.
+      if (registeredModels.length) {
       this.worker = createJobWorker({
         bridge: workerBridge,
         adapterFactory: adapters,
@@ -434,10 +441,11 @@ export class SupervisorRuntime implements SupervisorBackend {
           return signal.enabled && signal.authorized;
         },
         workerId: `token2oauth-${createHash("sha256").update(this.options.configDir).digest("hex").slice(0, 12)}`,
-        allowedModels: [...new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.model)))], maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size)),
+        allowedModels: registeredModels, maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size)),
         allowFreshOperations: false, ...this.options.workerOptions,
       });
       this.worker.start();
+      }
       await this.registerMonitoredSessions();
       this.started = true;
     } catch (error) {
@@ -446,7 +454,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     }
   }
 
-  get status() { return { ...this.bridge.status(), workerStarted: this.started && !this.closed }; }
+  get status() { return { ...this.bridge.status(), workerStarted: Boolean(this.worker) && this.started && !this.closed }; }
 
   async guidanceAdmin(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult> {
     if (this.closed || !this.started) return { requestId: input.requestId, state: "rejected", reason: "supervisor_not_running" };
@@ -639,13 +647,17 @@ export class SupervisorRuntime implements SupervisorBackend {
     throw new JobInputError("project is not authorized for this OAuth client");
   }
 
-  async workspaceProjects(clientId: string): Promise<Array<{ projectId: string }>> {
+  async workspaceProjects(clientId: string): Promise<Array<{ projectId: string; label: string; kind: "fleet" | "task_context" }>> {
     await this.refreshWorkspacePolicy();
     if (!safeClientId(clientId)) return [];
     const shared = this.config.sharedWorkspace;
     const consented = shared ? await this.consentedSharedClient(clientId) : false;
     return this.config.projects.filter((project) =>
-      project.clientIds.includes(clientId) || (consented && project.projectId === shared?.projectId)).map(({ projectId }) => ({ projectId }));
+      project.clientIds.includes(clientId) || (consented && project.projectId === shared?.projectId)).map(({ projectId }) => ({
+        projectId,
+        label: fleetLabel(projectId),
+        kind: isPrimaryFleet(projectId) ? "fleet" : "task_context",
+      }));
   }
 
   private async accessSnapshot(rawConfig?: string, editable = false): Promise<WorkspaceAccessSnapshot> {

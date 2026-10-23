@@ -3,7 +3,14 @@ import { WebTools, WEB_TOOL_DEFINITIONS, WebToolError, type WebProviderName, typ
 import type { StateStore } from "./store.js";
 
 type Binding = { enabled: boolean; accountId?: string; features?: Partial<Record<WebFeature, FeatureCapability>> };
-type PrivateConfig = { providers: Partial<Record<WebProviderName, Binding>>; permissions: { clients: Record<string, WebToolName[]> } };
+type PrivateConfig = {
+  providers: Partial<Record<WebProviderName, Binding>>;
+  permissions: {
+    clients: Record<string, WebToolName[]>;
+    /** Explicit owner choice: tools inherited by every authenticated OAuth client, including future registrations. */
+    authenticatedClients?: WebToolName[];
+  };
+};
 const providers: WebProviderName[] = ["exa", "firecrawl", "tavily"];
 const tools: WebToolName[] = ["web_search", "web_extract"];
 const features: WebFeature[] = ["search", "extract"];
@@ -28,10 +35,14 @@ function validate(value: unknown): PrivateConfig {
     normalized.providers[name as WebProviderName] = { enabled: binding.enabled, accountId: binding.accountId, features: selected };
   }
   const permissions = raw.permissions;
-  if (!permissions || typeof permissions !== "object" || Array.isArray(permissions) || Object.keys(permissions).some((key) => key !== "clients") || !permissions.clients || typeof permissions.clients !== "object" || Array.isArray(permissions.clients)) throw new Error("Explicit per-client web tool permissions are required.");
+  if (!permissions || typeof permissions !== "object" || Array.isArray(permissions) || Object.keys(permissions).some((key) => key !== "clients" && key !== "authenticatedClients") || !permissions.clients || typeof permissions.clients !== "object" || Array.isArray(permissions.clients)) throw new Error("Invalid web tool permissions.");
   for (const [client, allowed] of Object.entries(permissions.clients)) {
     if (!client || client.length > 512 || !Array.isArray(allowed) || allowed.some((name) => !tools.includes(name))) throw new Error("Invalid per-client web tool permission.");
     normalized.permissions.clients[client] = [...new Set(allowed)];
+  }
+  if (permissions.authenticatedClients !== undefined) {
+    if (!Array.isArray(permissions.authenticatedClients) || permissions.authenticatedClients.some((name: unknown) => !tools.includes(name as WebToolName))) throw new Error("Invalid authenticated-client web tool permission.");
+    normalized.permissions.authenticatedClients = [...new Set<WebToolName>(permissions.authenticatedClients as WebToolName[])];
   }
   return normalized;
 }
@@ -53,13 +64,13 @@ export async function loadWebToolsConfig(path: string | undefined, store: StateS
       if (!account || !account.enabled || account.provider !== provider) throw new WebToolError("provider_account_mismatch");
       return store.revealToken(account);
     },
-    isToolAllowed: (caller, name) => (config.permissions.clients[caller] || []).includes(name),
+    isToolAllowed: (caller, name) => (config.permissions.clients[caller] || []).includes(name) || (config.permissions.authenticatedClients || []).includes(name),
   });
   return {
     call: async (name: string, args: unknown, caller: string) => {
       const selected = args && typeof args === "object" ? (args as Record<string, unknown>).provider : undefined;
       const binding = typeof selected === "string" ? config.providers[selected as WebProviderName] : undefined;
-      const permission = config.permissions.clients[caller] || [];
+      const permission = [...new Set([...(config.permissions.authenticatedClients || []), ...(config.permissions.clients[caller] || [])])];
       const feature = name === "web_search" ? "search" : name === "web_extract" ? "extract" : undefined;
       if (!feature || !tools.includes(name as WebToolName) || !permission.includes(name as WebToolName)) throw new WebToolError("tool_not_allowed");
       if (!binding?.enabled || binding.features?.[feature] !== "supported") throw new WebToolError("provider_not_enabled");
@@ -69,7 +80,8 @@ export async function loadWebToolsConfig(path: string | undefined, store: StateS
       const state = await store.load();
       return WEB_TOOL_DEFINITIONS.flatMap((definition) => {
         const scope = definition.name === "web_search" ? "web:search" : "web:extract";
-        if (!scopes.has(scope) || !(config.permissions.clients[caller] || []).includes(definition.name)) return [];
+        const permission = [...new Set([...(config.permissions.authenticatedClients || []), ...(config.permissions.clients[caller] || [])])];
+        if (!scopes.has(scope) || !permission.includes(definition.name)) return [];
         const feature = definition.name === "web_search" ? "search" : "extract";
         const selected = providers.filter((provider) => {
           const binding = config.providers[provider];

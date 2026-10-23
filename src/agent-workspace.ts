@@ -138,14 +138,14 @@ export class AgentWorkspaceService {
     return this.backend?.listProjects?.() ?? [];
   }
 
-  async authorizedProjects(clientId: string): Promise<Array<{ projectId: string }>> {
+  async authorizedProjects(clientId: string): Promise<Array<{ projectId: string; label?: string; kind?: "fleet" | "task_context" }>> {
     validateActor("client:" + clientId);
     const rows = await this.backend?.workspaceProjects?.(clientId) ?? [];
-    const result: Array<{ projectId: string }> = [];
+    const result: Array<{ projectId: string; label?: string; kind?: "fleet" | "task_context" }> = [];
     for (const row of rows.slice(0, 100)) {
       if (typeof row.projectId !== "string" || !PROJECT_ID.test(row.projectId)) continue;
       await this.backend?.authorizeWorkspace?.(row.projectId, clientId);
-      result.push({ projectId: row.projectId });
+      result.push({ projectId: row.projectId, ...(typeof row.label === "string" ? { label: row.label } : {}), ...(row.kind ? { kind: row.kind } : {}) });
     }
     return result;
   }
@@ -311,7 +311,7 @@ const workspaceUpdateSchema = { oneOf: Object.entries(updateActions).map(([actio
 export const AW_TOOL_DEFINITIONS: readonly AgentWorkspaceToolDefinition[] = Object.freeze([
   {
     name: "workspace_projects",
-    description: "Discover only Agent Workspace projects explicitly authorized for this OAuth client. An empty list means an administrator must grant project access.",
+    description: "Discover ROTOXY Fleet and task-context records explicitly authorized for this OAuth client. Labels are for display; use projectId exactly in later calls. An empty list means an administrator must grant access.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {

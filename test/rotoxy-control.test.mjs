@@ -51,6 +51,11 @@ function fixture({ health = true, initial = {} } = {}) {
       delete handlers['/'];
       if (Object.keys(handlers).length) Web[hp] = { Handlers: handlers }; else delete Web[hp];
       config = { ...config, Web };
+      if (args[0] === 'funnel') {
+        const AllowFunnel = { ...(config.AllowFunnel || {}) };
+        delete AllowFunnel[hp];
+        config = { ...config, AllowFunnel };
+      }
       return { code: 0, stdout: '' };
     }
     if (file === 'curl') return health ? { code: 0, stdout: 'ok' } : { code: 22, stderr: 'health unavailable' };
@@ -102,6 +107,25 @@ test('a reviewed exact-target migration removes only root and preserves compatib
   assert.deepEqual(Object.keys(f.config.Web['rotoxy.tailnet.ts.net:443'].Handlers).sort(), ['/', '/token2oauth']);
   const remove = f.events.find(([file, args]) => file === 'tailscale' && args.includes('off'));
   assert.deepEqual(remove[1], ['serve', '--https=443', '--set-path=/', 'off']);
+});
+
+test('approved persistent ROTOXY root migrates to the managed foreground Funnel and down withdraws it', async () => {
+  const initial = { Web: { 'rotoxy.tailnet.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:2030' } } } }, AllowFunnel: { 'rotoxy.tailnet.ts.net:443': true }, TCP: { '8443': { TCPForward: 'localhost:8080' } } };
+  const f = fixture({ initial });
+  await assert.rejects(f.controller.up(), /Persistent\/active Funnel/);
+  assert.equal(f.events.some(([file,args]) => file === 'tailscale' && args.includes('off')), false);
+  const migrationPlan = { version: 1, allowRemoveRoot: true, allowRemovePersistentFunnel: true, rootTarget: 'http://127.0.0.1:2030' };
+  assert.equal((await f.controller.up({migrationPlan})).ok, true);
+  assert.deepEqual(f.events.find(([file,args]) => file === 'tailscale' && args[0] === 'funnel' && args.includes('off'))[1], ['funnel','--https=443','--set-path=/','off']);
+  assert.deepEqual(f.config.TCP, initial.TCP);
+  assert.equal((await f.controller.down()).ok,true);
+  assert.deepEqual(f.config.TCP, initial.TCP);
+});
+
+test('persistent migration refuses a foreign mount even with the owned-root approval', async () => {
+  const f = fixture({initial:{Web:{'rotoxy.tailnet.ts.net:443':{Handlers:{'/':{Proxy:'http://127.0.0.1:2030'},'/other':{Proxy:'http://127.0.0.1:9999'}}}},AllowFunnel:{'rotoxy.tailnet.ts.net:443':true}}});
+  await assert.rejects(f.controller.up({migrationPlan:{version:1,allowRemoveRoot:true,allowRemovePersistentFunnel:true,rootTarget:'http://127.0.0.1:2030'}}), /Persistent\/active Funnel/);
+  assert.equal(f.events.some(([file,args]) => file === 'tailscale' && args.includes('off')),false);
 });
 
 test('CLI accepts only explicit manual actions and migration plan file on up', () => {

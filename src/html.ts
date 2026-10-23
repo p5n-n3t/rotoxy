@@ -26,6 +26,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   { label: "Command", items: [{ key: "pool", label: "Overview", href: "/admin" }, { key: "agents", label: "Agent workspace", href: "/admin/agents" }, { key: "jobs", label: "Jobs", href: "/admin/jobs" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
   { label: "Resources", items: [
     { key: "accounts", label: "Workspace accounts", href: "/admin#accounts" },
+    { key: "lightsprint-sessions", label: "LightSprint sessions", href: "/admin/lightsprint/sessions" },
     { key: "models", label: "Models & APIs", href: "/admin/providers" },
     { key: "codex", label: "ChatGPT & Codex", href: "/admin/codex" },
     { key: "oracle", label: "Private workers", href: "/admin/oracle" },
@@ -38,7 +39,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {
   const b = esc(base);
   const navActive = active === "dispatch-approvals" ? "jobs" : active === "runners" ? "models" : active === "chatgpt-codex" ? "codex" : ["cloudflare", "inference"].includes(active) ? "models" : active;
-  const labels: Record<string, string> = { "dispatch-approvals": "Dispatch approvals", runners: "CLI runner profiles", cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map" };
+  const labels: Record<string, string> = { "dispatch-approvals": "Dispatch approvals", runners: "CLI runner profiles", cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map", "lightsprint-sessions": "LightSprint session bindings" };
   const current = labels[active] ?? groups.flatMap((group) => group.items).find((item) => item.key === navActive)?.label ?? active;
   const link = (item: NavItem) => item.href
     ? `<a class="nav-link" href="${b}${esc(item.href)}"${navActive === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`
@@ -51,7 +52,7 @@ export function adminNav(base: string, active: string, groups: readonly NavGroup
     return `<section class="nav-group" aria-labelledby="nav-${esc(g.label.toLowerCase())}"><h2 class="nav-label" id="nav-${esc(g.label.toLowerCase())}">${esc(g.label)}</h2>${links}</section>`;
   }).join("");
   const actions = `<div class="rx-sidebar-end"><a class="btn secondary" href="${b}/">Gateway</a><form class="inline" method="post" action="${b}/admin/logout"><button class="secondary">Sign out</button></form></div>`;
-  return `<a class="rx-skip-link" href="#rx-main-content">Skip to content</a><aside class="rx-sidebar" aria-label="ROTOXY workspace navigation"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><span class="logo">${ROTOXY_MARK_SVG}</span><span><strong>ROTOXY</strong><span class="eyebrow">AI workforce control</span></span></a><div class="rx-workspace-id"><span class="eyebrow">Workspace</span><strong>Gateway workspace</strong></div><div class="rx-desktop-nav"><nav class="rx-nav-groups" aria-label="Workspace navigation">${nav.replaceAll('id="nav-', 'id="desktop-nav-').replaceAll('aria-labelledby="nav-', 'aria-labelledby="desktop-nav-')}</nav>${actions}</div><details class="rx-nav-details"><summary class="rx-mobile-menu">Menu <span aria-hidden="true">⌄</span></summary><div class="rx-nav-content"><nav class="rx-nav-groups" aria-label="Workspace navigation">${nav}</nav>${actions}</div></details></aside><header class="rx-page-context"><div><span class="eyebrow">Current page</span><strong class="rx-current-page">${esc(current)}</strong></div></header>`;
+  return `<a class="rx-skip-link" href="#rx-main-content">Skip to content</a><aside class="rx-sidebar" aria-label="ROTOXY navigation"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><span class="logo">${ROTOXY_MARK_SVG}</span><span><strong>ROTOXY</strong><span class="eyebrow">AI workforce control</span></span></a><div class="rx-workspace-id"><span class="eyebrow">Control plane</span><strong>ROTOXY Fleet</strong></div><div class="rx-desktop-nav"><nav class="rx-nav-groups" aria-label="ROTOXY navigation">${nav.replaceAll('id="nav-', 'id="desktop-nav-').replaceAll('aria-labelledby="nav-', 'aria-labelledby="desktop-nav-')}</nav>${actions}</div><details class="rx-nav-details"><summary class="rx-mobile-menu">Menu <span aria-hidden="true">⌄</span></summary><div class="rx-nav-content"><nav class="rx-nav-groups" aria-label="ROTOXY navigation">${nav}</nav>${actions}</div></details></aside><header class="rx-page-context"><div><span class="eyebrow">Current page</span><strong class="rx-current-page">${esc(current)}</strong></div></header>`;
 }
 
 /** Inject the session CSRF token into every POST form of an admin page. */

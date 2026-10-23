@@ -22,3 +22,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Verify isolated OAuth and Python supervisor wiring
+        run: node scripts/verify-fleet-oauth.mjs
+      - name: Verify durable supervisor and provider-independent Python behavior
+        if: matrix.node == 22
+        env:
+          PYTHONPATH: supervisor
+        run: python3 -m unittest discover -s supervisor/tests

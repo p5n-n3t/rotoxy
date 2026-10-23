@@ -300,7 +300,7 @@ test("tool policy is enforced server-side for tools/call and filters tools/list 
       assert.equal(list.status, 200);
       const text = await list.text();
       const payload = sse ? JSON.parse(text.match(/^data: (.*)$/m)[1]) : JSON.parse(text);
-      assert.deepEqual(payload.result.tools.map((t) => t.name), ["safe", "reader"]);
+      assert.deepEqual(payload.result.tools.map((t) => t.name), ["safe", "reader", "rotoxy_guide"]);
     }
     env.ctl.sse = false;
 
@@ -475,7 +475,7 @@ test("state files written before this release load unchanged and keep passthroug
     await env.store.update((s) => { delete s.security; delete s.capabilities; delete s.config.toolPolicy; delete s.config.readOnlyTools; });
     const tokens = await oauthTokens(env.base);
     const res = await mcp(env.base, tokens.access_token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-    assert.equal((await res.json()).result.tools.length, 3);
+    assert.equal((await res.json()).result.tools.length, 4);
     assert.equal((await adminLogin(env.base)).res.status, 302);
   } finally {
     await env.teardown();

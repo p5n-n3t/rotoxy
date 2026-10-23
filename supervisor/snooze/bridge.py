@@ -32,6 +32,7 @@ def create_job_registry(state_dir):
     if config_path.exists() or config_path.is_symlink():
         admission = CreditAdmission.from_private_config(
             config_path, state_dir / "credit-reservations.sqlite3",
+            allow_disabled=True,
         )
     return JobRegistry(state_dir / "snooze.sqlite3", credit_admission=admission)
 

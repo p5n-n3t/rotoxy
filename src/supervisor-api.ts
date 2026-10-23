@@ -1,3 +1,4 @@
+import { fleetLabel } from "./fleet-identity.js";
 import { page } from "./ui.js";
 import { esc, adminNav, withCsrf } from "./html.js";
 import { randomBytes } from "node:crypto";
@@ -51,7 +52,7 @@ export interface SupervisorBackend {
   /** Admin-only one-shot message to a configured existing worker session. */
   guidanceAdmin?(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult>;
   /** Read-only discovery limited to projects explicitly authorized for this OAuth client. */
-  workspaceProjects?(clientId: string): Promise<Array<{ projectId: string }>>;
+  workspaceProjects?(clientId: string): Promise<Array<{ projectId: string; label?: string; kind?: "fleet" | "task_context" }>>;
   /** Sanitized project/client membership snapshot for the authenticated admin. */
   workspaceAccessAdmin?(): Promise<WorkspaceAccessSnapshot>;
   /** Explicitly change only one project's OAuth client membership. */
@@ -99,7 +100,7 @@ function dashboardOptions(req: Request, nonce: string, csrfToken: string | undef
   const severity = queryValue(req, "severity", 16).toLowerCase();
   const pause = queryValue(req, "pause", 16);
   return {
-    title: projectId ? `Workforce control desk · ${projectId}` : "Workforce control desk",
+    title: projectId ? `Workforce control desk · ${fleetLabel(projectId)}` : "Workforce control desk",
     search: queryValue(req, "search", 120),
     severity: severityLevels.has(severity) ? severity : "all",
     pause: pause === "paused" || pause === "active" ? pause : "all",
@@ -176,8 +177,8 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
 
   router.get("/admin/supervisor", requireAdminPage, (_req, res) => {
     const projects = (backend?.listProjects?.() ?? []).filter(id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)).slice(0, 50);
-    const content = projects.length ? `<ul>${projects.map(id => `<li><a href="./supervisor/${encodeURIComponent(id)}">${esc(id)}</a></li>`).join("")}</ul>` : '<p class="muted">No supervised projects are configured. Configure the private supervisor runtime to connect this view.</p>';
-    res.type("html").send(page("Supervisor", withCsrf(`<main class="wrap">${adminNav(res.locals.supervisorBase, "supervisor")}<section class="card full"><h1>Supervised projects</h1>${content}</section></main>`, res.locals.supervisorCsrf ?? "")));
+    const content = projects.length ? `<ul>${projects.map(id => `<li><a href="./supervisor/${encodeURIComponent(id)}">${esc(fleetLabel(id))}</a></li>`).join("")}</ul>` : '<p class="muted">No supervised projects are configured. Configure the private supervisor runtime to connect this view.</p>';
+    res.type("html").send(page("Supervisor", withCsrf(`<main class="wrap">${adminNav(res.locals.supervisorBase, "supervisor")}<section class="card full"><h1>Supervised Fleet and task contexts</h1>${content}</section></main>`, res.locals.supervisorCsrf ?? "")));
   });
 
   router.get("/admin/supervisor/:projectId", requireAdminPage, async (req, res) => {

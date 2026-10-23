@@ -155,7 +155,9 @@ try {
   };
 
   // npm >=12 may emit a single object; older versions emit a one-element array.
-  const packed = await run(npm, ["pack", "--json", "--pack-destination", packDir], { timeout: 120_000, env: isolatedEnv });
+  // Compile directly so a timeout cannot leave an npm prepack child behind.
+  await run(process.execPath, [join(repoRoot, "node_modules", "typescript", "lib", "tsc.js"), "-p", join(repoRoot, "tsconfig.json")], { timeout: 300_000, env: isolatedEnv });
+  const packed = await run(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", packDir], { timeout: 120_000, env: isolatedEnv });
   const metadata = normalizePackJson(JSON.parse(packed.stdout));
   assert(metadata && typeof metadata.filename === "string" && Array.isArray(metadata.files), "npm pack returned an unsupported JSON shape");
   assert(metadata.name === packageName && metadata.version === packageJson.version, "packed artifact identity differs from package.json");

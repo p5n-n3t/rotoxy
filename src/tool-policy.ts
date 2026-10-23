@@ -438,7 +438,7 @@ function rejectionFor(message: JsonRpcMessage, decision: Extract<PolicyDecision,
   return {
     jsonrpc: "2.0",
     id: message.id ?? null,
-    error: { code: POLICY_ERROR_CODE, message: `Blocked by Token2OAuth tool policy: ${decision.reason}`, data: { code: decision.code } },
+    error: { code: POLICY_ERROR_CODE, message: `Blocked by ROTOXY tool policy: ${decision.reason}`, data: { code: decision.code } },
   };
 }
 

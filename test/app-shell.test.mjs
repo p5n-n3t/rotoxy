@@ -32,10 +32,10 @@ test("shared navigation has one stable destination per entry and resolves compat
 
 test("integrated shell carries workspace context, skip target, accessible mobile menu, and focus styling", () => {
   const html = render("pool", "");
-  assert.match(html, /Gateway workspace/);
+  assert.match(html, /ROTOXY Fleet/);
   assert.match(html, /Current page<\/span><strong class="rx-current-page">Overview/);
   assert.match(html, /<details class="rx-nav-details"><summary class="rx-mobile-menu">Menu/);
-  assert.match(html, /<nav class="rx-nav-groups" aria-label="Workspace navigation">/);
+  assert.match(html, /<nav class="rx-nav-groups" aria-label="ROTOXY navigation">/);
   assert.match(html, /href="#rx-main-content">Skip to content/);
   assert.match(html, /<main id="rx-main-content" tabindex="-1"/);
   assert.match(html, /@media\(max-width:720px\)/);
