@@ -85,3 +85,26 @@ also runs isolated Fleet OAuth and Python supervisor checks.
 The previous Claude release audit exhausted its bounded budget while loading
 context and produced no findings; do not count it as a successful review or
 repeat the same context-heavy launch.
+
+
+## Quota update — 2026-10-23
+
+PR #17 merged as `15e068c`; immutable runtime `0de87f1` activates durable
+provider-USD session-cost tracking. Its CI Node 22/24 and Python checks pass.
+The monitor has collected seven real session-cost baselines with zero launches.
+Repeated, stale or decreasing counters do not manufacture debits; an initial
+reading is a baseline rather than historical spend charged again.
+
+Twelve owner-reported quota readings and refresh dates are saved privately. Four
+accounts declared depleted are disabled regardless of provider overage behavior;
+jqthefoo is unused with a full 10M-credit baseline. Seven new amounts require
+used-versus-remaining clarification before replacing historical balances. The
+configured maryjoebake account was omitted from the new report and stays
+unverified. Do not reinterpret these pending inputs or automatically refill
+accounts on calendar dates. The raw import and pre-change backup are private
+under the existing configuration directory.
+
+Official pricing confirms 10M credits per Pro seat but supplies no fixed
+USD-to-credit exchange rate. Track reported USD independently until conversion
+is evidenced; sandbox, planning and unregistered session coverage are incomplete.
+See [accounting behavior](lightsprint-quota-accounting.md).
