@@ -65,12 +65,18 @@ export interface RenewalEntry {
   evidence: string;
 }
 
+export interface SessionCostReading {
+  provider: "lightsprint"; accountId: string; sessionId: string; totalUsd: number;
+  observedAt: number; model?: string; deltaUsd: number;
+}
+
 export interface CreditSnapshotState {
   version: 1;
   snapshots: BalanceSnapshot[];
   usage: UsageEntry[];
   reservations: ReservationEntry[];
   renewals: RenewalEntry[];
+  sessionCosts?: SessionCostReading[];
 }
 
 export interface CreditSnapshotStoreOptions {
@@ -214,6 +220,7 @@ export class CreditSnapshotStore {
     try {
       const parsed = JSON.parse(await fs.readFile(this.file, "utf8")) as CreditSnapshotState;
       if (parsed.version !== 1 || !Array.isArray(parsed.snapshots) || !Array.isArray(parsed.usage) || !Array.isArray(parsed.reservations) || !Array.isArray(parsed.renewals)) throw new Error("invalid credit snapshot ledger shape");
+      if (parsed.sessionCosts !== undefined && !Array.isArray(parsed.sessionCosts)) throw new Error("invalid session cost ledger shape");
       return parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyState();
@@ -222,7 +229,7 @@ export class CreditSnapshotStore {
   }
 
   private async writeUnlocked(state: CreditSnapshotState): Promise<void> {
-    const total = state.snapshots.length + state.usage.length + state.reservations.length + state.renewals.length;
+    const total = state.snapshots.length + state.usage.length + state.reservations.length + state.renewals.length + (state.sessionCosts?.length ?? 0);
     if (total > MAX_LEDGER_ROWS) throw new RangeError(`credit ledger retention limit ${MAX_LEDGER_ROWS} reached`);
     const temp = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     const handle = await fs.open(temp, "wx", 0o600);
@@ -264,6 +271,26 @@ export class CreditSnapshotStore {
     validNumber(input.amount, "reservation amount"); validTimestamp(input.observedAt, "reservation observedAt"); validId(input.id, "reservation id");
     if (!["reserved", "inflight", "released", "captured"].includes(input.state)) throw new TypeError("invalid reservation state");
     await this.withLock(async () => { const state = await this.readUnlocked(); state.reservations.push(input); await this.writeUnlocked(state); });
+  }
+
+  /** Observe cumulative provider USD independently of worker lifecycle. Never infer a credit conversion. */
+  async recordSessionCost(input: Omit<SessionCostReading, "deltaUsd">): Promise<{status: "baseline" | "increased" | "unchanged" | "out_of_order" | "counter_decreased"; deltaUsd: number}> {
+    this.account(input.provider, input.accountId, "credits");
+    if (input.provider !== "lightsprint") throw new TypeError("unsupported session cost provider");
+    validId(input.sessionId, "sessionId"); validNumber(input.totalUsd, "totalUsd"); validTimestamp(input.observedAt, "observedAt");
+    if (input.model !== undefined) validId(input.model, "model");
+    return this.withLock(async () => {
+      const state = await this.readUnlocked();
+      const previous = [...(state.sessionCosts ?? [])].reverse().find(row => row.accountId === input.accountId && row.sessionId === input.sessionId);
+      if (previous && input.observedAt < previous.observedAt) return {status:"out_of_order", deltaUsd:0};
+      if (previous && input.totalUsd < previous.totalUsd) return {status:"counter_decreased", deltaUsd:0};
+      if (previous && input.totalUsd === previous.totalUsd) return {status:"unchanged", deltaUsd:0};
+      const deltaUsd = previous ? Number((input.totalUsd - previous.totalUsd).toFixed(9)) : 0;
+      // First read establishes a cursor: historical spend must not be deducted from a fresh balance reading.
+      (state.sessionCosts ??= []).push({...input, deltaUsd});
+      await this.writeUnlocked(state);
+      return {status:previous ? "increased" : "baseline",deltaUsd};
+    });
   }
 
   async recordVerifiedRenewal(input: RenewalEntry): Promise<void> {
@@ -310,7 +337,8 @@ export function summarizeCredits(accounts: readonly CreditAccount[], state: Cred
     const reserved = [...latestReservations.values()].filter((row) => row.state === "reserved").reduce((sum, row) => sum + row.amount, 0);
     const inflight = [...latestReservations.values()].filter((row) => row.state === "inflight").reduce((sum, row) => sum + row.amount, 0);
     const held = reserved + inflight;
-    const sessionSpendUsd = (options.sessionSpend ?? []).filter((row) => row.provider === account.provider && row.accountId === account.accountId && Number.isFinite(row.amountUsd) && row.amountUsd >= 0 &&
+    const persistedUsd = (state.sessionCosts ?? []).filter(row => row.accountId === account.accountId && row.provider === account.provider && (baseAt === undefined || row.observedAt >= baseAt)).reduce((sum,row)=>sum+row.deltaUsd,0);
+    const sessionSpendUsd = persistedUsd + (options.sessionSpend ?? []).filter((row) => row.provider === account.provider && row.accountId === account.accountId && Number.isFinite(row.amountUsd) && row.amountUsd >= 0 &&
       (row.source !== "estimated" || !!row.provenance?.trim())).reduce((sum, row) => sum + row.amountUsd, 0);
     const modelSlotUsage = (options.modelSlotUsage ?? []).filter((row) => row.provider === account.provider && row.accountId === account.accountId && Number.isFinite(row.observedUsage) && row.observedUsage >= 0)
       .map((row) => ({ model: row.model, slot: row.slot, observedUsage: row.observedUsage, unit: row.unit, debit: null,
@@ -318,7 +346,7 @@ export function summarizeCredits(accounts: readonly CreditAccount[], state: Cred
     return { account, balanceSnapshot: snapshotView, monthlyAllowance: account.provider === "lightsprint" ? LIGHTSPRINT_MONTHLY_ALLOWANCE : null,
       estimatedRemaining, estimateProvenance, ...(estimateReason ? { estimateReason } : {}), debitsBySource, reserved, inflight,
       availableAfterHolds: estimatedRemaining === null || held > estimatedRemaining ? null : estimatedRemaining - held,
-      observedSessionSpendUsd: sessionSpendUsd, modelSlotUsage };
+      observedSessionSpendUsd: Number(sessionSpendUsd.toFixed(9)), modelSlotUsage };
   });
 }
 

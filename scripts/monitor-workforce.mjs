@@ -4,6 +4,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CreditSnapshotStore } from '../dist/credit-snapshots.js';
 import { StateStore } from '../dist/store.js';
 import { serverMessages } from '../dist/jsonrpc-wire.js';
 import { boundObservationDiagnostics, classifyObservationFailure, normalizeSessionObservation, WorkerObservationFailure } from '../dist/worker-observation.js';
@@ -79,6 +80,14 @@ async function observation(worker,state){
   if(typeof s.sessionId!=='string')throw new WorkerObservationFailure('session_missing');
   if(s.sessionId!==worker.sessionId)throw new WorkerObservationFailure('session_mismatch');
   if(s.isOwner!==true)throw new WorkerObservationFailure('owner_mismatch');
+  const cost=s.aiGatewaySessionCostUsd;
+  if(typeof cost==='number'&&Number.isFinite(cost)&&cost>=0){
+    try{
+      const ledger=new CreditSnapshotStore([{provider:'lightsprint',accountId:account.id,label:account.label,unit:'credits'}],{directory:store.dir});
+      const receipt=await ledger.recordSessionCost({provider:'lightsprint',accountId:account.id,sessionId:worker.sessionId,totalUsd:cost,observedAt:Date.now(),...(safe(s.model)?{model:s.model}:{})});
+      if(receipt.status==='counter_decreased')console.error(JSON.stringify({event:'session_cost_counter_decreased',accountId:account.id,sessionId:worker.sessionId}));
+    }catch{console.error(JSON.stringify({event:'session_cost_accounting_unavailable',accountId:account.id,sessionId:worker.sessionId}));}
+  }
   const observed=normalizeSessionObservation(s);
   return{...observed,...(safe(s.model)?{model:s.model}:{}),
     ...(Number.isSafeInteger(s.promptCount)&&s.promptCount>=0?{promptCount:s.promptCount}:{})};
