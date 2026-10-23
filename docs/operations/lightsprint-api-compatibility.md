@@ -36,3 +36,17 @@ not infer authorization or exact launch schemas from the audit itself.
 Quota snapshots, active sessions, local concurrency ceilings and provider slot
 entitlements are separate measurements. Neither this API description nor a
 successful status read verifies twelve executing slots per account.
+
+## Route preparation — 2026-10-24
+
+`LightSprintWorkspaceContract` now builds immutable account/workspace-bound route
+descriptors for task and session operations, with path-fragment validation. Every
+session route retains the workspace prefix, including cancellation and stop.
+This pure helper performs no I/O and is not yet connected to live provisioning.
+Its account comparison validates local binding, not upstream membership. Session
+listing is not proof of idempotency or exact launch reconciliation.
+
+Claude Code produced the initial implementation; integration review corrected
+legacy session paths and an unsupported correlation claim. The 22 focused tests
+pass. Next: obtain account-pinned workspace evidence and integrate the narrow
+transport/policy path without weakening ambiguous-operation safeguards.
