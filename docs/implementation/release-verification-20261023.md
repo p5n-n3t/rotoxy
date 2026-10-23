@@ -2,7 +2,13 @@
 
 ## Integrated and activated
 
-PR #15 merged to main as `a0f5a1c`; immutable runtime `89e6b90` is active.
+PR #15 merged to main as `a0f5a1c`. Follow-up PR #16 merged as `88fe7cc`;
+immutable runtime `1a9e067` is active. The authenticated Fleet page is now
+`/admin/fleet`; old links redirect without migrating durable identifiers.
+Both Node CI jobs and full Python checks passed in run 39971822398.
+Post-activation health and Claude reconnect passed; all four service units
+reported active. The public Fleet page correctly redirects unauthenticated
+visitors to login. Visual verification remains pending.
 Gateway, Oracle daemon, workforce monitor and foreground Funnel units are active.
 The Desktop source checkout now contains main rather than the October 7 branch.
 Existing untracked handoffs and other worktrees remain intact.

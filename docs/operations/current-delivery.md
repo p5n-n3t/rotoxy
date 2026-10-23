@@ -6,7 +6,7 @@ this file before starting another assignment.
 
 ## Verified runtime
 
-- Activated immutable runtime `~/.local/share/rotoxy-releases/89e6b90` using
+- Activated immutable runtime `~/.local/share/rotoxy-releases/1a9e067` using
   service drop-ins. The original installation remains available for rollback.
 - Real manual `down` then `up` succeeded: down withdrew the owned Funnel and
   stopped the app units; up restored all services and one root Funnel.
@@ -14,7 +14,11 @@ this file before starting another assignment.
 - Public `/healthz` returns 200; OAuth metadata uses the root ROTOXY issuer and
   `/oauth/register`, `/oauth/authorize`, `/oauth/token` endpoints.
 - `claude mcp list` reports the ROTOXY MCP connection connected after activation.
-- PR #15 merged as `a0f5a1c`. Local Node suite: 560/560 passed; CI Node 22
+- PR #15 merged as `a0f5a1c`; follow-up PR #16 merged as `88fe7cc`.
+  The active follow-up adds `/admin/fleet` and redirects authenticated old links.
+  Its CI Node 22/24 and full Python suite passed (run 39971822398), and its
+  installed OAuth smoke and post-activation Claude reconnect passed.
+- PR #15 validation: Local Node suite: 560/560 passed; CI Node 22
   and 24 and the full Python suite passed. Installed OAuth/Fleet smoke passed.
 - Desktop connector read-only calls currently return an internal error while
   Claude reconnects. Reconnect the Desktop app; do not treat it as verified.
