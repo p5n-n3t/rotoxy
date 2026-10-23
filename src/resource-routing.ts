@@ -9,6 +9,7 @@ export type ResourceAccountRoutingRule = { enabled: boolean; weight: number; cap
 export type ResourceRoutingRules = {
   version: 1;
   unknownCapacity: number;
+  pools?: Record<string, {enabled: boolean}>;
   providerCaps: Partial<Record<ResourceFamily, number>>;
   resources: Record<string, ResourceAccountRoutingRule>;
 };
@@ -67,7 +68,7 @@ export function routingRuleAllowsModel(rule: ResourceAccountRoutingRule | undefi
 export function validateResourceRoutingRules(value: unknown): ResourceRoutingRules {
   const root = obj(value);
   if (!root) throw new TypeError("resource routing rules must be an object");
-  closed(root, ["version", "unknownCapacity", "providerCaps", "resources"], "rules");
+  closed(root, ["version", "unknownCapacity", "providerCaps", "resources", "pools"], "rules");
   if (root.version !== 1) throw new TypeError("unsupported resource routing rules version");
   const unknownCapacity = root.unknownCapacity === undefined ? 1 : integer(root.unknownCapacity, 1, 100, "unknownCapacity");
   const rawCaps = root.providerCaps === undefined ? {} : obj(root.providerCaps);
@@ -95,28 +96,44 @@ export function validateResourceRoutingRules(value: unknown): ResourceRoutingRul
       ...(item.allowedModels === undefined ? {} : { allowedModels: validateAllowedModels(item.allowedModels, `resource rule ${id}.allowedModels`) }),
     };
   }
-  return { version: 1, unknownCapacity, providerCaps, resources };
+  let pools: ResourceRoutingRules["pools"];
+  if(root.pools !== undefined){
+    const rawPools=obj(root.pools);if(!rawPools)throw new TypeError("pools must be an object");
+    pools=Object.create(null);
+    for(const [id,value] of Object.entries(rawPools)){const item=obj(value);if(!ID.test(id)||!item||Object.keys(item).some(k=>k!=="enabled")||typeof item.enabled!=="boolean")throw new TypeError("pool policy is invalid");pools![id]={enabled:item.enabled};}
+  }
+  return { version: 1, unknownCapacity, providerCaps, resources, ...(pools?{pools}:{}) };
 }
 
 /** Rules contain routing policy only, never provider credentials or tokens. Writes serialize on StateStore's cross-process lock. */
 export class ResourceRoutingRulesStore {
   readonly path: string;
-  constructor(private readonly state: StateStore) { this.path = join(state.dir, FILE); }
+  constructor(private readonly state: StateStore, directory = state.dir) { this.path = join(directory, FILE); }
   async read(): Promise<ResourceRoutingRules> {
     try { return validateResourceRoutingRules(JSON.parse(await readFile(this.path, "utf8"))); }
     catch (error: any) { if (error?.code === "ENOENT") return structuredClone(DEFAULT_RULES); throw error; }
   }
   template(): string { return JSON.stringify(DEFAULT_RULES, null, 2) + "\n"; }
+  private async write(rules: ResourceRoutingRules): Promise<void> {
+    await mkdir(this.state.dir, {recursive:true,mode:0o700});
+    await chmod(this.state.dir,0o700);
+    const temp=`${this.path}.tmp-${process.pid}-${randomUUID()}`;
+    await writeFile(temp,JSON.stringify(rules,null,2)+"\n",{mode:0o600});await rename(temp,this.path);await chmod(this.path,0o600);
+  }
   async replace(value: unknown): Promise<ResourceRoutingRules> {
-    const rules = validateResourceRoutingRules(value);
-    await this.state.update(async () => {
-      await mkdir(this.state.dir, { recursive: true, mode: 0o700 });
-      await chmod(this.state.dir, 0o700).catch(() => undefined);
-      const temp = `${this.path}.tmp-${process.pid}-${randomUUID()}`;
-      await writeFile(temp, JSON.stringify(rules, null, 2) + "\n", { mode: 0o600 });
-      await rename(temp, this.path); await chmod(this.path, 0o600);
-    });
-    return rules;
+    const rules=validateResourceRoutingRules(value);await this.state.update(()=>this.write(rules));return rules;
+  }
+  async patchControls(input: {pool?: string;accountId?: string;enabled:boolean;capacity?:number;expected:string}):Promise<ResourceRoutingRules>{
+    let saved!:ResourceRoutingRules;
+    await this.state.update(async()=>{
+      const current=await this.read();if(JSON.stringify(current)!==input.expected)throw new Error("routing revision conflict");
+      if(input.pool){if(!["lightsprint","ollama","cloudflare"].includes(input.pool)||input.accountId)throw new TypeError("pool is invalid");(current.pools??={})[input.pool]={enabled:input.enabled};}
+      else if(input.accountId&&ID.test(input.accountId)){
+        const old=current.resources[input.accountId];current.resources[input.accountId]={...old,enabled:input.enabled,weight:old?.weight??1};
+        if(input.capacity===undefined)delete current.resources[input.accountId].capacity;else current.resources[input.accountId].capacity=input.capacity;
+      }else throw new TypeError("account is invalid");
+      saved=validateResourceRoutingRules(current);await this.write(saved);
+    });return saved;
   }
 }
 

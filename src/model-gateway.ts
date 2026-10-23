@@ -104,7 +104,7 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
       } catch { /* Preserve existing body handling; configured model policies fail closed below. */ }
     }
     const [listed, rules] = await Promise.all([credentials.listCredentials(), routingRules.read()]);
-    const available = listed.filter((account) => account.enabled && rules.resources[account.id]?.enabled !== false &&
+    const available = listed.filter((account) => rules.pools?.ollama?.enabled !== false && account.enabled && rules.resources[account.id]?.enabled !== false &&
       (target.scope !== "model:invoke" || rules.resources[account.id]?.allowedModels === undefined || requestedModel !== undefined && routingRuleAllowsModel(rules.resources[account.id], requestedModel)) &&
       (account.cooldownUntil ?? 0) <= now() &&
       (inflight.get(account.id) ?? 0) < boundedAccountCapacity(rules.resources[account.id]?.capacity, maxInflight));

@@ -115,3 +115,18 @@ test("routing accepts credential IDs with every URL-safe base64 leading characte
   }
   assert.throws(() => validateResourceRoutingRules({ version: 1, resources: { "../account": { enabled: true, weight: 1 } } }));
 });
+
+test('pool dispatch switches preserve account policy and are revision checked', async()=>{
+ const {StateStore}=await import('../dist/store.js');const {ResourceRoutingRulesStore}=await import('../dist/resource-routing.js');
+ const root=await mkdtemp(join(tmpdir(),'rx-pool-policy-'));
+ const previous=process.env.TOKEN2OAUTH_CONFIG_DIR;process.env.TOKEN2OAUTH_CONFIG_DIR=root;
+ try{
+  const state=new StateStore();await state.init({adminPassword:'pool-test-only'});
+  const store=new ResourceRoutingRulesStore(state),before=await store.read();
+  const updated=await store.patchControls({pool:'lightsprint',enabled:false,expected:JSON.stringify(before)});
+  assert.equal(updated.pools.lightsprint.enabled,false);
+  await assert.rejects(store.patchControls({pool:'ollama',enabled:false,expected:JSON.stringify(before)}),/revision/);
+  const capped=await store.patchControls({accountId:'account-a',enabled:true,capacity:2,expected:JSON.stringify(updated)});
+  assert.equal(capped.resources['account-a'].capacity,2);assert.equal(capped.pools.lightsprint.enabled,false);
+ }finally{if(previous===undefined)delete process.env.TOKEN2OAUTH_CONFIG_DIR;else process.env.TOKEN2OAUTH_CONFIG_DIR=previous;await rm(root,{recursive:true,force:true});}
+});
