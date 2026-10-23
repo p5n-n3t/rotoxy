@@ -1,4 +1,4 @@
-import { fleetLabel } from "./fleet-identity.js";
+import { fleetLabel, isPrimaryFleet, PRIMARY_FLEET_ID } from "./fleet-identity.js";
 import { page } from "./ui.js";
 import { esc, adminNav, withCsrf } from "./html.js";
 import { randomBytes } from "node:crypto";
@@ -177,12 +177,11 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
 
   router.get("/admin/supervisor", requireAdminPage, (_req, res) => {
     const projects = (backend?.listProjects?.() ?? []).filter(id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)).slice(0, 50);
-    const content = projects.length ? `<ul>${projects.map(id => `<li><a href="./supervisor/${encodeURIComponent(id)}">${esc(fleetLabel(id))}</a></li>`).join("")}</ul>` : '<p class="muted">No supervised projects are configured. Configure the private supervisor runtime to connect this view.</p>';
+    const content = projects.length ? `<ul>${projects.map(id => `<li><a href="${res.locals.supervisorBase}/admin/${isPrimaryFleet(id) ? "fleet" : `supervisor/${encodeURIComponent(id)}`}">${esc(fleetLabel(id))}</a></li>`).join("")}</ul>` : '<p class="muted">No supervised projects are configured. Configure the private supervisor runtime to connect this view.</p>';
     res.type("html").send(page("Supervisor", withCsrf(`<main class="wrap">${adminNav(res.locals.supervisorBase, "supervisor")}<section class="card full"><h1>Supervised Fleet and task contexts</h1>${content}</section></main>`, res.locals.supervisorCsrf ?? "")));
   });
 
-  router.get("/admin/supervisor/:projectId", requireAdminPage, async (req, res) => {
-    const projectId = req.params.projectId;
+  const renderProjectPage = async (req: Request, res: Response, projectId: string) => {
     if (typeof projectId !== "string" || !projectId || projectId.length > 200) return res.status(404).type("html").send("Project unavailable");
     if (!backend?.readAdmin) {
       const html = renderSupervisorDashboard({ state: "error", error: "Supervisor snapshot is unavailable." }, dashboardOptions(req, res.locals.supervisorNonce, res.locals.supervisorCsrf, undefined, projectId));
@@ -202,6 +201,17 @@ export function createSupervisorAdminRouter(store: StateStore, sessions: AdminSe
     const feedUrl = `${res.locals.supervisorBase}/admin/api/v1/supervisor/${encodeURIComponent(projectId)}/live`;
     const html = renderSupervisorDashboard(normalizeSupervisorSnapshot(safe.value), dashboardOptions(req, res.locals.supervisorNonce, res.locals.supervisorCsrf, feedUrl, projectId));
     return res.type("html").send(html);
+  };
+
+  router.get("/admin/fleet", requireAdminPage, (req, res) => renderProjectPage(req, res, PRIMARY_FLEET_ID));
+  router.get("/admin/supervisor/:projectId", requireAdminPage, (req, res) => {
+    const projectId = req.params.projectId;
+    if (typeof projectId !== "string") return res.status(404).type("text").send("Project unavailable");
+    if (isPrimaryFleet(projectId)) {
+      const query = req.originalUrl.includes("?") ? req.originalUrl.slice(req.originalUrl.indexOf("?")) : "";
+      return res.redirect(302, `${res.locals.supervisorBase}/admin/fleet${query}`);
+    }
+    return renderProjectPage(req, res, projectId);
   });
 
   router.get("/admin/api/v1/supervisor/:projectId", requireAdmin, async (req, res) => {

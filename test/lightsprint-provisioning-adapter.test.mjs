@@ -160,3 +160,18 @@ test("invalid task and session identifiers are never accepted as provider eviden
   assert.equal(result.state, "needs_reconciliation");
   assert.equal(fake.calls.length, 1);
 });
+
+
+test("base64url account IDs can provision without weakening workspace identity checks", async () => {
+  for (const accountId of ["_account", "-account"]) {
+    const fake = client();
+    const scoped = {...contract(),accountId};
+    const coordinator = new DurableSessionProvisioningCoordinator(new MemoryLedger(),new LightSprintProvisioningAdapter(scoped,fake));
+    const result = await coordinator.provision(request({accountId}));
+    assert.equal(result.state,"started");
+    assert.equal(fake.calls[0][1].identity.accountId,accountId);
+    const rejected = await coordinator.provision(request({accountId,idempotencyKey:"invalid-ws",workspaceId:"_workspace"}));
+    assert.equal(rejected.state,"rejected");
+    assert.equal(fake.calls.length,2);
+  }
+});

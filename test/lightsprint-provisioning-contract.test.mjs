@@ -95,3 +95,12 @@ test("diagnostics never include raw catalog lines, credentials, or identifiers",
   assert.ok(!serialized.includes("account-opaque-id"));
   assert.ok(!serialized.includes("/private/accounts"));
 });
+
+
+test("generated base64url account IDs retain contract identity", () => {
+  for (const accountId of ["_account", "-account"]) {
+    const result = classifyLightSprintProvisioningContract({accountId,description:explicitContract});
+    assert.equal(result.contract.accountId,accountId);
+    assert.equal(result.contract.status,"documented");
+  }
+});

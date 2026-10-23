@@ -61,9 +61,9 @@ revision 4, and released its reservation. Its original attempt, account, session
 and generation were retained. A separately bounded artifact-export job then
 retrieved the existing code; implementation was not repeated.
 
-The revised elapsed-time monitoring and operator CLI are source changes pending
-a coherent runtime release. The example used the reviewed CLI against the live
-ledger; it does not imply the entire new bundle is deployed.
+The revised elapsed-time monitoring and operator CLI are included in the
+2026-10-23 immutable runtime release `89e6b90`. The example above remains
+evidence of observation-only recovery of that original execution.
 
 ## Authenticated agent control (new source bundle)
 
@@ -73,7 +73,8 @@ original `jobId` and `taskId`, and the current positive integer
 `expectedRevision`. Ownership and project checks occur before the private bridge
 mutation. A stale revision is rejected rather than silently refreshed. This is
 the same observation-only operation as the local operator CLI. Discover the
-installed schema before use; the production bundle has not yet been upgraded.
+installed schema before use. The 2026-10-23 runtime release includes this
+action; client discovery and authorization must still succeed independently.
 
 ## Internal provisioning components
 

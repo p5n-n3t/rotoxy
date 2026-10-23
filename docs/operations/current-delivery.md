@@ -6,14 +6,20 @@ this file before starting another assignment.
 
 ## Verified runtime
 
-- Activated immutable runtime `~/.local/share/rotoxy-releases/1ec9389` using
+- Activated immutable runtime `~/.local/share/rotoxy-releases/89e6b90` using
   service drop-ins. The original installation remains available for rollback.
 - Real manual `down` then `up` succeeded: down withdrew the owned Funnel and
   stopped the app units; up restored all services and one root Funnel.
 - Gateway and workforce monitor were stopped; restarted their existing units.
 - Public `/healthz` returns 200; OAuth metadata uses the root ROTOXY issuer and
   `/oauth/register`, `/oauth/authorize`, `/oauth/token` endpoints.
-- `claude mcp list` reports the ROTOXY MCP connection connected.
+- `claude mcp list` reports the ROTOXY MCP connection connected after activation.
+- PR #15 merged as `a0f5a1c`. Local Node suite: 560/560 passed; CI Node 22
+  and 24 and the full Python suite passed. Installed OAuth/Fleet smoke passed.
+- Desktop connector read-only calls currently return an internal error while
+  Claude reconnects. Reconnect the Desktop app; do not treat it as verified.
+- Browser authenticated workforce checks passed before activation; post-update
+  visual checks are blocked by local browser use being disabled in Work settings.
 - Seven registered LightSprint sessions across four accounts responded to
   read-only status checks. All report `gpt-6-luna` and idle; one sandbox is
   finished. Observation access is not evidence of active execution or quota.
@@ -46,10 +52,10 @@ job IDs, account/session mappings and provider policy in the existing store.
 Completed checks: offline tarball audit; installed-package boot; real PKCE to
 Python Fleet discovery/snapshot; zero-provider recovery/restart proof; 46 Oracle
 tests; 12 credit-policy compatibility tests; 13 runtime/readiness tests; 13
-shell/lifecycle tests. Full Node run was 559/560: its only stale Fleet-label
-assertion passed after correction. Full Python was 504/506: its two two-second
-advisory subprocess timing failures passed on isolated rerun (5/5). Do not
-describe those original full runs as entirely green.
+shell/lifecycle tests. The final local Node run passed 560/560, and CI on Node
+22/24 plus the full Python suite passed at commit `89e6b90`. Earlier full Python
+execution under local host load had two subprocess timing failures; the isolated
+rerun and final CI passed. Keep the earlier logs as historical evidence.
 
 Initial activation rolled back safely because the new strict loader rejected
 the existing explicit empty disabled credit policy. The narrow compatibility
@@ -63,9 +69,8 @@ also runs isolated Fleet OAuth and Python supervisor checks.
 
 ## Remaining product work
 
-1. Finish post-restart authenticated UI and client checks, then merge the
-   verified source through PR #15. Do not repeat the completed activation,
-   provider reviews, or backup. Browser sign-in expires on gateway restart.
+1. Verify Desktop connector discovery after reconnect and post-restart browser
+   checks when browser access is enabled. Do not repeat the completed release.
 2. Complete runtime provisioning/admission against supported provider contracts;
    keep fresh exact-model/effort selection unavailable without provider evidence.
 3. Connect heterogeneous workspace dispatch (Oracle, local CLI, LightSprint)

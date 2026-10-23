@@ -2,7 +2,7 @@ import type { LightSprintProvisioningContract } from "./lightsprint-provisioning
 
 const MAX_DESCRIPTION_BYTES = 128 * 1024;
 const MAX_PIN_VALUES = 512;
-const ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_VALUE = /^[^\u0000-\u001f\u007f,;=]{1,128}$/;
 const EFFORT_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
