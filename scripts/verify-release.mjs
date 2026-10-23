@@ -12,6 +12,11 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
 const expectedBins = { rotoxy: "scripts/rotoxy-control.mjs", "rotoxy-cli": "dist/cli.js" };
 const requiredPackageFiles = [
+  "skills/rotoxy-orchestrate/SKILL.md",
+  "skills/rotoxy-orchestrate/references/scenarios.md",
+  "dist/agent-onboarding.js",
+  "dist/fleet-identity.js",
+  "dist/lightsprint-session-bindings.js",
   "dist/cli.js",
   "dist/store.js",
   "dist/oracle-tools.js",
@@ -140,7 +145,7 @@ try {
   // Stage only the public package inputs and TypeScript build inputs. Never copy .git,
   // node_modules, private configs, or generated output from the working checkout.
   const stagePaths = [
-    "package.json", "tsconfig.json", "src", "docs", "assets/brand", "supervisor/snooze",
+    "package.json", "tsconfig.json", "src", "docs", "skills", "assets/brand", "supervisor/snooze",
     "supervisor/LICENSE", "supervisor/THIRD_PARTY_NOTICES.md", "supervisor/SECURITY.md",
     "supervisor/UPSTREAM.md", "supervisor/install.sh", "scripts/monitor-workforce.mjs", "scripts/desktop-alarm-hook.mjs", "scripts/verify-recovery-continuity.py",
     "scripts/rotoxy-control.mjs", "packaging/rotoxy.target", "packaging/rotoxy-funnel.service", "install-rotoxy.sh",

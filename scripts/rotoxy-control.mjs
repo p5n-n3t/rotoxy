@@ -140,7 +140,7 @@ export class RotoxyController {
       if (r.code === 0) return;
       await this.sleep(500);
     }
-    throw new Error(`Token2OAuth did not pass ${this.healthUrl} health check`);
+    throw new Error(`ROTOXY did not pass ${this.healthUrl} health check`);
   }
   async runUnit(action, unit) {
     if (!MANAGED_UNITS.includes(unit)) throw new Error(`Refusing unmanaged unit ${unit}`);
@@ -152,7 +152,7 @@ export class RotoxyController {
     const release = await acquireLock(this.lockPath);
     const started = [];
     try {
-      const before = await this.inspect();
+      let before = await this.inspect();
       let baselineFingerprint = before.fingerprint;
       const appUnits = await this.appUnits();
       const backendsActive = (await Promise.all(appUnits.map(unit => this.active(unit)))).every(Boolean);
@@ -160,7 +160,26 @@ export class RotoxyController {
         await this.waitHealthy();
         return { ok: true, started: [], status: await this.status() };
       }
-      if (before.funnelAllowed) throw new Error('Persistent/active Funnel configuration exists. Complete an explicit migration plan and withdraw it before up; global Tailscale resets are not supported.');
+      if (before.funnelAllowed) {
+        const plan = options.migrationPlan;
+        const ownedTarget = 'http://127.0.0.1:2030';
+        if (!plan || plan.version !== 1 || plan.allowRemoveRoot !== true || plan.allowRemovePersistentFunnel !== true ||
+            plan.rootTarget !== ownedTarget || before.root?.Proxy !== ownedTarget ||
+            !before.config.Web?.[before.hostPort]?.Handlers?.['/'] ||
+            Object.keys(before.handlers).some(path => path !== '/')) {
+          throw new Error('Persistent/active Funnel configuration exists. Complete an explicit exact-target migration plan and withdraw it before up; global Tailscale resets are not supported.');
+        }
+        const unrelatedBefore = unrelatedSnapshot(before.config);
+        // Withdraw only this reviewed root mapping, never reset other ports or mounts.
+        const removed = await this.command('tailscale', ['funnel', '--https=443', '--set-path=/', 'off']);
+        if (removed.code !== 0) throw new Error('Could not withdraw the approved persistent ROTOXY root Funnel');
+        const migrated = await this.inspect();
+        if (migrated.root || migrated.funnelAllowed || unrelatedSnapshot(migrated.config) !== unrelatedBefore) {
+          throw new Error('Persistent Funnel migration did not preserve unrelated routing; refusing further changes');
+        }
+        before = migrated;
+        baselineFingerprint = migrated.fingerprint;
+      }
       if (Object.keys(before.handlers).some(p => p !== '/' && p !== '/token2oauth')) {
         throw new Error('Foreign Tailscale mounts exist; review and migrate them explicitly before starting the single-root Funnel');
       }

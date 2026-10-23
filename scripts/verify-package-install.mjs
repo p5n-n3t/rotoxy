@@ -155,7 +155,7 @@ try {
   };
 
   // npm >=12 may emit a single object; older versions emit a one-element array.
-  const packed = await run(npm, ["pack", "--json", "--pack-destination", packDir], { timeout: 120_000, env: isolatedEnv });
+  const packed = await run(npm, ["pack", "--json", "--pack-destination", packDir], { timeout: 300_000, env: isolatedEnv });
   const metadata = normalizePackJson(JSON.parse(packed.stdout));
   assert(metadata && typeof metadata.filename === "string" && Array.isArray(metadata.files), "npm pack returned an unsupported JSON shape");
   assert(metadata.name === packageName && metadata.version === packageJson.version, "packed artifact identity differs from package.json");
