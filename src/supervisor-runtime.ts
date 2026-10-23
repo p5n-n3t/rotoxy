@@ -347,7 +347,7 @@ export class SupervisorRuntime implements SupervisorBackend {
   private async syncDispatchPolicy():Promise<void>{
     const [state,rules]=await Promise.all([this.options.store.load(),new ResourceRoutingRulesStore(this.options.store,this.options.configDir).read()]);
     const payloads=[...new Set(this.config.projects.flatMap(p=>p.accountIds))].map(accountId=>{
-      const account=state.accounts.find(a=>a.id===accountId);if(!account)throw new Error("Configured supervisor account is unavailable");
+      const account=state.accounts.find(a=>a.id===accountId);
       const signal=accountSignal(account,nativeLightSprintTarget(state.config.upstreamUrl));
       const sessions=this.config.projects.flatMap(p=>p.registeredSessions).filter(s=>s.accountId===accountId);
       if(sessions.length>100)throw new Error("Supervisor config exceeds 100 sessions per account");
