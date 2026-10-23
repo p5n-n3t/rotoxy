@@ -168,7 +168,7 @@ try {
     npm_config_offline: "true",
     ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
   };
-  await run("npm", ["run", "build"], { cwd: stage, env: commandEnv, label: "temporary TypeScript build", timeout: 180_000 });
+  await run(process.execPath, [join(repoRoot, "node_modules", "typescript", "lib", "tsc.js"), "-p", join(stage, "tsconfig.json")], { cwd: stage, env: commandEnv, label: "temporary TypeScript build", timeout: 300_000 });
 
   const packed = await run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", packDir], {
     cwd: stage, env: commandEnv, label: "local npm pack", timeout: 120_000,

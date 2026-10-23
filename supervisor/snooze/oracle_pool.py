@@ -1119,7 +1119,8 @@ def _json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
-def _serve_loop(pool: OraclePool, stopped: threading.Event, *, heartbeat_interval: float = 2.0) -> None:
+def _serve_loop(pool: OraclePool, stopped: threading.Event, *, heartbeat_interval: float = 2.0,
+                catalog_refresh_seconds: float = 300.0) -> None:
     heartbeat_failed = threading.Event()
 
     def heartbeat_loop() -> None:
@@ -1143,7 +1144,16 @@ def _serve_loop(pool: OraclePool, stopped: threading.Event, *, heartbeat_interva
     heartbeat_thread = threading.Thread(target=heartbeat_loop, name="oracle-daemon-heartbeat", daemon=True)
     heartbeat_thread.start()
     try:
+        next_catalog_refresh = 0.0
         while not stopped.is_set():
+            # Refresh read-only capabilities on startup and periodically. A
+            # cached SSH failure must not exclude a recovered VM indefinitely.
+            # Heartbeats remain independent while bounded SSH probes execute.
+            if time.monotonic() >= next_catalog_refresh:
+                pool.catalog(refresh=True)
+                next_catalog_refresh = time.monotonic() + max(1.0, catalog_refresh_seconds)
+            if stopped.is_set():
+                break
             outcome = pool.run_once()
             if heartbeat_failed.is_set():
                 raise ValueError("daemon_heartbeat_failed")
