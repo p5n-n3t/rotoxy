@@ -5,7 +5,15 @@ Run both checks from a clean checkout after installing the lockfile-pinned devel
 ```sh
 node scripts/verify-release.mjs
 node scripts/verify-package-install.mjs
+node scripts/verify-fleet-oauth.mjs
 ```
+
+The Fleet OAuth smoke starts the real Python supervisor with an empty provider
+registry in disposable state, performs PKCE registration/consent/token exchange,
+and verifies authorized Fleet discovery and a workspace snapshot over MCP. Pass
+an absolute installed release directory as its first argument to check that
+bundle. It never uses operator credentials or launches inference. This checks
+protocol and supervisor wiring, not upstream execution capacity.
 
 The offline audit itself never installs dependencies. Both require Node.js 22+, Python 3.11+, npm, tar, and the local TypeScript compiler. If `node_modules/.bin/tsc` is absent, they exit with a prerequisite message; do not treat a dependency-free `npm pack --ignore-scripts` archive as a complete release. The canonical published package is `rotoxy`, with `rotoxy` (control wrapper) and `rotoxy-cli` (`dist/cli.js`) bins.
 
