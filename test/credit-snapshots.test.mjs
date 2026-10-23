@@ -132,3 +132,23 @@ test("renderer escapes account labels and keeps USD spend distinct from credits"
   assert.ok(html.includes("$1.25 USD"));
   assert.match(html, /not converted to LightSprint credits/);
 });
+
+test('session cost high-water accounting is durable, deduplicated, and independent of task state', async () => {
+  const {root,store}=await isolatedStore();
+  const reading={provider:'lightsprint',accountId:'ls-01',sessionId:'session-a',totalUsd:2,observedAt:now,model:'gpt-6-luna'};
+  try {
+    assert.equal((await store.recordSessionCost(reading)).deltaUsd,0,'first observation is a baseline, not a debit');
+    await Promise.all(Array.from({length:5},()=>store.recordSessionCost({...reading,totalUsd:2.4,observedAt:now+10})));
+    await store.recordSessionCost({...reading,totalUsd:9,observedAt:now-10});
+    assert.equal((await store.recordSessionCost({...reading,totalUsd:1,observedAt:now+20})).status,'counter_decreased');
+    const state=await store.load();
+    assert.equal(state.sessionCosts.length,2);
+    assert.equal(state.sessionCosts.reduce((sum,row)=>sum+row.deltaUsd,0),0.4);
+    const reopened=new api.CreditSnapshotStore([lightsprint()],{directory:path.join(root,'private-config')});
+    assert.equal((await reopened.recordSessionCost({...reading,totalUsd:2.6,observedAt:now+30})).deltaUsd,0.2);
+    const view=api.summarizeCredits([lightsprint()],await reopened.load(),{now:now+40})[0];
+    assert.equal(view.observedSessionSpendUsd,0.6);
+    assert.equal(view.estimatedRemaining,null,'USD never becomes credits without a verified conversion');
+    assert.equal((await fs.stat(path.join(root,'private-config','credit-snapshots.json'))).mode&0o077,0);
+  } finally {await fs.rm(root,{recursive:true,force:true});}
+});

@@ -16,3 +16,19 @@ test('unified admin keeps model keys private, enforces CSRF and preserves only a
   assert.equal((await fetch(base+'/admin/oracle',{redirect:'manual'})).status,302);
  }finally{if(server)await new Promise(r=>server.close(r));if(old.home===undefined)delete process.env.HOME;else process.env.HOME=old.home;if(old.config===undefined)delete process.env.TOKEN2OAUTH_CONFIG_DIR;else process.env.TOKEN2OAUTH_CONFIG_DIR=old.config;await rm(dir,{recursive:true,force:true});}
 });
+
+test('credit page shows recorded empty and unused balances for legacy LightSprint accounts', async()=>{
+ const {CreditSnapshotStore}=await import('../dist/credit-snapshots.js');
+ const dir=await mkdtemp(join(tmpdir(),'rotoxy-quota-page-'));
+ const old={home:process.env.HOME,config:process.env.TOKEN2OAUTH_CONFIG_DIR};process.env.HOME=dir;process.env.TOKEN2OAUTH_CONFIG_DIR=join(dir,'gateway');let server;
+ try{
+  const store=new StateStore();await store.init({adminPassword:'test-quota-page',upstreamUrl:'https://app.lightsprint.ai/mcp'});
+  const empty=await store.addAccount({label:'Depleted account',token:'test-only-empty'}),unused=await store.addAccount({label:'Unused account',token:'test-only-unused'});
+  const ledger=new CreditSnapshotStore([empty,unused].map(a=>({provider:'lightsprint',accountId:a.id,label:a.label,unit:'credits'})),{directory:store.dir});
+  for(const [a,remaining]of[[empty,0],[unused,10000000]])await ledger.recordBalanceSnapshot({auditId:'fixture-'+a.id,provider:'lightsprint',accountId:a.id,unit:'credits',remaining,observedAt:Date.now(),source:'user-reported',refreshDate:'2026-11-16'});
+  const built=await buildApp(store);server=built.app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const base='http://127.0.0.1:'+server.address().port;
+  const state=await store.load(),sid=built.sessions.create(undefined,adminEpoch(state));
+  const response=await fetch(base+'/admin/credits',{headers:{cookie:'t2o_admin='+sid}}),html=await response.text();
+  assert.equal(response.status,200);assert.match(html,/Depleted account/);assert.match(html,/Unused account/);assert.match(html,/100\.0%/);assert.match(html,/0\.0%/);assert.match(html,/2026-11-16/);assert.doesNotMatch(html,/Itscommmena and Maryjoebake estimates/);
+ }finally{if(server)await new Promise(r=>server.close(r));if(old.home===undefined)delete process.env.HOME;else process.env.HOME=old.home;if(old.config===undefined)delete process.env.TOKEN2OAUTH_CONFIG_DIR;else process.env.TOKEN2OAUTH_CONFIG_DIR=old.config;await rm(dir,{recursive:true,force:true});}
+});
