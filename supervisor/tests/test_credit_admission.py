@@ -86,6 +86,23 @@ class CreditAdmissionIntegrationTests(unittest.TestCase):
         self.assertEqual(self.admission.ledger.available(
             user_id="JQ", provider="lightsprint", account_id="account-a", unit="credits"), None)
 
+    def test_bridge_accepts_only_the_legacy_explicit_empty_disabled_policy(self):
+        self.policy = {"schemaVersion": 1, "enabled": False, "accounts": {}}
+        self.write_config()
+        self.assertIsNone(create_job_registry(self.state).credit_admission)
+        with self.assertRaises(ValueError):
+            CreditAdmission.from_private_config(self.config, self.ledger_path)
+        for invalid in (
+            {**self.policy, "enabled": 0},
+            {**self.policy, "schemaVersion": True},
+            {**self.policy, "accounts": {"account-a": {"broken": True}}},
+            {**self.policy, "extra": True},
+        ):
+            self.policy = invalid
+            self.write_config()
+            with self.assertRaises(ValueError):
+                create_job_registry(self.state)
+
     def test_unmapped_account_is_denied_when_strict_mode_is_enabled(self):
         self.policy["accounts"] = {}
         self.write_config()

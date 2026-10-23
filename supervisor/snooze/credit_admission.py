@@ -72,7 +72,7 @@ class CreditAdmission:
         return clean
 
     @classmethod
-    def from_private_config(cls, config_path, ledger_path):
+    def from_private_config(cls, config_path, ledger_path, *, allow_disabled=False):
         """Load a private, explicit strict-mode config; reject unsafe files."""
         path = Path(config_path)
         if path.is_symlink():
@@ -85,6 +85,12 @@ class CreditAdmission:
         body = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(body, dict) or set(body) != {"schemaVersion", "enabled", "accounts"}:
             raise ValueError("Credit admission config has unsupported or missing fields")
+        # Older installations persist the explicit empty disabled state. Only
+        # the bridge opts into this compatibility case; strict callers continue
+        # to require enabled=True. Never reinterpret a malformed policy as off.
+        if (allow_disabled and type(body["schemaVersion"]) is int and body["schemaVersion"] == 1
+                and body["enabled"] is False and body["accounts"] == {}):
+            return None
         if type(body["schemaVersion"]) is not int or body["schemaVersion"] != 1 or body["enabled"] is not True:
             raise ValueError("Credit admission config must explicitly enable schemaVersion 1 strict mode")
         ledger = CreditLedger(ledger_path)

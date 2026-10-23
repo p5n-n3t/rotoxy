@@ -28,6 +28,9 @@ try {
     sharedWorkspace:{projectId:'token2oauth',membership:'consented_oauth'},maxWorkers:1,
     allowUnknownQuota:true,localLimits:{maxTasks:10,maxJobBytes:65536,maxOutputBytes:4096}}), {mode:0o600});
   await mkdir(join(scratch, 'supervision'), {mode:0o700});
+  await mkdir(join(store.dir, 'supervisor-state'), {mode:0o700});
+  await writeFile(join(store.dir, 'supervisor-state', 'credit-admission.json'),
+    JSON.stringify({schemaVersion:1,enabled:false,accounts:{}}), {mode:0o600});
   runtime = await createSupervisorRuntime({store,configPath,configDir:store.dir,supervisorCwd:join(root,'supervisor'),
     supervisionDbPath:join(scratch,'supervision/inbox.sqlite'),recoveryDbPath:join(scratch,'supervision/recovery.sqlite'),
     oracleConfigPath:join(scratch,'oracle.json'),oracleDbPath:join(scratch,'oracle.sqlite')});
