@@ -2,8 +2,9 @@
 
 ## Current release: pool controls and confirmed quota snapshots
 
-PR #19 merged as `b9896fb`; immutable runtime `146ccc2` is active. The Desktop
-checkout is on main. Confirmed used-credit readings were reconciled in the private
+PR #19 merged as `b9896fb`; base runtime `146ccc2` was activated. The Desktop
+checkout is on main. A subsequent text-only empty-heartbeat correction uses the
+same pool-control implementation and is covered by the focused UI suite. Confirmed used-credit readings were reconciled in the private
 snapshot ledger, including the additional zero-usage account. Four depleted
 credentials remain disabled. Exact balances and credentials are excluded here.
 
@@ -20,12 +21,16 @@ Post-activation evidence:
 - Gateway, workforce monitor, Oracle pool and Funnel services are active.
 - Public `/healthz` reports healthy.
 - Native MCP discovers ROTOXY Fleet; its inventory contains 13 accounts and seven
-  registered sessions. These are inventory counts, not active worker capacity.
+  registered sessions; nine accounts are enabled and three registered workers are
+  eligible. Seven enabled accounts remain unbound. These are inventory and
+  policy counts, not verified upstream concurrency or active inference.
 - Claude Code reports the consolidated server connected.
 - A credential-pinned, read-only legacy LightSprint session-status request succeeds.
-- The authenticated browser session expired on restart. Live visual verification
-  awaits sign-in; a disposable local browser preview also timed out. Neither is
-  reported as a visual pass.
+- The authenticated browser session expired on restart. Production visual
+  verification awaits sign-in. A disposable synthetic preview initially timed
+  out but later loaded: desktop screenshot and DOM inspection confirmed the
+  pool buttons, account ceiling fields and no horizontal overflow at 1255 px.
+  This fixture check is not a live-account or mobile-browser pass.
 
 See `docs/operations/pool-dispatch-controls.md` for supported pool switches and
 account ceilings. Provider-reported quota enums may remain unavailable while the

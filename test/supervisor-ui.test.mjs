@@ -310,6 +310,7 @@ test("brand system, snapshot ledger, and project-scoped supervision inbox are re
 
 test("overview ledger keeps missing snapshot sections unknown, not zero", () => {
   const html = renderSupervisorDashboard({});
+  assert.doesNotMatch(html, />Unknown</, "empty health and heartbeat states explain missing observations");
   assert.equal((html.match(/listed<\/dt><dd class="unknown">Not reported<\/dd>/g) || []).length, 4);
   assert.doesNotMatch(html, /Providers listed<\/dt><dd[^>]*>0<\/dd>/);
   assert.match(html, /authenticated project API is not available/);
