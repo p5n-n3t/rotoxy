@@ -418,6 +418,10 @@ export class SupervisorRuntime implements SupervisorBackend {
         return this.bridge.request<T>(method, route, body, requestOptions);
       },
     };
+      const registeredModels = [...new Set(this.config.projects.flatMap(project => project.registeredSessions.map(session => session.model)))];
+      // Fleet discovery and collaboration work before the first worker is bound.
+      // Empty fleets have no dispatch worker; do not invent an allowed model.
+      if (registeredModels.length) {
       this.worker = createJobWorker({
         bridge: workerBridge,
         adapterFactory: adapters,
@@ -435,10 +439,11 @@ export class SupervisorRuntime implements SupervisorBackend {
           return signal.enabled && signal.authorized;
         },
         workerId: `token2oauth-${createHash("sha256").update(this.options.configDir).digest("hex").slice(0, 12)}`,
-        allowedModels: [...new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.model)))], maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size)),
+        allowedModels: registeredModels, maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size)),
         allowFreshOperations: false, ...this.options.workerOptions,
       });
       this.worker.start();
+      }
       await this.registerMonitoredSessions();
       this.started = true;
     } catch (error) {
@@ -447,7 +452,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     }
   }
 
-  get status() { return { ...this.bridge.status(), workerStarted: this.started && !this.closed }; }
+  get status() { return { ...this.bridge.status(), workerStarted: Boolean(this.worker) && this.started && !this.closed }; }
 
   async guidanceAdmin(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult> {
     if (this.closed || !this.started) return { requestId: input.requestId, state: "rejected", reason: "supervisor_not_running" };
