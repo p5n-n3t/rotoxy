@@ -15,7 +15,11 @@ type Provider = typeof PROVIDERS[number];
 type Tool = typeof TOOLS[number];
 type PrivateConfig = {
   providers: Partial<Record<Provider, { enabled: boolean; accountId?: string; features: Partial<Record<typeof FEATURES[number], "supported" | "unsupported" | "unknown">> }>>;
-  permissions: { clients: Record<string, Tool[]> };
+  permissions: {
+    clients: Record<string, Tool[]>;
+    /** Owner-selected default for every current and future authenticated OAuth client. */
+    authenticatedClients?: Tool[];
+  };
 };
 const emptyConfig = (): PrivateConfig => ({ providers: {}, permissions: { clients: {} } });
 const supported: Record<Provider, readonly string[]> = {
@@ -28,7 +32,7 @@ function ownerUid(): number | undefined { return process.getuid?.(); }
 function validateConfig(input: unknown): PrivateConfig {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("invalid");
   const raw = input as Record<string, any>;
-  if (Object.keys(raw).some((key) => !["providers", "permissions"].includes(key)) || !raw.providers || typeof raw.providers !== "object" || Array.isArray(raw.providers) || !raw.permissions || typeof raw.permissions !== "object" || Array.isArray(raw.permissions) || Object.keys(raw.permissions).some((key) => key !== "clients") || !raw.permissions.clients || typeof raw.permissions.clients !== "object" || Array.isArray(raw.permissions.clients)) throw new Error("invalid");
+  if (Object.keys(raw).some((key) => !["providers", "permissions"].includes(key)) || !raw.providers || typeof raw.providers !== "object" || Array.isArray(raw.providers) || !raw.permissions || typeof raw.permissions !== "object" || Array.isArray(raw.permissions) || Object.keys(raw.permissions).some((key) => key !== "clients" && key !== "authenticatedClients") || !raw.permissions.clients || typeof raw.permissions.clients !== "object" || Array.isArray(raw.permissions.clients)) throw new Error("invalid");
   const result = emptyConfig();
   for (const [name, binding] of Object.entries(raw.providers as Record<string, any>)) {
     if (!(PROVIDERS as readonly string[]).includes(name) || !binding || typeof binding !== "object" || Array.isArray(binding) || Object.keys(binding).some((key) => !["enabled", "accountId", "features"].includes(key)) || typeof binding.enabled !== "boolean") throw new Error("invalid");
@@ -47,6 +51,10 @@ function validateConfig(input: unknown): PrivateConfig {
   for (const [client, tools] of Object.entries(raw.permissions.clients)) {
     if (!client || client.length > 512 || !Array.isArray(tools) || tools.length > TOOLS.length || tools.some((tool) => !(TOOLS as readonly unknown[]).includes(tool))) throw new Error("invalid");
     result.permissions.clients[client] = [...new Set(tools as Tool[])];
+  }
+  if (raw.permissions.authenticatedClients !== undefined) {
+    if (!Array.isArray(raw.permissions.authenticatedClients) || raw.permissions.authenticatedClients.length > TOOLS.length || raw.permissions.authenticatedClients.some((tool: unknown) => !(TOOLS as readonly unknown[]).includes(tool))) throw new Error("invalid");
+    result.permissions.authenticatedClients = [...new Set(raw.permissions.authenticatedClients as Tool[])];
   }
   return result;
 }
@@ -100,6 +108,7 @@ function payload(state: PersistedState, config: PrivateConfig) {
   return {
     providers: accountSummary(state, config),
     clients: state.oauthClients.map((client) => ({ id: client.clientId, name: client.clientName || "Unnamed client", allowedTools: config.permissions.clients[client.clientId] || [] })),
+    authenticatedClientDefaults: config.permissions.authenticatedClients || [],
     credentialStatus: "Stored encrypted credentials are not live provider-verified.",
   };
 }
@@ -112,8 +121,9 @@ function renderPage(state: PersistedState, config: PrivateConfig, csrf: string):
     const current = accountSummary(state, config).find((x) => x.provider === provider)!;
     return `<fieldset><legend>${esc(provider)} · ${current.status === "connected" ? "Connected — stored key, not provider-tested" : "Not configured"}</legend><label for="account-${provider}">Encrypted account in the shared account pool</label><select id="account-${provider}" name="account_${provider}"><option value="">Not connected</option>${accounts(provider, binding?.accountId)}</select><div class="row">${FEATURES.map((feature) => `<label><input type="checkbox" name="feature_${provider}_${feature}" value="1"${binding?.features?.[feature] === "supported" ? " checked" : ""}> ${feature === "search" ? "Search" : "Extract"}</label>`).join("")}</div></fieldset>`;
   }).join("");
-  const clients = state.oauthClients.length ? state.oauthClients.map((client) => `<fieldset><legend>${esc(client.clientName || "Unnamed client")}</legend><small>${esc(client.clientId)}</small><div class="row">${TOOLS.map((tool) => `<label><input type="checkbox" name="allow_${esc(client.clientId)}_${tool}" value="1"${config.permissions.clients[client.clientId]?.includes(tool) ? " checked" : ""}> ${tool === "web_search" ? "Web search" : "Web extract"}</label>`).join("")}</div></fieldset>`).join("") : `<p>No OAuth clients are registered yet. Permissions remain empty until you register a client and select its tools.</p>`;
-  const body = `<main class="wrap">${adminNav(new URL(base).pathname.replace(/\/$/, ""), "resources")}<header class="hero"><div class="eyebrow">Connections</div><h1>Providers &amp; search tools</h1><p class="lead">Connect provider-owned API keys, then explicitly choose the OAuth clients and features that may use them.</p></header><section class="grid"><div class="card wide"><div class="eyebrow">Search &amp; scraping APIs</div><h2>Add a search account</h2><p class="muted">Keys are encrypted in the existing account pool. Credential entry does not make provider requests. Credit readings are tracked separately from API credentials.</p><form method="post" action="${esc(base)}/admin/resources/accounts"><label for="credential-provider">Provider</label><select id="credential-provider" name="provider">${PROVIDERS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select><label for="credential-label">Account label</label><input id="credential-label" name="label" maxlength="120" required><label for="credential-secret">Provider API key</label><input id="credential-secret" name="credential" type="password" autocomplete="new-password" maxlength="4096" required><button type="submit">Encrypt and add account</button></form></div><div class="card wide"><div class="eyebrow">Models &amp; APIs</div><h2>Web search and extraction</h2><p class="muted">Choose one stored key per provider and only the adapter-supported features. All permissions start denied and are scoped to a selected OAuth client.</p><form method="post" action="${esc(base)}/admin/resources/config">${providerRows}<h3>Client permissions</h3>${clients}<button type="submit">Save explicit provider and client selections</button></form></div></section><div class="footer">Private mapping: owner-private web-tools.json · keys never appear in this page after submission.</div></main>`;
+  const defaults = `<fieldset><legend>Default access for authenticated clients</legend><p class="muted">Applies to every current and future authenticated OAuth client. Turn this off to return to individual client checkboxes only.</p><div class="row">${TOOLS.map((tool) => `<label><input type="checkbox" name="allow_authenticated_${tool}" value="1"${config.permissions.authenticatedClients?.includes(tool) ? " checked" : ""}> ${tool === "web_search" ? "Web search" : "Web extract"}</label>`).join("")}</div></fieldset>`;
+  const clients = state.oauthClients.length ? state.oauthClients.map((client) => `<fieldset><legend>${esc(client.clientName || "Unnamed client")}</legend><small>${esc(client.clientId)}</small><div class="row">${TOOLS.map((tool) => `<label><input type="checkbox" name="allow_${esc(client.clientId)}_${tool}" value="1"${config.permissions.clients[client.clientId]?.includes(tool) ? " checked" : ""}> ${tool === "web_search" ? "Web search" : "Web extract"}</label>`).join("")}</div></fieldset>`).join("") : `<p>No OAuth clients are registered yet. The authenticated-client default above will cover future registrations.</p>`;
+  const body = `<main class="wrap">${adminNav(new URL(base).pathname.replace(/\/$/, ""), "resources")}<header class="hero"><div class="eyebrow">Connections</div><h1>Providers &amp; search tools</h1><p class="lead">Connect provider-owned API keys, then set one default for all authenticated clients or optional per-client exceptions.</p></header><section class="grid"><div class="card wide"><div class="eyebrow">Search &amp; scraping APIs</div><h2>Add a search account</h2><p class="muted">Keys are encrypted in the existing account pool. Credential entry does not make provider requests. Credit readings are tracked separately from API credentials.</p><form method="post" action="${esc(base)}/admin/resources/accounts"><label for="credential-provider">Provider</label><select id="credential-provider" name="provider">${PROVIDERS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select><label for="credential-label">Account label</label><input id="credential-label" name="label" maxlength="120" required><label for="credential-secret">Provider API key</label><input id="credential-secret" name="credential" type="password" autocomplete="new-password" maxlength="4096" required><button type="submit">Encrypt and add account</button></form></div><div class="card wide"><div class="eyebrow">Models &amp; APIs</div><h2>Web search and extraction</h2><p class="muted">Choose one stored key per provider, then set the master access policy once. Individual rows are optional additions, not a required approval ritual.</p><form method="post" action="${esc(base)}/admin/resources/config">${providerRows}<h3>Master access</h3>${defaults}<h3>Individual client additions</h3>${clients}<button type="submit">Save provider and access policy</button></form></div></section><div class="footer">Private mapping: owner-private web-tools.json · keys never appear in this page after submission.</div></main>`;
   return withCsrf(page("Provider connections", body), csrf);
 }
 
@@ -189,7 +199,8 @@ export function createResourceConnectionsRouter(store: StateStore, sessions: Adm
         const selected = TOOLS.filter((tool) => req.body[`allow_${client.clientId}_${tool}`] === "1" || (Array.isArray(req.body.permissions?.clients?.[client.clientId]) && req.body.permissions.clients[client.clientId].includes(tool)));
         if (selected.length) clients[client.clientId] = selected;
       }
-      const config = validateConfig({ providers, permissions: { clients } });
+      const authenticatedClients = TOOLS.filter((tool) => req.body[`allow_authenticated_${tool}`] === "1" || (Array.isArray(req.body.permissions?.authenticatedClients) && req.body.permissions.authenticatedClients.includes(tool)));
+      const config = validateConfig({ providers, permissions: { clients, ...(authenticatedClients.length ? { authenticatedClients } : {}) } });
       await writeConfig(store, config);
       return req.accepts("html") && !req.is("application/json") ? res.redirect(303, state.config.publicBaseUrl.replace(/\/$/, "") + "/admin/resources?saved=1") : res.json({ saved: true, ...payload(state, config) });
     } catch { return res.status(500).json({ error: "private_config_save_failed" }); }

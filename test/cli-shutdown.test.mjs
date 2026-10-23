@@ -17,6 +17,8 @@ test('CLI SIGTERM removes its owned bridge socket and the same supervisor can re
     const store = new StateStore();
     await store.init({adminPassword:'isolated-cli-stop-only'});
     const account = await store.addAccount({label:'Isolated shutdown fixture',token:'fixture-not-a-provider-credential'});
+    await store.update(state => { state.accounts.find(item => item.id === account.id).id = '_fixture-account'; });
+    account.id = '_fixture-account';
     const policy = join(directory,'runtime.json');
     await writeFile(policy, JSON.stringify({version:1,maxWorkers:1,allowUnknownQuota:true,
       localLimits:{maxTasks:10,maxJobBytes:65536,maxOutputBytes:4096},

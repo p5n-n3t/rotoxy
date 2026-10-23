@@ -12,6 +12,7 @@ import type { UpstreamAccount } from "./types.js";
 import { page } from "./ui.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const MAX_CONFIG_BYTES = 64 * 1024;
@@ -126,7 +127,7 @@ export function createLightSprintSessionBindingsRouter(store: StateStore, sessio
     const body = req.body as Record<string, unknown>;
     const action = body.action;
     const allowed = action === "bind" ? ["_csrf", "action", "expectedRevision", "projectId", "accountId", "workspaceId", "sessionId", "reportedModel"] : ["_csrf", "action", "expectedRevision", "projectId", "sessionId"];
-    if (Object.keys(body).some((key) => !allowed.includes(key)) || typeof body.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(body.expectedRevision) || !validText(body.projectId, ID) || !validText(body.sessionId, SESSION_ID) || action !== "bind" && action !== "unbind" || action === "bind" && (!validText(body.accountId, ID) || !validText(body.workspaceId, ID) || !validText(body.reportedModel, MODEL))) return res.status(400).type("text").send("Invalid session binding request");
+    if (Object.keys(body).some((key) => !allowed.includes(key)) || typeof body.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(body.expectedRevision) || !validText(body.projectId, ID) || !validText(body.sessionId, SESSION_ID) || action !== "bind" && action !== "unbind" || action === "bind" && (!validText(body.accountId, ACCOUNT_ID) || !validText(body.workspaceId, ID) || !validText(body.reportedModel, MODEL))) return res.status(400).type("text").send("Invalid session binding request");
     let lock;
     const lockPath = `${configPath}.access.lock`, tempPath = `${configPath}.binding.tmp.${process.pid}.${Date.now()}`, backupPath = `${configPath}.bak`, backupTemp = `${backupPath}.binding.tmp.${process.pid}.${Date.now()}`;
     try {

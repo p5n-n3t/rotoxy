@@ -31,6 +31,7 @@ try {
   await mkdir(join(store.dir, 'supervisor-state'), {mode:0o700});
   await writeFile(join(store.dir, 'supervisor-state', 'credit-admission.json'),
     JSON.stringify({schemaVersion:1,enabled:false,accounts:{}}), {mode:0o600});
+  await writeFile(join(store.dir, 'web-tools.json'), JSON.stringify({providers:{},permissions:{clients:{},authenticatedClients:['web_search']}}), {mode:0o600});
   runtime = await createSupervisorRuntime({store,configPath,configDir:store.dir,supervisorCwd:join(root,'supervisor'),
     supervisionDbPath:join(scratch,'supervision/inbox.sqlite'),recoveryDbPath:join(scratch,'supervision/recovery.sqlite'),
     oracleConfigPath:join(scratch,'oracle.json'),oracleDbPath:join(scratch,'oracle.sqlite')});
@@ -57,6 +58,8 @@ try {
     assert.ok(!response.error && !response.result?.isError,`${name} failed`);
     return JSON.parse(response.result.content.find(part=>part.type==='text').text);
   };
+  const discovery = await json(await fetch(base+'/mcp',{method:'POST',headers:{authorization:`Bearer ${tokens.access_token}`,'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:'discovery',method:'tools/list',params:{}})}));
+  assert.ok(!discovery.error && discovery.result.tools.some(tool=>tool.name==='workspace_snapshot'));
   assert.deepEqual(await mcp('workspace_projects'),{projects:[{projectId:'token2oauth',label:'ROTOXY Fleet',kind:'fleet'}]});
   const snapshot = await mcp('workspace_snapshot',{projectId:'token2oauth'});
   assert.equal(snapshot.projectId,'token2oauth');

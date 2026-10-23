@@ -596,8 +596,17 @@ export class McpProxy {
     // malformed/absent scope as no local permissions rather than throwing while
     // proxying an otherwise authenticated upstream request.
     const scopes = new Set(typeof claims.scope === "string" ? claims.scope.split(/\s+/).filter(Boolean) : []);
+    let webDefinitions: Record<string, unknown>[] = [];
+    if (this.webTools) {
+      try { webDefinitions = await this.webTools.definitionsFor(claims.client_id, scopes); }
+      catch (error) {
+        // An unavailable optional search provider must not break MCP startup,
+        // fleet tools, or credential-pool routing. Its calls still fail closed.
+        if (!(error instanceof WebToolError)) throw error;
+      }
+    }
     const serviceTools = (!this.supervisor.enabled && !this.oracle && !this.webTools && !this.workspace?.backend?.authorizeWorkspace) ? [] :
-      [...(this.workspace?.backend?.authorizeWorkspace ? ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS.filter((d) => scopes.has(awRequiredScope(d.name as any))) : []), ...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : []), ...(this.webTools ? await this.webTools.definitionsFor(claims.client_id, scopes) : [])].map((definition) => ({ ...definition }));
+      [...(this.workspace?.backend?.authorizeWorkspace ? ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS.filter((d) => scopes.has(awRequiredScope(d.name as any))) : []), ...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : []), ...webDefinitions].map((definition) => ({ ...definition }));
     // The guide is a local MCP tool, so advertise it only to credentials that
     // can actually invoke MCP tools.  A tools/list entry must never promise a
     // capability that the same token will be denied at tools/call.

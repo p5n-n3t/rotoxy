@@ -19,6 +19,8 @@ async function setup(t, verifySession) {
   process.env.HOME = join(root, "home"); process.env.TOKEN2OAUTH_CONFIG_DIR = join(root, "gateway");
   const store = new StateStore(); await store.init({ adminPassword: "test-only-password", publicBaseUrl: "http://127.0.0.1" });
   const account = await store.addAccount({ label: "LightSprint test account", token: "secret-test-token-123", provider: "lightsprint" });
+  await store.update(state => { state.accounts.find(item => item.id === account.id).id = '_fixture-account'; });
+  account.id = '_fixture-account';
   const configPath = join(root, "supervisor.json"); await writeFile(configPath, JSON.stringify(config), { mode: 0o600 }); await chmod(configPath, 0o600);
   const sessions = new AdminSessions(), sid = sessions.create(60_000, adminEpoch(await store.load())), csrf = sessions.csrfToken(sid);
   const app = express(); app.use(createLightSprintSessionBindingsRouter(store, sessions, { configPath, verifySession }).router);

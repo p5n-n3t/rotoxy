@@ -8,6 +8,7 @@ import { StateStore } from "../dist/store.js";
 import { buildApp } from "../dist/server.js";
 import { pkceS256 } from "../dist/crypto.js";
 import { loadWebToolsConfig } from "../dist/web-tools-config.js";
+import { WebToolError } from "../dist/web-tools.js";
 
 const listen = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address())));
 const close = (server) => new Promise((resolve) => server.close(resolve));
@@ -47,6 +48,11 @@ test("private web binding is opt-in, caller-scoped, provider-identified, and nev
   await assert.rejects(configured.call("web_search", { provider: "exa", query: "mock query" }, "oauth-a"), (e) => e.code === "provider_request_failed");
   assert.equal(calls, 1);
   assert.equal(revealed, 1);
+  await writeFile(path, JSON.stringify({providers:{exa:{enabled:true,accountId:account.id,features:{search:"supported"}}},permissions:{clients:{},authenticatedClients:["web_search"]}}), {mode:0o600});
+  const shared = await loadWebToolsConfig(path,store);
+  assert.deepEqual((await shared.definitionsFor("new-authenticated-client",new Set(["web:search"]))).map(t=>t.name),["web_search"]);
+  assert.deepEqual(await shared.definitionsFor("new-authenticated-client",new Set(["mcp"])),[]);
+  assert.equal(calls,1,"shared discovery never issues a provider request");
   const generic = await store.addAccount({ label: "not an Exa key", provider: "generic-bearer-mcp", token: "generic-mock" });
   await writeFile(path, JSON.stringify({ providers: { exa: { enabled: true, accountId: generic.id, features: { search: "supported" } } }, permissions: { clients: { "oauth-a": ["web_search"] } } }), { mode: 0o600 });
   let mismatchReveal = 0;
@@ -92,6 +98,11 @@ test("OAuth advertises and enforces separate web scopes for local MCP discovery 
   const noScope = await token("mcp");
   const emptyDiscovery = await (await call(noScope.access_token, { jsonrpc: "2.0", id: 4, method: "tools/list" })).json();
   assert.deepEqual(emptyDiscovery.result.tools.map((x) => x.name), ["rotoxy_guide"]);
+  const definitions = webTools.definitionsFor;
+  webTools.definitionsFor = async () => {throw new WebToolError("provider_not_enabled");};
+  const unavailable = await (await call(tokenWithScope.access_token,{jsonrpc:"2.0",id:"unavailable",method:"tools/list"})).json();
+  assert.deepEqual(unavailable.result.tools.map(t=>t.name),["rotoxy_guide"]);
+  webTools.definitionsFor = definitions;
   const denied = await call(noScope.access_token, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "web_search", arguments: { provider: "exa", query: "test" } } });
   assert.equal(denied.status, 403);
 });
