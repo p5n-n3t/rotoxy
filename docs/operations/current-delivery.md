@@ -6,7 +6,7 @@ this file before starting another assignment.
 
 ## Verified runtime
 
-- Activated immutable runtime `~/.local/share/rotoxy-releases/1a9e067` using
+- Activated immutable runtime `~/.local/share/rotoxy-releases/51b007c` using
   service drop-ins. The original installation remains available for rollback.
 - Real manual `down` then `up` succeeded: down withdrew the owned Funnel and
   stopped the app units; up restored all services and one root Funnel.
@@ -108,3 +108,13 @@ Official pricing confirms 10M credits per Pro seat but supplies no fixed
 USD-to-credit exchange rate. Track reported USD independently until conversion
 is evidenced; sandbox, planning and unregistered session coverage are incomplete.
 See [accounting behavior](lightsprint-quota-accounting.md).
+
+Final quota UI follow-up `51b007c` is on main and active. Both CI jobs passed
+(run 40009314825), as did the installed OAuth/Fleet smoke. Seven pending new
+readings are explicitly marked pending, and their newly reported refresh dates
+are shown independently of the historical balance. Live checks confirm four
+accounts blocked, seven cost baselines persisted across restart, and no inferred
+session-to-credit debits. The next data action is to resolve the pending
+used-versus-remaining question and omitted account, then append corrected
+user-reported snapshots using the original reading time. Do not re-import the
+raw report or re-enable depleted accounts without renewed balance evidence.
