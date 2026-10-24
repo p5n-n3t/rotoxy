@@ -23,6 +23,8 @@ import { safeClientId } from "./oauth-client-id.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
+// Provider-generated session IDs may begin with '_' or '-'; neither is a path separator.
+const SESSION_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const MAX_CONFIG = 64 * 1024;
 type RuntimeStateGroup = "supervision" | "oracle-pool";
@@ -89,6 +91,7 @@ function usageProjection(value: unknown): SupervisorUsage | undefined {
 }
 function safeAccountId(value: unknown): value is string { return typeof value === "string" && ACCOUNT_ID.test(value); }
 function safeId(value: unknown): value is string { return typeof value === "string" && ID.test(value); }
+function safeSessionId(value: unknown): value is string { return typeof value === "string" && SESSION_ID.test(value); }
 function inboxEvent(value: unknown): Record<string, unknown> | undefined {
   if (!object(value) || !Number.isSafeInteger(value.id) || Number(value.id) < 1 ||
       typeof value.eventId !== "string" || !/^(?:repo|job):[1-9][0-9]{0,18}$/.test(value.eventId) ||
@@ -181,7 +184,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     const registeredSessions: RegisteredSession[] = rawSessions.map((item: unknown): RegisteredSession => {
       if (!object(item)) throw new Error("Invalid registered session");
       assertKeys(item, ["sessionId", "accountId", "model", "workspaceId"], "registeredSession");
-      if (!safeId(item.sessionId) || !safeAccountId(item.accountId) || !accountIds.includes(item.accountId) || typeof item.model !== "string" || !MODEL_ID.test(item.model) || !safeId(item.workspaceId)) throw new Error("Registered sessions must be bound to an eligible account, workspace, and declared model");
+      if (!safeSessionId(item.sessionId) || !safeAccountId(item.accountId) || !accountIds.includes(item.accountId) || typeof item.model !== "string" || !MODEL_ID.test(item.model) || !safeSessionId(item.workspaceId)) throw new Error("Registered sessions must be bound to an eligible account, workspace, and declared model");
       return { sessionId: item.sessionId, accountId: item.accountId, model: item.model, workspaceId: item.workspaceId };
     });
     if (registeredSessions.length * rawClientIds.length > 1000) throw new Error("Project has too many registered monitoring bindings");
@@ -384,7 +387,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       const model = op.input.model;
       const registration = this.config.projects.flatMap((project) => project.registeredSessions)
         .filter((session) => session.accountId === op.selectedAccountId && session.sessionId === sessionId);
-      if (registration.length !== 1 || typeof sessionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(sessionId) ||
+      if (registration.length !== 1 || typeof sessionId !== "string" || !SESSION_ID.test(sessionId) ||
           (op.sessionId !== undefined && op.input.sessionId !== undefined && op.sessionId !== op.input.sessionId) ||
           typeof model !== "string" || model !== registration[0].model || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(model) ||
           typeof message !== "string" || message.trim().length === 0 || message.length > 20_000 ||

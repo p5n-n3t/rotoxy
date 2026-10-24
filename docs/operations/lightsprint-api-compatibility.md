@@ -79,11 +79,25 @@ completion marker. The reported dollar amount is not a verified credit debit.
 
 The maryjoebake launch returned a provider-generated ID beginning with an
 underscore. The scoped route helper now accepts safe base64url ID characters in
-the leading position. Subsequent native status and transcript reads returned
-`HTTP 404: Agent session not found`; that launch remains unresolved and was not
-repeated. This is not proof of two-account overlapping execution. Preserve the
-private intent journals and use documented task-scoped session lookup to
-reconcile before any replacement launch.
+the leading position. Initial native status/transcript reads returned
+`HTTP 404: Agent session not found`. Documented task-scoped lookup confirmed the
+same session/task identity while the sandbox was starting. Subsequent reads
+succeeded without a replacement launch: ownership, idle state, GPT-6.1 Sol and
+USD 0.24136 session cost were reported, and the latest complete assistant response
+contained the requested marker. The two session costs sum to USD 0.467056.
+
+Both sessions launched from one bounded local control invocation, but this is not
+proof of overlapping inference. Startup delays and the available transcript
+timestamps do not establish overlapping active execution intervals. It is also
+not proof of one-request production fresh-job provisioning: that wiring remains
+outstanding. Preserve the private intent journals and use documented task-scoped
+session lookup before considering any replacement launch.
+
+The jqthefoo session was added to the existing shared Fleet runtime configuration
+with its provider-reported model, after backup and validation by the deployed
+configuration parser. The provider-session identifier compatibility change is
+covered by the current focused suite; activate it before registering the
+leading-underscore maryjoebake session with the dispatcher.
 
 Claude Code produced the initial implementation; integration review corrected
 legacy session paths and an unsupported correlation claim. The 22 focused tests

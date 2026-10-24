@@ -4,6 +4,8 @@ import { join } from "node:path";
 import type { StateStore } from "./store.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+// Provider-generated session IDs may begin with '_' or '-'; neither is a path separator.
+const SESSION_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const MAX_MESSAGE_BYTES = 20_000;
 
@@ -36,6 +38,7 @@ const EMPTY: ActionDoc = { version: 1, actions: [] };
 
 function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function validId(value: unknown): value is string { return typeof value === "string" && ID.test(value); }
+function validSessionId(value: unknown): value is string { return typeof value === "string" && SESSION_ID.test(value); }
 function actionKey(projectId: string, workerId: string, requestId: string): string { return createHash("sha256").update(`${projectId}\0${workerId}\0${requestId}`).digest("hex"); }
 function payloadDigest(input: WorkerGuidanceInput): string { return createHash("sha256").update(JSON.stringify({ message: input.message, expectedPromptCount: input.expectedPromptCount, expectedQuestionId: input.expectedQuestionId ?? null })).digest("hex"); }
 function completed(row: ActionRow): WorkerGuidanceResult {
@@ -157,7 +160,7 @@ export class WorkerGuidanceService {
   constructor(private readonly options: WorkerGuidanceServiceOptions) {}
 
   async submit(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult> {
-    if (!validId(input.projectId) || !validId(input.workerId) || !validId(input.requestId) ||
+    if (!validId(input.projectId) || !validSessionId(input.workerId) || !validId(input.requestId) ||
         typeof input.message !== "string" || Buffer.byteLength(input.message, "utf8") < 1 || Buffer.byteLength(input.message, "utf8") > MAX_MESSAGE_BYTES ||
         !Number.isSafeInteger(input.expectedPromptCount) || input.expectedPromptCount < 0 ||
         (input.expectedQuestionId !== undefined && !validId(input.expectedQuestionId))) {

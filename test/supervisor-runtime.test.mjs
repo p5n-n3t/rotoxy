@@ -441,6 +441,35 @@ test("exhausted account shows ineligible for dispatch but isAccountObservable al
     "exhausted account must not be blocked from observing");
 });
 
+test("underscore-prefixed provider session IDs register and traversal remains rejected", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-underscore-session-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "runtime.json");
+
+  const underscoreConfig = structuredClone(config);
+  underscoreConfig.projects[0].registeredSessions[0].sessionId = "_provider_session_abc";
+  await writeFile(path, JSON.stringify(underscoreConfig), { mode: 0o600 });
+  const parsed = await readSupervisorRuntimeConfig(path);
+  assert.equal(parsed.projects[0].registeredSessions[0].sessionId, "_provider_session_abc",
+    "underscore-prefixed session ID must be accepted by config parser");
+
+  // Traversal-like IDs must remain rejected
+  const traversalConfig = structuredClone(config);
+  traversalConfig.projects[0].registeredSessions[0].sessionId = "../evil";
+  await writeFile(path, JSON.stringify(traversalConfig), { mode: 0o600 });
+  await assert.rejects(readSupervisorRuntimeConfig(path), /sessions must be bound/);
+
+  const slashConfig = structuredClone(config);
+  slashConfig.projects[0].registeredSessions[0].sessionId = "has/slash";
+  await writeFile(path, JSON.stringify(slashConfig), { mode: 0o600 });
+  await assert.rejects(readSupervisorRuntimeConfig(path), /sessions must be bound/);
+
+  underscoreConfig.projects[0].registeredSessions[0].workspaceId = "_workspace_abc";
+  await writeFile(path, JSON.stringify(underscoreConfig), { mode: 0o600 });
+  assert.equal((await readSupervisorRuntimeConfig(path)).projects[0].registeredSessions[0].workspaceId, "_workspace_abc");
+});
+
  test("runtime accepts explicit large worker ceilings and deployed shared membership without inventing sessions", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "rx-capacity-"));
   t.after(() => rm(dir, {recursive:true, force:true}));

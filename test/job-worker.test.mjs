@@ -506,6 +506,19 @@ test("chat_session uses isAccountEligible even when isAccountObservable is provi
   assert.equal(resultBodies[0].errorClass, "account_unavailable");
 });
 
+test("chat_session accepts a provider underscore session ID but never treats a path-like ID as a session", async () => {
+  let sends = 0;
+  const valid = op("provider-underscore", "account-a", { sessionId: "_provider_session_abc" });
+  const invalid = op("provider-traversal", "account-a", { sessionId: "../provider-session" });
+  const { worker, resultBodies } = harness([valid, invalid], {
+    adapterFactory: (id) => adapter(id, { sendMessage: async () => { sends++; return ok(id); } }),
+  });
+  worker.start();
+  try { await until(() => resultBodies.length === 2); } finally { await worker.stop(); }
+  assert.equal(sends, 1);
+  assert.equal(resultBodies.find((body) => body.errorClass === "invalid_operation_input")?.outcome, "rejected");
+});
+
 test("observe_session falls back to isAccountEligible when isAccountObservable is absent", async () => {
   let eligibleCalled = false;
   const obs = pythonObservation("obs-fallback", "account-a", Date.parse("2026-10-10T00:00:00Z") / 1_000);

@@ -76,6 +76,8 @@ const MAX_TEXT = 2_048;
 const MAX_ASSISTANT_BYTES = 32 * 1_024;
 const MAX_TRANSCRIPT_CHARS = 250_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+// Provider-generated session IDs may begin with '_' or '-'; neither is a path separator.
+const SESSION_ID = /^[A-Za-z0-9_-][A-Za-z0-9_-]{0,127}$/;
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -248,7 +250,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
       const sessionId = text(op.sessionId ?? input.sessionId, 128);
       const message = op.kind === "chat_session" ? text(input.instructions, 20_000) : undefined;
       const clientMessageId = op.kind === "chat_session" ? text(input.clientMessageId, 128) : undefined;
-      if (op.kind === "chat_session" && (!sessionId || !ID.test(sessionId) ||
+      if (op.kind === "chat_session" && (!sessionId || !SESSION_ID.test(sessionId) ||
           (op.sessionId !== undefined && input.sessionId !== undefined && op.sessionId !== input.sessionId) ||
           !message || !clientMessageId || !MESSAGE_ID.test(clientMessageId))) {
         errorClass = "invalid_operation_input"; return await submit(op, outcome, result, errorClass);

@@ -22,7 +22,7 @@ test("guidance preflights ownership/prompt state, gates policy, reserves once, a
   });
 
   const workers = [
-    { projectId: "project-a", sessionId: "session-a", accountId: "account-a", model: "gpt-6-luna" },
+    { projectId: "project-a", sessionId: "_provider_session_a", accountId: "account-a", model: "gpt-6-luna" },
     { projectId: "project-a", sessionId: "session-b", accountId: "account-b", model: "gpt-6-luna" },
     { projectId: "project-a", sessionId: "session-c", accountId: "account-c", model: "gpt-6-luna" },
     { projectId: "project-a", sessionId: "session-d", accountId: "account-d", model: "gpt-6-luna" },
@@ -61,7 +61,7 @@ test("guidance preflights ownership/prompt state, gates policy, reserves once, a
     policyAllows: async () => !blockPolicy,
   });
   const service = makeService();
-  const input = { projectId: "project-a", workerId: "session-a", requestId: "request-accepted", message: "A private bounded instruction that must not be stored.", expectedPromptCount: 7, expectedQuestionId: "q-7" };
+  const input = { projectId: "project-a", workerId: "_provider_session_a", requestId: "request-accepted", message: "A private bounded instruction that must not be stored.", expectedPromptCount: 7, expectedQuestionId: "q-7" };
 
   const accepted = await service.submit(input);
   assert.equal(accepted.state, "accepted");
@@ -72,6 +72,7 @@ test("guidance preflights ownership/prompt state, gates policy, reserves once, a
   assert.deepEqual(await service.submit(input), accepted, "completed request is idempotent");
   assert.equal(sends.length, 1);
   assert.equal((await service.submit({ ...input, message: "changed payload" })).reason, "request_id_conflict");
+  assert.equal((await service.submit({ ...input, workerId: "../provider-session", requestId: "request-path" })).reason, "invalid_guidance_request");
 
   const ledgerText = await readFile(join(store.dir, "worker-guidance-actions.json"), "utf8");
   assert.doesNotMatch(ledgerText, /private bounded instruction/, "durable ledger contains no message text");

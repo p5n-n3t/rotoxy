@@ -74,6 +74,8 @@ const MAX_TITLE_LENGTH = 500;
 const MAX_INSTRUCTIONS_LENGTH = 20_000;
 const MAX_MESSAGE_LENGTH = 50_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+// Provider-generated session IDs may begin with '_' or '-'; neither is a path separator.
+const SESSION_ID_RE = /^[A-Za-z0-9_-][A-Za-z0-9_-]{0,127}$/;
 const CLIENT_MESSAGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PROVIDERS = new Set<JobProvider>(["claude", "codex", "auto", "pi"]);
 const MAX_DISCOVERY_PAGES = 8;
@@ -82,7 +84,7 @@ const MAX_DISCOVERY_DESCRIPTION_BYTES = 128 * 1024;
 const MAX_DISCOVERY_CURSOR_LENGTH = 512;
 
 function catalogWorkspaceId(description: string): string | undefined {
-  const matches = [...description.matchAll(/(?:^|\n)\s*workspaceId\s*=\s*([A-Za-z0-9][A-Za-z0-9_-]{0,127})\s*(?=\n|$)/g)]
+  const matches = [...description.matchAll(/(?:^|\n)\s*workspaceId\s*=\s*([A-Za-z0-9_-]{1,128})\s*(?=\n|$)/g)]
     .map((match) => match[1]!);
   const unique = [...new Set(matches)];
   return unique.length === 1 ? unique[0] : undefined;
@@ -144,6 +146,11 @@ function failedDiscovery(accountId: string, error: unknown): ProvisioningContrac
 
 function validateId(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || value.length > MAX_ID_LENGTH || !ID_RE.test(value)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+}
+function validateSessionId(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || value.length > MAX_ID_LENGTH || !SESSION_ID_RE.test(value)) {
     throw new TypeError(`${label} is invalid`);
   }
 }
@@ -724,7 +731,7 @@ export class LightSprintJobsAdapter {
       if ((!allowed && !accountBoundWorkspace) || trustedChatMutation && this.options.trustedChatMutationPermit) {
         const keys = body && Object.keys(body).sort();
         const exactChat = trustedChatMutation && method === "POST" &&
-          /^\/api\/agent-sessions\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/chat$/.test(path) &&
+          /^\/api\/agent-sessions\/[A-Za-z0-9_-][A-Za-z0-9_-]{0,127}\/chat$/.test(path) &&
           !!body && keys?.length === 2 && keys[0] === "clientMessageId" && keys[1] === "message" &&
           typeof body.message === "string" && typeof body.clientMessageId === "string";
         const request = exactChat ? Object.freeze({ method: "POST" as const, path,
@@ -910,29 +917,29 @@ export class LightSprintJobsAdapter {
   }
 
   sessionStatus(sessionId: string): Promise<JobResult> {
-    validateId(sessionId, "sessionId");
+    validateSessionId(sessionId, "sessionId");
     return this.api("GET", `/api/agent-sessions/${sessionId}/status`);
   }
 
   sessionTranscript(sessionId: string): Promise<JobResult> {
-    validateId(sessionId, "sessionId");
+    validateSessionId(sessionId, "sessionId");
     return this.api("GET", `/api/agent-sessions/${sessionId}/transcript?limit=100&include=text&maxBytes=131072`, undefined, true);
   }
 
   sendMessage(sessionId: string, message: string, clientMessageId: string): Promise<JobResult> {
-    validateId(sessionId, "sessionId");
+    validateSessionId(sessionId, "sessionId");
     validateText(message, "message", MAX_MESSAGE_LENGTH);
     if (typeof clientMessageId !== "string" || !CLIENT_MESSAGE_ID_RE.test(clientMessageId)) throw new TypeError("clientMessageId is invalid");
     return this.api("POST", `/api/agent-sessions/${sessionId}/chat`, { message, clientMessageId }, false, true);
   }
 
   cancelTurn(sessionId: string): Promise<JobResult> {
-    validateId(sessionId, "sessionId");
+    validateSessionId(sessionId, "sessionId");
     return this.api("POST", `/api/agent-sessions/${sessionId}/cancel`, {});
   }
 
   stopSession(sessionId: string): Promise<JobResult> {
-    validateId(sessionId, "sessionId");
+    validateSessionId(sessionId, "sessionId");
     return this.api("POST", `/api/agent-sessions/${sessionId}/stop`, {});
   }
 }

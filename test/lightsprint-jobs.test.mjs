@@ -449,3 +449,24 @@ test("live token shape associates independently identified reply with the newest
   assert.equal(value.messages[0].content,'ROTOXY_ADMITTED_OK');
   assert.equal(value.lastUserTextSha256,(await import('node:crypto')).createHash('sha256').update('exact instruction').digest('hex'));
 });
+
+test("legacy adapter accepts provider-generated underscore-prefixed session IDs and rejects traversal", async () => {
+  const underscoreId = "_provider_abc123";
+  let calledPath;
+  const adapter = new LightSprintJobsAdapter(store(), ACCOUNT_ID, {
+    clientFactory: clientFactory(async (_method, params) => {
+      calledPath = params.arguments.path;
+      return ok({ sessionId: underscoreId, status: "idle", isOwner: true, canSendMessage: true });
+    }),
+  });
+  const result = await adapter.sessionStatus(underscoreId);
+  assert.equal(result.classification, "accepted");
+  assert.equal(calledPath, `/api/agent-sessions/${underscoreId}/status`);
+
+  const transcriptResult = await adapter.sessionTranscript(underscoreId);
+  assert.equal(transcriptResult.classification, "accepted");
+
+  assert.throws(() => adapter.sessionStatus("../evil"), /sessionId is invalid/);
+  assert.throws(() => adapter.sessionStatus(""), /sessionId is invalid/);
+  assert.throws(() => adapter.sessionStatus("has/slash"), /sessionId is invalid/);
+});
