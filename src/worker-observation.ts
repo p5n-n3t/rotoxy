@@ -104,6 +104,13 @@ export function normalizeExecutionError(status: unknown): string | undefined {
   }
   // Error messages can contain secrets; only project their existence, not their contents.
   if (typeof row.errorMessage === "string" && row.errorMessage.trim()) return "provider_execution_error";
+  // LightSprint can report an otherwise idle session after the agent relay has
+  // died. This is provider execution evidence, not successful completion and
+  // not a reason to read a possibly stale transcript. The provider's nested
+  // liveness shape is projected only into a fixed local diagnostic.
+  const relay = row.relayHealth;
+  if (typeof relay === "object" && relay !== null && !Array.isArray(relay) &&
+      (relay as Record<string, unknown>).alive === false) return "agent_relay_unavailable";
   return undefined;
 }
 

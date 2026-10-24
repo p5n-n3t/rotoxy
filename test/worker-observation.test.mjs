@@ -33,6 +33,12 @@ test('idle with provider relay error is a failure, without leaking the error mes
   assert.equal(JSON.stringify(status).includes('do-not-store'), false);
 });
 
+test('idle with a provider-reported dead relay is a failure without retaining relay details', () => {
+  const status = normalizeSessionObservation({ sessionStatus: 'idle', relayHealth: { alive: false, relayPid: 1234 } });
+  assert.deepEqual(status, { state: 'failed', errorCode: 'agent_relay_unavailable', needsInput: false });
+  assert.equal(JSON.stringify(status).includes('1234'), false);
+});
+
 test('native approval remains separate from ordinary guidance', () => {
   const status = normalizeSessionObservation({
     sessionStatus: 'idle', parkedQuestion: { kind: 'approval', text: 'Approve?' },
