@@ -46,6 +46,28 @@ This pure helper performs no I/O and is not yet connected to live provisioning.
 Its account comparison validates local binding, not upstream membership. Session
 listing is not proof of idempotency or exact launch reconciliation.
 
+## Scoped transport — 2026-10-24
+
+`LightSprintJobsAdapter` now has account-bound workspace task creation, instruction
+patch/readback, session launch/list/status/transcript, turn cancellation, session
+stop and stack discovery methods. Each call verifies the workspace against the
+selected credential's own current catalog. A denied endpoint requires an explicit
+internal permit; discovery alone grants no bypass, and explicit tool denial still
+wins. Raw MCP policy is unchanged.
+
+Launch consumes its verified instruction binding before asynchronous readback,
+then checks the task envelope directly. Concurrent or repeated launch attempts
+cannot reuse that binding. This in-memory guard supplements durable orchestration;
+it is not a cross-process idempotency mechanism or proof of launch completion.
+The legacy launch method also consumes its binding before attempting launch.
+
+Read-only live scoped session status calls succeeded on two enabled accounts.
+Stack and canonical repository discovery succeeded on maryjoebake and jqthefoo.
+The first two fresh-task probes were rejected during local workspace validation;
+no launch proof is claimed from those refusals. Exact model and reasoning pins
+remain unverified. Production fresh-job wiring and durable result recovery remain
+separate acceptance steps.
+
 Claude Code produced the initial implementation; integration review corrected
 legacy session paths and an unsupported correlation claim. The 22 focused tests
 pass. Next: obtain account-pinned workspace evidence and integrate the narrow

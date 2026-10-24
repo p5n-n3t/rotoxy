@@ -4,6 +4,7 @@ import { PROVIDER_PROFILES } from "../provider-capabilities.js";
 import { readBodyLimited, serverMessages } from "../jsonrpc-wire.js";
 import type { StateStore } from "../store.js";
 import type { UpstreamAccount } from "../types.js";
+import { LightSprintWorkspaceContract } from "./lightsprint-workspace-contract.js";
 
 export type JobProvider = "claude" | "codex" | "auto" | "pi";
 export type JobClassification = "accepted" | "rejected" | "ambiguous";
@@ -42,6 +43,8 @@ export interface LightSprintJobsOptions {
   timeoutMs?: number;
   /** Single-use authorization for one exact claimed chat POST when the global policy denies it. Never used by other adapter methods. */
   trustedChatMutationPermit?: (request: Readonly<{ method: "POST"; path: string; body: Readonly<{ message: string; clientMessageId: string }> }>) => boolean;
+  /** Explicit internal authorization. Catalog discovery alone never grants policy bypass. */
+  trustedWorkspacePermit?: (request: Readonly<{ accountId: string; workspaceId: string; method: string; path: string; body?: Readonly<Record<string, unknown>> }>) => boolean;
 }
 
 export type ProvisioningContractFamily = "legacy-task" | "workspace-task" | "unknown";
@@ -55,6 +58,8 @@ export interface ProvisioningContractDiscovery {
   modelPin: "unknown" | "unsupported";
   effortPin: "unknown" | "unsupported";
   status: "documented" | "unknown" | "unavailable";
+  /** Account-scoped workspace declared by this credential's own MCP catalog. */
+  workspaceId?: string;
   reason?: "catalog_missing" | "catalog_malformed" | "contract_unrecognized" | "auth_failed" | "transport_failed" | "account_unavailable" | "catalog_unavailable";
 }
 
@@ -75,6 +80,13 @@ const MAX_DISCOVERY_PAGES = 8;
 const MAX_DISCOVERY_TOOLS = 256;
 const MAX_DISCOVERY_DESCRIPTION_BYTES = 128 * 1024;
 const MAX_DISCOVERY_CURSOR_LENGTH = 512;
+
+function catalogWorkspaceId(description: string): string | undefined {
+  const matches = [...description.matchAll(/(?:^|\n)\s*workspaceId\s*=\s*([A-Za-z0-9][A-Za-z0-9_-]{0,127})\s*(?=\n|$)/g)]
+    .map((match) => match[1]!);
+  const unique = [...new Set(matches)];
+  return unique.length === 1 ? unique[0] : undefined;
+}
 
 const LEGACY_LAUNCH_ROUTE = "/api/tasks/{taskId}/lightsprint-agents/{claude|codex|auto|pi}";
 const LEGACY_LIST_ROUTE = "/api/tasks/{taskId}/lightsprint-agents";
@@ -648,6 +660,7 @@ export class LightSprintJobsAdapter {
       modelPin: "unknown",
       effortPin: "unknown",
       status: "documented",
+      ...(catalogWorkspaceId(description) ? { workspaceId: catalogWorkspaceId(description) } : {}),
     };
   }
 
@@ -689,13 +702,26 @@ export class LightSprintJobsAdapter {
     return this.clientPromise;
   }
 
+  private async workspaceBindingMatches(workspaceId: string): Promise<boolean> {
+    const discovery = await this.discoverProvisioningContract();
+    return discovery.status === "documented" && discovery.family === "workspace-task" &&
+      discovery.workspaceId === workspaceId;
+  }
+
   private async api<T = unknown>(method: string, path: string, body?: Record<string, unknown>, transcript = false,
-    trustedChatMutation = false): Promise<JobResult<T>> {
+    trustedChatMutation = false, trustedWorkspaceId?: string): Promise<JobResult<T>> {
     let raw: unknown;
     try {
       const state = await this.store.load();
-      const allowed = evaluateToolCall(state.config?.toolPolicy, { name: "lightsprint_api", arguments: { method, path, ...(body === undefined ? {} : { body }) } }).allowed;
-      if (!allowed || trustedChatMutation && this.options.trustedChatMutationPermit) {
+      const policyResult = evaluateToolCall(state.config?.toolPolicy, { name: "lightsprint_api", arguments: { method, path, ...(body === undefined ? {} : { body }) } });
+      const allowed = policyResult.allowed;
+      if (trustedWorkspaceId !== undefined && !await this.workspaceBindingMatches(trustedWorkspaceId)) {
+        return rejected<T>(this.accountId, "identity_mismatch");
+      }
+      const accountBoundWorkspace = !allowed && policyResult.code === "endpoint-not-allowed" && trustedWorkspaceId !== undefined &&
+        this.options.trustedWorkspacePermit?.(Object.freeze({ accountId: this.accountId, workspaceId: trustedWorkspaceId,
+          method, path, ...(body === undefined ? {} : { body: Object.freeze({ ...body }) }) })) === true;
+      if ((!allowed && !accountBoundWorkspace) || trustedChatMutation && this.options.trustedChatMutationPermit) {
         const keys = body && Object.keys(body).sort();
         const exactChat = trustedChatMutation && method === "POST" &&
           /^\/api\/agent-sessions\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/chat$/.test(path) &&
@@ -724,6 +750,106 @@ export class LightSprintJobsAdapter {
     }
     const value = transcript ? boundedTranscript(parsed.value) : parsed.value;
     return accepted(this.accountId, value as T);
+  }
+
+  async createWorkspaceTask(workspaceId: string, title: string, stackId?: string): Promise<JobResult> {
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).taskCreateRoute();
+    validateText(title, "title", MAX_TITLE_LENGTH);
+    if (stackId !== undefined) validateId(stackId, "stackId");
+    return this.api("POST", route.path, { title, ...(stackId === undefined ? {} : { stackId }) }, false, false, workspaceId);
+  }
+
+  listWorkspaceStacks(workspaceId: string): Promise<JobResult> {
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).stackListRoute();
+    return this.api("GET", route.path, undefined, false, false, workspaceId);
+  }
+
+  readWorkspaceTask(workspaceId: string, taskRef: string): Promise<JobResult> {
+    validateId(taskRef, "taskRef");
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).scopedTaskReadRoute(taskRef);
+    if (!route.ok) throw new TypeError("taskRef is invalid");
+    return this.api("GET", route.route.path, undefined, false, false, workspaceId);
+  }
+
+  async patchWorkspaceTaskInstructions(workspaceId: string, taskRef: string, description: string): Promise<JobResult> {
+    validateId(taskRef, "taskRef");
+    validateText(description, "description", MAX_INSTRUCTIONS_LENGTH);
+    const contract = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId });
+    const route = contract.scopedTaskPatchRoute(taskRef);
+    if (!route.ok) throw new TypeError("taskRef is invalid");
+    const key = `${workspaceId}\0${taskRef}`;
+    this.verifiedInstructions.delete(key);
+    const patch = await this.api("PATCH", route.route.path, { description }, false, false, workspaceId);
+    if (patch.classification === "rejected") return patch;
+    const readback = await this.readWorkspaceTask(workspaceId, taskRef);
+    if (readback.classification !== "accepted") return readback;
+    const task = record(record(readback.value)?.task) ?? record(readback.value);
+    if (!task || (task.ref !== taskRef && task.id !== taskRef) || task.description !== description) return rejected(this.accountId, "instructions_mismatch");
+    this.verifiedInstructions.set(key, description);
+    return { ...accepted(this.accountId, readback.value), instructionsVerified: true };
+  }
+
+  async launchWorkspaceSession(workspaceId: string, taskRef: string, provider: JobProvider,
+    branchName: string): Promise<JobResult> {
+    validateId(taskRef, "taskRef");
+    validateId(branchName, "branchName");
+    if (!PROVIDERS.has(provider)) throw new TypeError("provider is invalid");
+    const key = `${workspaceId}\0${taskRef}`;
+    const expected = this.verifiedInstructions.get(key);
+    if (expected === undefined) return rejected(this.accountId, "instructions_mismatch");
+    // Consume synchronously before the readback await so concurrent callers
+    // cannot both retain authorization for the same launch.
+    this.verifiedInstructions.delete(key);
+    const before = await this.readWorkspaceTask(workspaceId, taskRef);
+    if (before.classification !== "accepted") return before;
+    const task = record(record(before.value)?.task) ?? record(before.value);
+    if (!task || (task.ref !== taskRef && task.id !== taskRef) || task.description !== expected) {
+      this.verifiedInstructions.delete(key);
+      return rejected(this.accountId, "instructions_mismatch");
+    }
+    // A second call requires a new independently verified instruction binding.
+    // In particular, a lost launch response must never replay this POST.
+    this.verifiedInstructions.delete(key);
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).sessionCreateRoute();
+    const result = await this.api("POST", route.path,
+      { taskRef, branchName, provider, autoMerge: false }, false, false, workspaceId);
+    if (result.classification === "accepted") {
+      const reportedModel = findField(result.value, ["model", "reportedModel"]);
+      const reportedBranchName = findField(result.value, ["branchName"]);
+      if (typeof reportedModel === "string") result.reportedModel = reportedModel;
+      if (typeof reportedBranchName === "string") result.reportedBranchName = reportedBranchName;
+    }
+    return result;
+  }
+
+  listWorkspaceSessions(workspaceId: string, taskRef: string): Promise<JobResult> {
+    validateId(taskRef, "taskRef");
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).sessionListRoute();
+    return this.api("GET", `${route.path}?taskRef=${encodeURIComponent(taskRef)}`, undefined, false, false, workspaceId);
+  }
+
+  workspaceSessionStatus(workspaceId: string, sessionId: string): Promise<JobResult> {
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).sessionStatusRoute(sessionId);
+    if (!route.ok) throw new TypeError("sessionId is invalid");
+    return this.api("GET", route.route.path, undefined, false, false, workspaceId);
+  }
+
+  workspaceSessionTranscript(workspaceId: string, sessionId: string): Promise<JobResult> {
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).sessionTranscriptRoute(sessionId);
+    if (!route.ok) throw new TypeError("sessionId is invalid");
+    return this.api("GET", `${route.route.path}?limit=100&include=text&maxBytes=131072`, undefined, true, false, workspaceId);
+  }
+
+  cancelWorkspaceTurn(workspaceId: string, sessionId: string): Promise<JobResult> {
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).sessionCancelRoute(sessionId);
+    if (!route.ok) throw new TypeError("sessionId is invalid");
+    return this.api("POST", route.route.path, {}, false, false, workspaceId);
+  }
+
+  stopWorkspaceSession(workspaceId: string, sessionId: string): Promise<JobResult> {
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).sessionStopRoute(sessionId);
+    if (!route.ok) throw new TypeError("sessionId is invalid");
+    return this.api("PATCH", route.route.path, { status: "stopped" }, false, false, workspaceId);
   }
 
   createTask(title: string, stackId: string): Promise<JobResult> {
@@ -760,12 +886,14 @@ export class LightSprintJobsAdapter {
     if (autoMerge !== false) throw new TypeError("autoMerge must be false");
     const expected = this.verifiedInstructions.get(taskId);
     if (expected === undefined) return rejected(this.accountId, "instructions_mismatch");
+    this.verifiedInstructions.delete(taskId);
     const before = await this.readTask(taskId);
     if (before.classification !== "accepted") return before;
     if (findField(before.value, ["id", "taskId"]) !== taskId || findField(before.value, ["description"]) !== expected) {
       this.verifiedInstructions.delete(taskId);
       return rejected(this.accountId, "instructions_mismatch");
     }
+    this.verifiedInstructions.delete(taskId);
     const result = await this.api("POST", `/api/tasks/${taskId}/lightsprint-agents/${provider}`, { autoMerge: false });
     if (result.classification === "accepted") {
       const reportedModel = findField(result.value, ["model", "reportedModel"]);

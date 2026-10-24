@@ -115,6 +115,11 @@ export class LightSprintWorkspaceContract {
     return this.route("GET", `${this.wsBase}/tasks`);
   }
 
+  /** GET /api/workspaces/{workspaceId}/stacks */
+  stackListRoute(): WorkspaceRoute {
+    return this.route("GET", `${this.wsBase}/stacks`);
+  }
+
   /**
    * GET /api/workspaces/{workspaceId}/agent-sessions
    * Lists sessions; this alone does not establish idempotency or launch correlation.
@@ -167,5 +172,10 @@ export class LightSprintWorkspaceContract {
    */
   scopedTaskReadRoute(taskId: unknown): WorkspaceRouteResult {
     return this.taskRoute("GET", taskId, "");
+  }
+
+  /** PATCH /api/workspaces/{workspaceId}/tasks/{taskId} */
+  scopedTaskPatchRoute(taskId: unknown): WorkspaceRouteResult {
+    return this.taskRoute("PATCH", taskId, "");
   }
 }

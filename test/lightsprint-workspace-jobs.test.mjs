@@ -1,0 +1,121 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { LightSprintJobsAdapter } from "../dist/providers/lightsprint-jobs.js";
+
+const description = "Every path starts /api/workspaces/{workspaceId}/, written `…/` below\nworkspaceId = ws-a\nPOST …/tasks\nPOST …/agent-sessions\nGET …/agent-sessions";
+function harness({ permit, policy = { endpoints: [{ rules: [] }] }, workspace = "ws-a", lostLaunch = false, wrongTask = false } = {}) {
+  const calls = [];
+  let instructions = "";
+  const store = {
+    load: async () => ({ config: { toolPolicy: policy }, accounts: [{ id: "acct-a", provider: "lightsprint", enabled: true }] }),
+    revealToken: async () => "synthetic-token",
+  };
+  const adapter = new LightSprintJobsAdapter(store, "acct-a", {
+    trustedWorkspacePermit: permit,
+    clientFactory: () => ({ request: async (method, params) => {
+      if (method === "tools/list") return { tools: [{ name: "lightsprint_api", description: description.replace("workspaceId = ws-a", `workspaceId = ${workspace}`) }] };
+      calls.push(params.arguments);
+      const args = params.arguments;
+      if (args.method === "PATCH") instructions = args.body.description;
+      if (args.method === "POST" && args.path.endsWith("/agent-sessions")) {
+        if (lostLaunch) throw new Error("lost response");
+        return { structuredContent: { session: { id: "session-a", model: "reported-model" } } };
+      }
+      return { structuredContent: { task: { id: "internal-a", ref: wrongTask ? "OTHER-1" : "LW-1", description: instructions,
+        ...(wrongTask ? { parent: { id: "LW-1", description: instructions } } : {}) } } };
+    } }),
+  });
+  return { adapter, calls, changeInstructions: value => { instructions = value; } };
+}
+
+test("catalog discovery never overrides denied policy without an explicit internal permit", async () => {
+  const h = harness();
+  assert.equal((await h.adapter.createWorkspaceTask("ws-a", "Bound task")).reason, "policy_denied");
+  assert.equal(h.calls.length, 0);
+});
+
+test("wrong workspace is rejected even when global policy is permissive", async () => {
+  const h = harness({ policy: {} });
+  assert.equal((await h.adapter.createWorkspaceTask("ws-other", "Bound task")).reason, "identity_mismatch");
+  assert.equal(h.calls.length, 0);
+});
+
+test("explicit tool denial cannot be overridden by internal workspace permit", async () => {
+  const h = harness({ policy: { denyTools: ["lightsprint_api"] }, permit: () => true });
+  assert.equal((await h.adapter.createWorkspaceTask("ws-a", "Bound task")).reason, "policy_denied");
+  assert.equal(h.calls.length, 0);
+});
+
+test("workspace observation and cancellation retain scoped routes and correct methods", async () => {
+  const h = harness({ permit: () => true });
+  await h.adapter.workspaceSessionStatus("ws-a", "session-a");
+  await h.adapter.workspaceSessionTranscript("ws-a", "session-a");
+  await h.adapter.cancelWorkspaceTurn("ws-a", "session-a");
+  await h.adapter.stopWorkspaceSession("ws-a", "session-a");
+  assert.deepEqual(h.calls.map(c => [c.method, c.path]), [
+    ["GET", "/api/workspaces/ws-a/agent-sessions/session-a/status"],
+    ["GET", "/api/workspaces/ws-a/agent-sessions/session-a/transcript?limit=100&include=text&maxBytes=131072"],
+    ["POST", "/api/workspaces/ws-a/agent-sessions/session-a/actions/cancel"],
+    ["PATCH", "/api/workspaces/ws-a/agent-sessions/session-a"],
+  ]);
+  assert.deepEqual(h.calls.at(-1).body, { status: "stopped" });
+});
+
+test("workspace stack discovery stays account bound", async () => {
+  const h = harness({ permit: request => request.method === "GET" });
+  await h.adapter.listWorkspaceStacks("ws-a");
+  assert.deepEqual(h.calls, [{ method: "GET", path: "/api/workspaces/ws-a/stacks" }]);
+});
+
+test("scoped task instructions read back by display reference before launching with no auto merge", async () => {
+  const permits = [];
+  const h = harness({ permit: request => { permits.push(request); return true; } });
+  assert.equal((await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions")).instructionsVerified, true);
+  const result = await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "rotoxy-proof-1");
+  assert.equal(result.classification, "accepted");
+  assert.equal(result.reportedModel, "reported-model");
+  assert.deepEqual(h.calls.at(-1), { method: "POST", path: "/api/workspaces/ws-a/agent-sessions", body: {
+    taskRef: "LW-1", branchName: "rotoxy-proof-1", provider: "codex", autoMerge: false,
+  } });
+  assert.ok(permits.every(r => r.accountId === "acct-a" && r.workspaceId === "ws-a" && Object.isFrozen(r)));
+});
+
+test("lost launch response is ambiguous and repeated launch cannot replay the mutation", async () => {
+  const h = harness({ permit: () => true, lostLaunch: true });
+  await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions");
+  assert.equal((await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "proof-1")).classification, "ambiguous");
+  assert.equal((await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "proof-1")).reason, "instructions_mismatch");
+  assert.equal(h.calls.filter(c => c.method === "POST").length, 1);
+});
+
+test("changed upstream instructions block launch before POST", async () => {
+  const h = harness({ permit: () => true });
+  await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions");
+  h.changeInstructions("Unreviewed edit");
+  assert.equal((await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "claude", "proof-1")).reason, "instructions_mismatch");
+  assert.equal(h.calls.filter(c => c.method === "POST").length, 0);
+});
+
+test("catalog with conflicting workspace declarations cannot authorize scoped I/O", async () => {
+  const h = harness({ permit: () => true, workspace: "ws-a\nworkspaceId = ws-b" });
+  assert.equal((await h.adapter.createWorkspaceTask("ws-a", "Bound task")).reason, "identity_mismatch");
+  assert.equal(h.calls.length, 0);
+});
+
+test("a nested related task cannot satisfy task identity readback", async () => {
+  const h = harness({ permit: () => true, wrongTask: true });
+  assert.equal((await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions")).reason, "instructions_mismatch");
+  assert.equal((await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "proof-1")).reason, "instructions_mismatch");
+  assert.equal(h.calls.filter(c => c.method === "POST").length, 0);
+});
+
+test("concurrent launch calls consume only one verified launch binding", async () => {
+  const h = harness({ permit: () => true });
+  await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions");
+  const results = await Promise.all([
+    h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "proof-1"),
+    h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "proof-1"),
+  ]);
+  assert.equal(results.filter(r => r.classification === "accepted").length, 1);
+  assert.equal(h.calls.filter(c => c.method === "POST").length, 1);
+});

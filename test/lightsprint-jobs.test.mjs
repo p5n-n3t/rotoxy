@@ -95,6 +95,7 @@ test("lost launch response is ambiguous and is never replayed", async () => {
   const result = await adapter.launchTask(TASK_ID, "claude");
   assert.equal(result.classification, "ambiguous");
   assert.equal(result.reason, "transport_ambiguous");
+  assert.equal((await adapter.launchTask(TASK_ID, "claude")).reason, "instructions_mismatch");
   assert.equal(launchCalls, 1);
 });
 
