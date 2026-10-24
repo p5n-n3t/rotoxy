@@ -48,7 +48,11 @@ test("SQLite reconciliation lease is scoped, durable, and only settles terminal 
 
   const firstClaim = ledger({ command: "claim_reconciliation", limit: 3 });
   assert.equal(firstClaim.status, 0);
-  assert.deepEqual(firstClaim.value.bindings, [binding("job-a"), binding("job-b", "client-b")]);
+  assert.deepEqual(
+    firstClaim.value.bindings.map(row => `${row.clientId}:${row.jobId}`).sort(),
+    ["client-a:job-a", "client-b:job-b"],
+    "claim ownership is complete; first-observation ordering is intentionally scheduler-managed",
+  );
   assert.equal(JSON.stringify(firstClaim.value).includes("private prompt"), false);
   // A separate process simulates restart; the persisted 120s lease prevents duplicate work.
   assert.deepEqual(ledger({ command: "claim_reconciliation", limit: 3 }).value.bindings, []);
@@ -76,6 +80,12 @@ test("SQLite reconciliation lease is scoped, durable, and only settles terminal 
   const aged = spawnSync("/usr/bin/python3", ["-c", "import sqlite3,sys,time; d=sqlite3.connect(sys.argv[1]); d.execute(\"UPDATE workspace_execution_bindings SET created_at=1,last_polled_at=?,lease_until=0 WHERE job_id LIKE 'old-%'\",(int(time.time()*1000)-130000,)); d.commit()", db], { encoding: "utf8" });
   assert.equal(aged.status, 0, aged.stderr);
   assert.deepEqual(ledger({ command: "claim_reconciliation", limit: 1 }).value.bindings, [binding("new-unobserved")], "older long-running jobs cannot starve unobserved arrivals");
+
+  assert.equal(reserve("first-fresh").status, 0);
+  const ageFresh = spawnSync("/usr/bin/python3", ["-c", "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\"UPDATE workspace_execution_bindings SET created_at=1 WHERE job_id='first-fresh'\"); d.commit()", db], { encoding: "utf8" });
+  assert.equal(ageFresh.status, 0, ageFresh.stderr);
+  assert.equal(reserve("latest-fresh").status, 0);
+  assert.deepEqual(ledger({ command: "claim_reconciliation", limit: 1 }).value.bindings, [binding("latest-fresh")], "a fresh handoff is observed before an older untouched backlog entry");
 
   const uncertainResults = [
     { dispatch: { state: "completed" }, projectionPending: false, resultsUnavailable: true },

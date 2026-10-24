@@ -172,10 +172,18 @@ def handle(path, request):
             now = int(time.time() * 1000)
             db.execute("BEGIN IMMEDIATE")
             try:
+                # Give a newly published binding its first observation before
+                # rechecking older work.  A failed or still-review-pending
+                # binding is deliberately left unsettled, so ordering all
+                # never-observed rows oldest-first lets a backlog delay a new
+                # handoff by several polling intervals.  Once observed, the
+                # normal least-recently-polled order preserves fair polling.
                 rows = db.execute("""SELECT project_id,job_id,client_id FROM workspace_execution_bindings
                     WHERE settled=0 AND COALESCE(lease_until,0)<=?
                     AND (last_polled_at IS NULL OR last_polled_at<=?)
-                    ORDER BY COALESCE(last_polled_at,0) ASC,created_at ASC,project_id ASC,job_id ASC,client_id ASC LIMIT ?""",
+                    ORDER BY CASE WHEN last_polled_at IS NULL THEN 0 ELSE 1 END ASC,
+                    CASE WHEN last_polled_at IS NULL THEN created_at END DESC,
+                    last_polled_at ASC,project_id ASC,job_id ASC,client_id ASC LIMIT ?""",
                     (now, now - 30_000, limit)).fetchall()
                 claimed = []
                 for row in rows:

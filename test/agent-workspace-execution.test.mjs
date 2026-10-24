@@ -24,15 +24,19 @@ async function oauthToken(base, scope = "mcp jobs:read jobs:write") {
 }
 const submission = (jobId, instructions = "Published instruction") => ({ schemaVersion: 1, jobId, idempotencyKey: "idem-" + jobId, projectId: "project-a", eligibleAccountIds: ["acct-a"], tasks: [{ taskId: "task-a", dependsOn: [], scopeKeys: ["path:src"], instructions, execution: { mode: "existing-session" }, output: { kind: "text", maxBytes: 2048, format: "text", expectedMarker: "DONE" } }] });
 
-test("workspace execution persists before submit, replays once, reconciles owner-scoped results and publishes only bounded projections", async () => {
+const BACKGROUND_RECONCILIATION_TIMEOUT_MS = 120_000;
+
+test("workspace execution persists before submit, replays once, reconciles owner-scoped results and publishes only bounded projections", { timeout: BACKGROUND_RECONCILIATION_TIMEOUT_MS + 10_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "rotoxy-aw-execution-"));
   const priorHome = process.env.HOME, priorConfig = process.env.ROTOXY_CONFIG_DIR;
   process.env.HOME = dir; process.env.ROTOXY_CONFIG_DIR = join(dir, "config");
-  const allowed = new Set(); const submissions = new Map(); const calls = []; let ambiguous = true; let revokeAfterResults = false;
+  const projectMembers = new Map([["project-a", new Set()]]);
+  const allowed = projectMembers.get("project-a");
+  const submissions = new Map(); const calls = []; let ambiguous = true; let revokeAfterResults = false;
   const backend = {
-    listProjects: () => ["project-a"],
-    workspaceProjects: async clientId => allowed.has(clientId) ? [{projectId:"project-a"}] : [],
-    authorizeWorkspace: (projectId, clientId) => { if (projectId !== "project-a" || !allowed.has(clientId)) throw new Error("workspace_forbidden"); },
+    listProjects: () => [...projectMembers.keys()],
+    workspaceProjects: async clientId => [...projectMembers.entries()].flatMap(([projectId, members]) => members.has(clientId) ? [{projectId}] : []),
+    authorizeWorkspace: (projectId, clientId) => { if (!projectMembers.get(projectId)?.has(clientId)) throw new Error("workspace_forbidden"); },
     callTool: async (name, args, caller) => {
       calls.push({ name, args, caller });
       if (name === "job_submit") {
@@ -43,7 +47,7 @@ test("workspace execution persists before submit, replays once, reconciles owner
       }
       if (name === "job_status") return { projectId: args.projectId, assignmentId: args.jobId, state: "completed", revision: 7, tasks: [...(submissions.get(args.jobId)?.tasks ?? []).map(t => ({taskId:t.taskId,state:"completed"})), { taskId: "unrelated-task", state: "completed" }] };
       if (name === "job_results") {
-        if (revokeAfterResults) allowed.delete(caller.clientId);
+        if (revokeAfterResults) projectMembers.get(args.projectId)?.delete(caller.clientId);
         return { assignmentId: args.jobId, results: [...(submissions.get(args.jobId)?.tasks ?? []).map(t => ({taskId:t.taskId,text:"safe shared result",reportedModel:"reported-model"})), { taskId: "unrelated-task", text: "must not leak" }] };
       }
       throw new Error("unexpected tool " + name);
@@ -161,7 +165,13 @@ test("workspace execution persists before submit, replays once, reconciles owner
     assert.ok(board.executions.some(e=>e.jobId===dag.jobId));
     assert.ok(board.executionRevision>0);
 
-    const background = submission("job-background-handoff");
+    // Keep the scheduled handoff proof in a fresh task context.  The earlier
+    // cases deliberately retain unsettled bindings for their own assertions;
+    // allowing those to occupy reconciliation leases makes this timing test
+    // depend on unrelated backlog order rather than scheduler behavior.
+    const backgroundProject = "project-background";
+    projectMembers.set(backgroundProject, new Set([owner.clientId, collaborator.clientId]));
+    const background = { ...submission("job-background-handoff"), projectId: backgroundProject };
     assert.equal((await mcp(owner,"workspace_dispatch",background)).value.accepted,true);
     const submitCount=calls.filter(c=>c.name==="job_submit").length;
     // Observe the real scheduled sync completing rather than repeatedly spawning
@@ -179,14 +189,14 @@ test("workspace execution persists before submit, replays once, reconciles owner
     try {
       reconciler.start();
       await Promise.race([synchronized, new Promise((_, reject) => {
-        timeout=setTimeout(()=>reject(new Error("background reconciliation did not publish before deadline")),60000);
+        timeout=setTimeout(()=>reject(new Error("background reconciliation did not publish before deadline")), BACKGROUND_RECONCILIATION_TIMEOUT_MS);
       })]);
     } finally {
       clearTimeout(timeout);
       reconciler.stop();
       restartedApp.agentWorkspace.sync = originalSync;
     }
-    const observed=(await mcp(collaborator,"workspace_snapshot",{projectId:"project-a"})).value;
+    const observed=(await mcp(collaborator,"workspace_snapshot",{projectId:backgroundProject})).value;
     const backgroundTask=observed.tasks.find(t=>t.jobId===background.jobId);
     assert.ok(observed.artifacts.some(a=>a.taskId===backgroundTask?.id),"background reconciliation publishes results after the initiating HTTP request ended");
     assert.equal(calls.filter(c=>c.name==="job_submit").length,submitCount,"background observation never launches another inference/job");
