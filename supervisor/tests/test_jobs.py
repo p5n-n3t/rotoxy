@@ -441,6 +441,18 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual({item["taskId"]: item["priority"] for item in self.registry.get_assignment("priority")["tasks"]},
                          {"low": 0, "high": 10, "dependent": 100})
 
+    def test_legacy_null_priority_does_not_block_the_scheduler(self):
+        self.registry.submit(assignment())
+        # Simulate a record written by a prior release, before null priority
+        # was rejected by validation. Runtime scheduling must preserve its
+        # default ordering and remain able to claim it.
+        with self.registry.connection(write=True) as db:
+            stored = json.loads(db.execute("SELECT body FROM job_tasks WHERE assignment=? AND task_id=?", ("job-1", "task-1")).fetchone()["body"])
+            stored["priority"] = None
+            db.execute("UPDATE job_tasks SET body=? WHERE assignment=? AND task_id=?", (json.dumps(stored), "job-1", "task-1"))
+        operation = self.registry.claim_operation("node-1", now=1)
+        self.assertEqual(operation["sessionId"], "session-account-a")
+
     def test_scheduler_policy_and_priority_reject_unknown_or_unsafe_fields(self):
         body = assignment() | {"scheduling": {"profile": "custom", "maxConcurrency": 2}}
         self.assertEqual(validate_assignment(body)["scheduling"]["maxConcurrency"], 2)

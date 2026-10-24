@@ -725,7 +725,14 @@ class JobRegistry:
                           "WHERE a.approved=1 AND a.state='queued' AND t.state IN ('queued','retry_due') "
                           "ORDER BY a.created_at,t.rowid").fetchall()
         # Priority orders only currently eligible DAG nodes; dependencies still gate below.
-        rows = sorted(rows, key=lambda row: (-json.loads(row["task_body"]).get("priority", 0), row["created_at"], row["task_seq"]))
+        # Older durable assignments can contain a JSON null priority from before
+        # validation rejected it. Treat that legacy value as the documented
+        # default (zero) rather than letting one old task crash the scheduler
+        # before it can consider unrelated ready work.
+        def priority_key(row):
+            priority = json.loads(row["task_body"]).get("priority", 0)
+            return (-(priority if type(priority) is int else 0), row["created_at"], row["task_seq"])
+        rows = sorted(rows, key=priority_key)
         for row in rows:
             spec = json.loads(row["task_body"])
             deps = spec["dependsOn"]
