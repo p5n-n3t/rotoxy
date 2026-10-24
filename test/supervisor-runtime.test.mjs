@@ -485,6 +485,24 @@ test("underscore-prefixed provider session IDs register and traversal remains re
   await assert.rejects(readSupervisorRuntimeConfig(path));
 });
 
+test("consented Fleet clients can read a same-Fleet job without receiving access to another project", async () => {
+  const policy = { ...structuredClone(config), sharedWorkspace: { projectId: "project-a", membership: "authenticated_mcp" } };
+  const runtime = new SupervisorRuntime(policy, { configDir: process.cwd(), supervisorCwd: join(process.cwd(), "supervisor"), store });
+  runtime.started = true;
+  const requests = [];
+  runtime.bridge = { request: async (_method, path, _body, options) => {
+    requests.push({ path, options });
+    if (path === "/admin/api/v1/assignments/shared-job") return { assignmentId: "shared-job", projectId: "project-a", state: "complete", revision: 2, tasks: [] };
+    if (path === "/v1/assignments/shared-job/results") return { assignmentId: "shared-job", results: [{ taskId: "task-a", text: "DONE", generation: 1 }] };
+    throw new Error(`unexpected shared read: ${path}`);
+  } };
+  const sharedCaller = { clientId: "client-c", projectId: "project-a" };
+  assert.equal((await runtime.callTool("job_status", { projectId: "project-a", jobId: "shared-job" }, sharedCaller)).state, "complete");
+  assert.equal((await runtime.callTool("job_results", { projectId: "project-a", jobId: "shared-job" }, sharedCaller)).results[0].text, "DONE");
+  assert.ok(requests.every(({ options }) => options.sharedProject === "project-a"));
+  await assert.rejects(runtime.callTool("job_status", { projectId: "project-b", jobId: "shared-job" }, { clientId: "client-c", projectId: "project-b" }), /not authorized/);
+});
+
 
 test("dispatch policy hot reload clamps account ceiling and preserves observation while paused",async t=>{
  const dir=await mkdtemp(join(tmpdir(),"rx-policy-hot-"));t.after(()=>rm(dir,{recursive:true,force:true}));

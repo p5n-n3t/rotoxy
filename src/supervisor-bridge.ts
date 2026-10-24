@@ -348,7 +348,7 @@ export class SupervisorBridge {
     method: BridgeMethod,
     route: string,
     body?: unknown,
-    options: { timeoutMs?: number; signal?: AbortSignal; ownerPrincipalId?: string; clientId?: string } = {},
+    options: { timeoutMs?: number; signal?: AbortSignal; ownerPrincipalId?: string; clientId?: string; sharedProject?: string } = {},
   ): Promise<T | undefined> {
     if (this.#state !== "running" || !this.#bearer || !this.#child || this.#childExited) {
       throw new SupervisorBridgeError("not_running");
@@ -357,7 +357,8 @@ export class SupervisorBridge {
     const timeoutMs = validateLimit(options.timeoutMs ?? this.#requestTimeoutMs, MAX_TIMEOUT_MS, "invalid_request_timeout");
     if ((options.ownerPrincipalId === undefined) !== (options.clientId === undefined) ||
         (options.ownerPrincipalId !== undefined && !isSafeId(options.ownerPrincipalId)) ||
-        (options.clientId !== undefined && !isSafeId(options.clientId))) {
+        (options.clientId !== undefined && !isSafeId(options.clientId)) ||
+        (options.sharedProject !== undefined && !isSafeId(options.sharedProject))) {
       throw new SupervisorBridgeError("invalid_owner_context");
     }
     if (options.signal?.aborted) throw new SupervisorBridgeError("request_cancelled");
@@ -401,6 +402,7 @@ export class SupervisorBridge {
               "x-owner-principal": options.ownerPrincipalId,
               "x-client-id": options.clientId,
             } : {}),
+            ...(options.sharedProject ? { "x-rotoxy-shared-project": options.sharedProject } : {}),
             ...(requestBody ? { "content-type": "application/json", "content-length": String(requestBody.length) } : {}),
           },
           ...(requestBody ? { body: requestBody } : {}),

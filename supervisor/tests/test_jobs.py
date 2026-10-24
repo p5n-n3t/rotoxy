@@ -590,6 +590,17 @@ class JobRegistryTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.registry.assignment_results("job-1", "bob")
 
+    def test_shared_project_read_remains_project_bounded(self):
+        body = assignment()
+        body["ownerPrincipalId"] = "alice"
+        body["clientId"] = "client-a"
+        self.registry.submit(body, now=1)
+        self.assertEqual(self.registry.get_assignment("job-1", "bob", "client-b", "project-a")["assignmentId"], "job-1")
+        self.assertIsNone(self.registry.get_assignment("job-1", "bob", "client-b", "project-b"))
+        self.assertEqual(self.registry.assignment_results("job-1", "bob", "client-b", "project-a")["assignmentId"], "job-1")
+        with self.assertRaises(KeyError):
+            self.registry.assignment_results("job-1", "bob", "client-b", "project-b")
+
     def test_snapshot_and_events_do_not_return_instructions(self):
         body = assignment()
         body["tasks"][0]["instructions"] = "private instruction content"

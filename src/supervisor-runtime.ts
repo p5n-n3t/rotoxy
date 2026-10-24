@@ -477,6 +477,14 @@ export class SupervisorRuntime implements SupervisorBackend {
     const args = validateJobToolArguments(name, rawArgs) as Record<string, any>;
     if (args.projectId !== project.projectId) throw new JobInputError("project is not authorized for this OAuth client");
     const owner = this.owner(caller);
+    // A Fleet is explicitly shared by consented OAuth clients. The private
+    // bridge still limits a shared read to the same project; task-context
+    // projects and clients without Fleet consent retain per-origin ownership.
+    const sharedRead = this.config.sharedWorkspace?.projectId === project.projectId && await this.consentedSharedClient(caller.clientId);
+    // Retain the caller identity for the private bridge audit trail. The
+    // bridge uses sharedProject only to grant a read after it has checked the
+    // assignment is in this exact Fleet project.
+    const readOwner = sharedRead ? { ...owner, sharedProject: project.projectId } : owner;
     if (name === "job_submit") {
       const requested = args.eligibleAccountIds as string[];
       if (requested.some((id) => !project.accountIds.includes(id))) throw new JobInputError("eligible accounts are outside this project binding");
@@ -508,7 +516,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     }
     if (name === "job_status") {
       if (!safeId(args.jobId)) throw new JobInputError("jobId is invalid");
-      const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${args.jobId}`, undefined, owner));
+      const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${args.jobId}`, undefined, readOwner));
       if (row.projectId !== project.projectId) throw new JobInputError("job is not available");
       return boundedJson(row);
     }
@@ -516,9 +524,9 @@ export class SupervisorRuntime implements SupervisorBackend {
       if (!safeId(args.jobId)) throw new JobInputError("jobId is invalid");
       // The durable results DTO intentionally omits projectId; verify the owning
       // assignment through the owner-filtered status route before reading results.
-      const assignment = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${args.jobId}`, undefined, owner));
+      const assignment = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${args.jobId}`, undefined, readOwner));
       if (assignment.projectId !== project.projectId) throw new JobInputError("job is not available");
-      const row = parseJson(await this.bridge.request("GET", `/v1/assignments/${args.jobId}/results`, undefined, owner));
+      const row = parseJson(await this.bridge.request("GET", `/v1/assignments/${args.jobId}/results`, undefined, readOwner));
       if (row.assignmentId !== args.jobId) throw new JobInputError("job is not available");
       const results = Array.isArray(row.results) ? row.results.filter((item: unknown) => object(item) && (!args.taskId || (item.taskId ?? item.task_id) === args.taskId)).map((item: Record<string, unknown>) => ({
         taskId: item.taskId ?? item.task_id, generation: item.generation, text: item.text,

@@ -146,6 +146,14 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             raise PermissionError("owner_context_required")
         return principal, client
 
+    def _shared_project(self):
+        project = self.headers.get("X-Rotoxy-Shared-Project")
+        if project is None:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", project):
+            raise PermissionError("invalid_shared_project")
+        return project
+
     def _dispatch(self):
         if not self._authorized():
             self._reply(401, {"error": "unauthorized"})
@@ -222,12 +230,13 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 self._reply(202, registry.approve(urllib.parse.unquote(match.group(1)), body["expectedRevision"]))
                 return
             if self.command == "GET" and match and not route.endswith("/approve"):
-                value = registry.get_assignment(urllib.parse.unquote(match.group(1)), *self._owner_context())
+                value = registry.get_assignment(urllib.parse.unquote(match.group(1)), *self._owner_context(), self._shared_project())
                 self._reply(200, value) if value else self._reply(404, {"error": "not_found"})
                 return
             match = re.fullmatch(r"/v1/assignments/([^/]+)/(results|cancel)", route)
             if match and match.group(2) == "results" and self.command == "GET":
-                self._reply(200, registry.assignment_results(urllib.parse.unquote(match.group(1)), *self._owner_context(required=True)))
+                owner, client = self._owner_context(required=True)
+                self._reply(200, registry.assignment_results(urllib.parse.unquote(match.group(1)), owner, client, self._shared_project()))
                 return
             if match and match.group(2) == "cancel" and self.command == "POST":
                 body = self._body()

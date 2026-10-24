@@ -67,7 +67,7 @@ async function fixture({ handler, httpClient, startupTimeoutMs = 300 } = {}) {
     authPipe.on("data", (chunk) => { bearer += chunk.toString("ascii"); });
     authPipe.on("end", () => {
       server = createServer((req, res) => {
-        requestSeen({ method: req.method, url: req.url, authorization: req.headers.authorization, owner: req.headers["x-owner-principal"], client: req.headers["x-client-id"] });
+        requestSeen({ method: req.method, url: req.url, authorization: req.headers.authorization, owner: req.headers["x-owner-principal"], client: req.headers["x-client-id"], sharedProject: req.headers["x-rotoxy-shared-project"] });
         handler?.({ req, res, bearer, child });
         if (!handler) {
           req.resume();
@@ -157,6 +157,17 @@ test("rejects unlisted routes, path traversal, duplicate query keys, and unsuppo
   assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/assignments/../events"), false);
   assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/events?limit=1&limit=2"), false);
   assert.equal(isAllowedSupervisorRoute("POST", "//outside.example/admin/api/v1/control"), false);
+});
+
+test("shared project context is an explicit bounded bridge header", async () => {
+  const f = await fixture();
+  try {
+    await f.bridge.start();
+    await f.bridge.request("GET", "/admin/api/v1/assignments/job-1", undefined, { sharedProject: "project-a" });
+    const observed = await f.requestPromise;
+    assert.equal(observed.sharedProject, "project-a");
+    await assert.rejects(f.bridge.request("GET", "/admin/api/v1/assignments/job-1", undefined, { sharedProject: "../other" }), { code: "invalid_owner_context" });
+  } finally { await f.cleanup(); }
 });
 
 test("fails closed on an HTTP 401 without exposing the bearer", async () => {

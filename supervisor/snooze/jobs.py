@@ -556,10 +556,11 @@ class JobRegistry:
                 result["promptCountDelta"] = current["promptCount"] - before["promptCount"]
         return result
 
-    def get_assignment(self, assignment_id, owner_principal_id=None, client_id=None):
+    def get_assignment(self, assignment_id, owner_principal_id=None, client_id=None, shared_project=None):
         with self.connection() as db:
             row = db.execute("SELECT * FROM assignments WHERE id=?", (assignment_id,)).fetchone()
-            if not row or not self._owner_matches(row, owner_principal_id, client_id):
+            shared = isinstance(shared_project, str) and row and row["project"] == shared_project
+            if not row or not (shared or self._owner_matches(row, owner_principal_id, client_id)):
                 return None
             tasks = []
             for task in db.execute("SELECT * FROM job_tasks WHERE assignment=? ORDER BY rowid", (assignment_id,)):
@@ -1192,12 +1193,13 @@ class JobRegistry:
                    (result.get("reportedModel"), op["assignment"], op["task_id"], op["generation"]))
         return "complete", True
 
-    def assignment_results(self, assignment_id, owner_principal_id=None, client_id=None):
+    def assignment_results(self, assignment_id, owner_principal_id=None, client_id=None, shared_project=None):
         with self.connection() as db:
-            row = db.execute("SELECT owner_principal,client_id FROM assignments WHERE id=?", (assignment_id,)).fetchone()
+            row = db.execute("SELECT project,owner_principal,client_id FROM assignments WHERE id=?", (assignment_id,)).fetchone()
+            shared = isinstance(shared_project, str) and row and row["project"] == shared_project
             if not row:
                 raise KeyError("Assignment not found")
-            if not self._owner_matches(row, owner_principal_id, client_id):
+            if not (shared or self._owner_matches(row, owner_principal_id, client_id)):
                 raise KeyError("Assignment not found")
             results = db.execute("SELECT task_id,generation,text,assistant_at,reported_model,created_at FROM job_results WHERE assignment=? ORDER BY task_id,generation", (assignment_id,)).fetchall()
             return {"assignmentId": assignment_id, "results": [dict(item) for item in results]}
