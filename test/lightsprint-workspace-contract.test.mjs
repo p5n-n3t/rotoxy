@@ -10,6 +10,15 @@ test("valid accountId and workspaceId construct without error", () => {
   assert.equal(contract.workspaceId, "ws-abc");
 });
 
+test("provider-generated session IDs may begin with underscore or hyphen", () => {
+  const contract = new LightSprintWorkspaceContract({ accountId: "acct-01", workspaceId: "ws-abc" });
+  for (const id of ["_session-a", "-session-b"]) {
+    const result = contract.sessionStatusRoute(id);
+    assert.equal(result.ok, true);
+    assert.equal(result.route.path, `/api/workspaces/ws-abc/agent-sessions/${id}/status`);
+  }
+});
+
 test("invalid accountId throws TypeError at construction", () => {
   assert.throws(() => new LightSprintWorkspaceContract({ accountId: "", workspaceId: "ws-abc" }), TypeError);
   assert.throws(() => new LightSprintWorkspaceContract({ accountId: "/etc/passwd", workspaceId: "ws-abc" }), TypeError);

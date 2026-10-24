@@ -68,6 +68,23 @@ no launch proof is claimed from those refusals. Exact model and reasoning pins
 remain unverified. Production fresh-job wiring and durable result recovery remain
 separate acceptance steps.
 
+## Controlled fresh execution evidence — 2026-10-24
+
+After separate denied dry validation, two known pre-execution refusals were
+retried with new exclusive intent journals. Task creation, exact description
+readback and one session launch were accepted on both maryjoebake and jqthefoo.
+The jqthefoo session subsequently reported ownership, idle state, GPT-6.1 Sol,
+and USD 0.225696 session cost. Its bounded transcript contained the requested
+completion marker. The reported dollar amount is not a verified credit debit.
+
+The maryjoebake launch returned a provider-generated ID beginning with an
+underscore. The scoped route helper now accepts safe base64url ID characters in
+the leading position. Subsequent native status and transcript reads returned
+`HTTP 404: Agent session not found`; that launch remains unresolved and was not
+repeated. This is not proof of two-account overlapping execution. Preserve the
+private intent journals and use documented task-scoped session lookup to
+reconcile before any replacement launch.
+
 Claude Code produced the initial implementation; integration review corrected
 legacy session paths and an unsupported correlation claim. The 22 focused tests
 pass. Next: obtain account-pinned workspace evidence and integrate the narrow

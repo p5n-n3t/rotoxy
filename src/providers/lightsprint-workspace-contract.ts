@@ -13,7 +13,8 @@
  *  - This helper is preparatory; live dispatch integration is outside its scope.
  */
 
-const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+// Provider-generated Nano IDs can start with '_' or '-'; neither is a path separator.
+const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 
 export type WorkspaceRouteMethod = "GET" | "POST" | "PATCH";
