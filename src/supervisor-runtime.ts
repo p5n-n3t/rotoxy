@@ -792,6 +792,7 @@ export class SupervisorRuntime implements SupervisorBackend {
           ...(session ? { workspace: session.workspaceId, worker: session.sessionId } : {}),
           ...(typeof task.selectedAccountId === "string" ? { accountId: task.selectedAccountId } : {}),
           ...(typeof task.modelReported === "string" ? { reportedModel: redactString(task.modelReported, 64) } : {}),
+          ...(typeof task.errorClass === "string" && /^[A-Za-z0-9_.-]{1,128}$/.test(task.errorClass) ? { errorClass: task.errorClass } : {}),
           ...(generation !== undefined ? { generation } : {}), ...(usage ? { usage } : {}) });
       }
       const accounts = [...new Set(taskRows.flatMap((task) => typeof task.selectedAccountId === "string" ? [task.selectedAccountId] : []))];

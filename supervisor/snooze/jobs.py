@@ -572,6 +572,19 @@ class JobRegistry:
                               "sessionId": task["session_id"], "dispatchAt": task["dispatch_at"], "releasedAt": task["released_at"],
                               "modelRequested": "unknown/unsupported", "modelReported": task["reported_model"],
                               "providerStatus": task["provider_status"], "quota": "unknown", "capacity": "unknown"}
+                # A blocked task must explain its last durable, non-sensitive operation
+                # outcome.  This is especially important for preflight refusals: they
+                # prove that no provider mutation was attempted, and operators should
+                # repair the session rather than retrying a second prompt.
+                failure = db.execute(
+                    "SELECT error_class FROM operations WHERE assignment=? AND task_id=? "
+                    "AND generation=? AND error_class IS NOT NULL "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    (assignment_id, task["task_id"], task["generation"]),
+                ).fetchone()
+                error_class = failure["error_class"] if failure else None
+                if isinstance(error_class, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", error_class):
+                    dto["errorClass"] = error_class
                 usage = self._task_usage(db, task)
                 if usage is not None:
                     dto["usage"] = usage

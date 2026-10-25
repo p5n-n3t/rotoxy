@@ -82,6 +82,17 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(operation["input"]["instructions"], "Do bounded work for task-1")
         self.assertEqual(operation["input"]["sessionId"], "session-account-a")
 
+    def test_blocked_preflight_exposes_safe_failure_class_without_prompt_data(self):
+        self.registry.submit(assignment(), now=1)
+        operation = self.registry.claim_operation("node-1", now=2)
+        self.registry.record_result(operation["operationId"], {
+            "workerId": "node-1", "outcome": "rejected", "errorClass": "session_not_sendable",
+        }, now=3)
+        task_view = self.registry.get_assignment("job-1")["tasks"][0]
+        self.assertEqual(task_view["state"], "blocked")
+        self.assertEqual(task_view["errorClass"], "session_not_sendable")
+        self.assertNotIn("instructions", task_view)
+
     def test_dag_is_bounded_and_cycles_are_rejected(self):
         tasks = [task("task-1", depends=["task-2"]), task("task-2", depends=["task-1"])]
         with self.assertRaisesRegex(ValueError, "cycle"):

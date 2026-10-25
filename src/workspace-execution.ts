@@ -49,7 +49,7 @@ function workspaceId(kind: string, projectId: string, clientId: string, sourceId
   return "ws-" + createHash("sha256").update(`rotoxy:workspace:${kind}:v1\0${projectId}\0${clientId}\0${sourceId}`).digest("hex").slice(0, 48);
 }
 function safeProviderError(error: unknown): string {
-  const known = new Set(["ACP_RELAY_DIED", "QUOTA_EXHAUSTED", "RATE_LIMITED", "CREDENTIAL_EXPIRED", "WORKSPACE_INACCESSIBLE"]);
+  const known = new Set(["ACP_RELAY_DIED", "QUOTA_EXHAUSTED", "RATE_LIMITED", "CREDENTIAL_EXPIRED", "WORKSPACE_INACCESSIBLE", "session_not_sendable", "session_preflight_ambiguous", "account_unavailable_or_stopping"]);
   return error instanceof Error && known.has(error.message) ? error.message : "provider_operation_unavailable";
 }
 function remoteState(value: unknown): string {
@@ -164,7 +164,12 @@ export class WorkspaceExecutionService {
     const dispatch = await this.setState(caller, jobId, state);
     const statusObj = isObject(rawStatus) ? rawStatus : {};
     const allowedTasks = new Set(binding.submission.tasks.map(task => task.taskId));
-    const taskRows = Array.isArray(statusObj.tasks) ? statusObj.tasks.filter(isObject).slice(0, 100).map(task => ({ taskId: String(task.taskId ?? task.task_id ?? "").slice(0, 128), ...(typeof task.state === "string" ? { state: task.state.slice(0, 32) } : {}), ...(typeof task.error === "string" ? { error: safeProviderError(new Error(task.error)) } : {}) })).filter(task => safeId(task.taskId) && allowedTasks.has(task.taskId)) : [];
+    const taskRows = Array.isArray(statusObj.tasks) ? statusObj.tasks.filter(isObject).slice(0, 100).map(task => {
+      const rawError = task.error ?? task.errorClass ?? task.lastErrorClass;
+      return { taskId: String(task.taskId ?? task.task_id ?? "").slice(0, 128),
+        ...(typeof task.state === "string" ? { state: task.state.slice(0, 32) } : {}),
+        ...(typeof rawError === "string" ? { error: safeProviderError(new Error(rawError)) } : {}) };
+    }).filter(task => safeId(task.taskId) && allowedTasks.has(task.taskId)) : [];
     let results: { taskId: string; text: string; reportedModel?: string; assistantAt?: number }[] = [];
     let resultsUnavailable = false;
     let resultsTruncated = false;
