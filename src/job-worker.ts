@@ -99,6 +99,10 @@ function field(source: unknown, ...keys: string[]): unknown {
 function resultRecord(value: unknown): Record<string, unknown> {
   return object(field(value, "value")) ?? object(value) ?? {};
 }
+function taskRecord(value: unknown): Record<string, unknown> {
+  const root = resultRecord(value);
+  return object(field(root, "task")) ?? root;
+}
 function boundedLabel(value: unknown, max: number): string | undefined {
   return typeof value === "string" && value.length > 0 && value.length <= max && value.trim() === value
     ? value : undefined;
@@ -372,7 +376,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           mutationStarted = true;
           const created = await adapter.createTask(String(input.title), String(input.stackId));
           if (created.classification !== "accepted") { outcome = created.classification; errorClass = text(created.reason, 80) ?? "create_task_failed"; return await submit(op, outcome, {}, errorClass); }
-          const id = field(created.value, "id", "taskId", "providerTaskId");
+          const id = field(taskRecord(created.value), "ref", "taskRef", "id", "taskId", "providerTaskId");
           if (typeof id !== "string" || !ID.test(id)) { outcome = "ambiguous"; errorClass = "created_task_identity_unverified"; return await submit(op, outcome, {}, errorClass); }
           outcome = "accepted"; result = { providerTaskId: id }; return await submit(op, outcome, result);
         }
@@ -389,9 +393,9 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
         }
         if (op.kind === "verify_task_packet" && adapter.readTask) {
           const readback = await adapter.readTask(taskId!);
-          const row = resultRecord(readback);
+          const row = taskRecord(readback.value);
           outcome = readback.classification === "ambiguous" ? "ambiguous" : readback.classification === "accepted" &&
-            field(row, "id", "taskId") === taskId && field(row, "description") === instructions ? "accepted" : "rejected";
+            field(row, "ref", "taskRef", "id", "taskId") === taskId && field(row, "description") === instructions ? "accepted" : "rejected";
           errorClass = outcome === "accepted" ? undefined : "instruction_roundtrip_unverified";
           result = outcome === "accepted" ? { providerTaskId: taskId!, status: "instructions_verified" } : {};
           return await submit(op, outcome, result, errorClass);
@@ -400,8 +404,8 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
             (leaseDeadlines.get(op.operationId) ?? 0) - now() > adapterTimeoutMs + requestTimeoutMs &&
             await options.isAccountEligible(op.selectedAccountId)) {
           const readback = await adapter.readTask(taskId!);
-          const task = resultRecord(readback);
-          if (readback.classification !== "accepted" || field(task, "id", "taskId") !== taskId || field(task, "description") !== instructions) {
+          const task = taskRecord(readback.value);
+          if (readback.classification !== "accepted" || field(task, "ref", "taskRef", "id", "taskId") !== taskId || field(task, "description") !== instructions) {
             outcome = readback.classification === "ambiguous" ? "ambiguous" : "rejected";
             errorClass = "instruction_roundtrip_unverified";
             return await submit(op, outcome, {}, errorClass);
@@ -409,7 +413,9 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           mutationStarted = true;
           const launched = await adapter.launchTask(taskId!, String(input.provider));
           const launchedValue = resultRecord(launched.value);
-          const launchedSessionId = text(field(launchedValue, "sessionId", "agentSessionId"), 128);
+          const launchedSession = object(field(launchedValue, "session"));
+          const launchedSessionId = text(field(launchedValue, "sessionId", "agentSessionId") ??
+            field(launchedSession, "id", "sessionId", "agentSessionId"), 128);
           if (launched.classification === "accepted" && launchedSessionId && SESSION_ID.test(launchedSessionId)) {
             outcome = "accepted";
             result = { providerTaskId: taskId!, sessionId: launchedSessionId,

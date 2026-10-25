@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { LightSprintJobsAdapter } from "../dist/providers/lightsprint-jobs.js";
+import { LightSprintWorkspacePinnedJobsAdapter, workspaceBranchName } from "../dist/providers/lightsprint-workspace-pinned-jobs.js";
 
 const description = "Every path starts /api/workspaces/{workspaceId}/, written `…/` below\nworkspaceId = ws-a\nPOST …/tasks\nPOST …/agent-sessions\nGET …/agent-sessions";
 function harness({ permit, policy = { endpoints: [{ rules: [] }] }, workspace = "ws-a", lostLaunch = false, wrongTask = false } = {}) {
@@ -118,4 +119,17 @@ test("concurrent launch calls consume only one verified launch binding", async (
   ]);
   assert.equal(results.filter(r => r.classification === "accepted").length, 1);
   assert.equal(h.calls.filter(c => c.method === "POST").length, 1);
+});
+
+test("pinned worker adapter cannot substitute its verified workspace and derives a bounded branch label", async () => {
+  const h = harness({ permit: () => true });
+  const adapter = new LightSprintWorkspacePinnedJobsAdapter(h.adapter, "ws-a");
+  assert.equal(await adapter.createTask("Bound task", "stack-a").then(row => row.classification), "accepted");
+  assert.equal((await adapter.patchTaskInstructions("LW-1", "Reviewed instructions")).instructionsVerified, true);
+  const launched = await adapter.launchTask("LW-1", "codex");
+  assert.equal(launched.classification, "accepted");
+  assert.deepEqual(h.calls.at(-1), { method: "POST", path: "/api/workspaces/ws-a/agent-sessions", body: {
+    taskRef: "LW-1", branchName: workspaceBranchName("LW-1"), provider: "codex", autoMerge: false,
+  } });
+  assert.match(workspaceBranchName("LW-1"), /^rotoxy-[a-f0-9]{24}$/);
 });

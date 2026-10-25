@@ -306,6 +306,31 @@ test("fresh launch accepts a provider-reported session without inventing an exac
   assert.deepEqual(posted.result, { providerTaskId: "provider-task-1", sessionId: "_fresh-session", reportedModel: "claude-opus-5-5" });
 });
 
+test("fresh workspace launch accepts a validated nested provider session identity", async () => {
+  const fresh = { ...op("fresh-workspace-launch", "account-a"), kind: "launch_task", providerTaskId: "LW-1",
+    input: { workspaceId: "workspace-a", stackId: "stack-1", provider: "claude", instructions: "bounded task", providerTaskId: "LW-1" } };
+  let posted;
+  const bridge = { async request(_method, route, body) {
+    if (route.endsWith("/claim")) return fresh;
+    if (route.endsWith("/result")) { posted = body; return { state: body.outcome }; }
+    throw new Error("unexpected route");
+  } };
+  const worker = createJobWorker({
+    bridge, workerId: "worker-test", allowedModels: [], maxConcurrent: 1, allowFreshOperations: true,
+    isAccountEligible: () => true,
+    adapterFactory: () => { throw new Error("fallback must not be used"); },
+    operationAdapterFactory: () => adapter("account-a", {
+      readTask: async () => ok("account-a", { task: { ref: "LW-1", description: "bounded task" } }),
+      launchTask: async () => ({ ...ok("account-a", { session: { id: "_workspace-session" } }), reportedModel: "claude-opus-5-5" }),
+    }),
+  });
+  worker.start();
+  await until(() => posted !== undefined);
+  await worker.stop();
+  assert.equal(posted.outcome, "accepted");
+  assert.deepEqual(posted.result, { providerTaskId: "LW-1", sessionId: "_workspace-session", reportedModel: "claude-opus-5-5" });
+});
+
 test("fresh launch with no verifiable provider session is held as ambiguous and never retried", async () => {
   const fresh = { ...op("fresh-missing-session", "account-a"), kind: "launch_task", providerTaskId: "provider-task-1",
     input: { stackId: "stack-1", provider: "claude", instructions: "bounded task", providerTaskId: "provider-task-1" } };

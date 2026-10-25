@@ -20,11 +20,11 @@ def task(task_id="task-1", *, account="account-a", session_id=None, depends=None
     return value
 
 
-def fresh_task(task_id="fresh-1", *, account="account-a", stack="stack-a", provider="claude"):
+def fresh_task(task_id="fresh-1", *, account="account-a", workspace="workspace-a", stack="stack-a", provider="claude"):
     return {
         "taskId": task_id, "dependsOn": [], "scopeKeys": [f"path:src/{task_id}.txt"],
         "instructions": f"Do bounded work for {task_id}",
-        "execution": {"mode": "fresh", "accountId": account, "stackId": stack, "provider": provider},
+        "execution": {"mode": "fresh", "accountId": account, "workspaceId": workspace, "stackId": stack, "provider": provider},
         "output": {"kind": "text", "maxBytes": 1024, "format": "plain", "expectedMarker": "DONE"},
     }
 
@@ -95,12 +95,12 @@ class JobRegistryTests(unittest.TestCase):
         body = assignment(tasks=[fresh_task()], accounts=["account-a"])
         self.assertEqual(validate_assignment(body)["tasks"][0]["execution"]["mode"], "fresh")
         for invalid in (
-            {"mode": "fresh", "stackId": "stack-a", "provider": "claude"},
-            {"mode": "fresh", "accountId": "account-a", "provider": "claude"},
-            {"mode": "fresh", "accountId": "account-a", "stackId": "stack-a"},
-            {"mode": "fresh", "accountId": "account-b", "stackId": "stack-a", "provider": "claude"},
-            {"mode": "fresh", "accountId": "account-a", "stackId": "stack-a", "provider": "unknown"},
-            {"mode": "fresh", "accountId": "account-a", "stackId": "stack-a", "provider": "claude", "sessionId": "session-a"},
+            {"mode": "fresh", "workspaceId": "workspace-a", "stackId": "stack-a", "provider": "claude"},
+            {"mode": "fresh", "accountId": "account-a", "workspaceId": "workspace-a", "provider": "claude"},
+            {"mode": "fresh", "accountId": "account-a", "workspaceId": "workspace-a", "stackId": "stack-a"},
+            {"mode": "fresh", "accountId": "account-b", "workspaceId": "workspace-a", "stackId": "stack-a", "provider": "claude"},
+            {"mode": "fresh", "accountId": "account-a", "workspaceId": "workspace-a", "stackId": "stack-a", "provider": "unknown"},
+            {"mode": "fresh", "accountId": "account-a", "workspaceId": "workspace-a", "stackId": "stack-a", "provider": "claude", "sessionId": "session-a"},
         ):
             body = assignment(tasks=[fresh_task()], accounts=["account-a"])
             body["tasks"][0]["execution"] = invalid
@@ -118,6 +118,7 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual((create["kind"], create["selectedAccountId"], create["sessionId"]),
                          ("create_task", "account-a", None))
         self.assertEqual(create["input"]["title"], "ROTOXY — fresh-1")
+        self.assertEqual(create["input"]["workspaceId"], "workspace-a")
         self.assertEqual(create["input"]["stackId"], "stack-a")
         self.assertEqual(create["input"]["provider"], "claude")
         self.assertEqual(create["input"]["instructions"], "Do bounded work for fresh-1")

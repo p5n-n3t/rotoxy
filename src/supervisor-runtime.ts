@@ -9,6 +9,7 @@ import { PROVIDER_PROFILES } from "./provider-capabilities.js";
 import { createJobWorker, type JobBridge, type JobWorkerOptions, type PinnedJobsAdapter } from "./job-worker.js";
 import { JobInputError, validateJobToolArguments, type JobTaskInput, type JobToolName } from "./job-submit.js";
 import { LightSprintJobsAdapter } from "./providers/lightsprint-jobs.js";
+import { LightSprintWorkspacePinnedJobsAdapter, workspaceBranchName } from "./providers/lightsprint-workspace-pinned-jobs.js";
 import type { StateStore } from "./store.js";
 import type { UpstreamAccount } from "./types.js";
 import { redactString } from "./telemetry.js";
@@ -45,7 +46,7 @@ export function runtimeStateRoot(group: RuntimeStateGroup, home = homedir()): st
 }
 export function runtimeStatePath(group: RuntimeStateGroup, ...parts: string[]): string { return join(runtimeStateRoot(group), group, ...parts); }
 type RegisteredSession = { sessionId: string; accountId: string; model: string; workspaceId: string };
-type FreshProvisioningBinding = { accountId: string; stackId: string; provider: "claude" | "codex" | "auto" | "pi" };
+type FreshProvisioningBinding = { accountId: string; workspaceId: string; stackId: string; provider: "claude" | "codex" | "auto" | "pi" };
 type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[]; freshProvisioningBindings?: FreshProvisioningBinding[] };
 /** An operator-opted-in shared provider workspace, distinct from project folders. */
 type SharedWorkspacePolicy = { projectId: string; membership: "consented_oauth" | "authenticated_mcp" };
@@ -197,12 +198,12 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
       if (!Array.isArray(candidate.freshProvisioningBindings) || candidate.freshProvisioningBindings.length > 50) throw new Error("Invalid fresh-provisioning bindings");
       freshProvisioningBindings = candidate.freshProvisioningBindings.map((item: unknown): FreshProvisioningBinding => {
         if (!object(item)) throw new Error("Invalid fresh-provisioning binding");
-        assertKeys(item, ["accountId", "stackId", "provider"], "freshProvisioningBinding");
-        if (!safeAccountId(item.accountId) || !accountIds.includes(item.accountId) || typeof item.stackId !== "string" || !STACK_ID.test(item.stackId) ||
+        assertKeys(item, ["accountId", "workspaceId", "stackId", "provider"], "freshProvisioningBinding");
+        if (!safeAccountId(item.accountId) || !accountIds.includes(item.accountId) || !safeId(item.workspaceId) || typeof item.stackId !== "string" || !STACK_ID.test(item.stackId) ||
             typeof item.provider !== "string" || !(FRESH_PROVIDERS as readonly string[]).includes(item.provider)) {
-          throw new Error("Fresh-provisioning bindings must name a project account, safe stack ID, and supported provider");
+          throw new Error("Fresh-provisioning bindings must name a project account, verified workspace, safe stack ID, and supported provider");
         }
-        return { accountId: item.accountId, stackId: item.stackId, provider: item.provider as FreshProvisioningBinding["provider"] };
+        return { accountId: item.accountId, workspaceId: item.workspaceId, stackId: item.stackId, provider: item.provider as FreshProvisioningBinding["provider"] };
       });
       if (new Set(freshProvisioningBindings.map((item) => item.accountId)).size !== freshProvisioningBindings.length) throw new Error("Each account may have only one fresh-provisioning binding");
     }
@@ -398,39 +399,52 @@ export class SupervisorRuntime implements SupervisorBackend {
       // Bind its single chat mutation to one private runtime registration; never infer
       // authority from the operation's project/client fields or caller-supplied headers.
       const freshKinds = new Set(["create_task", "patch_task", "verify_task_packet", "launch_task"]);
-      if (freshKinds.has(op.kind)) {
+      const workspaceId = op.input.workspaceId;
+      const workspaceOperation = freshKinds.has(op.kind) || (op.kind === "observe_session" && typeof workspaceId === "string" &&
+        this.config.projects.flatMap((project) => project.freshProvisioningBindings ?? []).some((candidate) =>
+          candidate.accountId === op.selectedAccountId && candidate.workspaceId === workspaceId));
+      if (workspaceOperation && typeof workspaceId === "string") {
         const stackId = op.input.stackId;
         const provider = op.input.provider;
         const taskId = op.providerTaskId ?? op.input.providerTaskId;
+        const sessionId = op.sessionId ?? op.input.sessionId;
         const title = op.input.title;
         const instructions = op.input.instructions;
         const binding = this.config.projects.flatMap((project) => project.freshProvisioningBindings ?? [])
-          .filter((candidate) => candidate.accountId === op.selectedAccountId && candidate.stackId === stackId && candidate.provider === provider);
+          .filter((candidate) => candidate.accountId === op.selectedAccountId && candidate.workspaceId === workspaceId && candidate.stackId === stackId && candidate.provider === provider);
         if (!safeId(op.operationId) || !safeId(op.attemptId) || !Number.isSafeInteger(op.generation) || op.generation < 1 ||
-            !safeAccountId(op.selectedAccountId) || binding.length !== 1 || typeof stackId !== "string" || !STACK_ID.test(stackId) ||
+            !safeAccountId(op.selectedAccountId) || binding.length !== 1 || !safeId(workspaceId) || typeof stackId !== "string" || !STACK_ID.test(stackId) ||
             typeof provider !== "string" || !(FRESH_PROVIDERS as readonly string[]).includes(provider) ||
-            typeof instructions !== "string" || instructions.trim().length === 0 || instructions.length > 16_384 ||
+            (op.kind !== "observe_session" && (typeof instructions !== "string" || instructions.trim().length === 0 || instructions.length > 16_384)) ||
             (op.kind === "create_task" && (typeof title !== "string" || title.trim().length === 0 || title.length > 500)) ||
-            (op.kind !== "create_task" && (typeof taskId !== "string" || !safeId(taskId)))) return undefined;
+            (freshKinds.has(op.kind) && op.kind !== "create_task" && (typeof taskId !== "string" || !safeId(taskId))) ||
+            (op.kind === "observe_session" && (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)))) return undefined;
         if (this.options.adapterFactory) return this.options.adapterFactory(op.selectedAccountId, limits);
+        const base = `/api/workspaces/${workspaceId}`;
         const expected = op.kind === "create_task"
-          ? Object.freeze({ method: "POST" as const, path: "/api/tasks", body: Object.freeze({ title, scope: "stack", stackId }) })
+          ? [Object.freeze({ method: "POST", path: `${base}/tasks`, body: Object.freeze({ title, stackId }) })]
           : op.kind === "patch_task"
-            ? Object.freeze({ method: "PATCH" as const, path: `/api/tasks/${taskId}`, body: Object.freeze({ description: instructions }) })
+            ? [Object.freeze({ method: "PATCH", path: `${base}/tasks/${taskId}`, body: Object.freeze({ description: instructions }) }),
+              Object.freeze({ method: "GET", path: `${base}/tasks/${taskId}` })]
+            : op.kind === "verify_task_packet"
+              ? [Object.freeze({ method: "GET", path: `${base}/tasks/${taskId}` })]
             : op.kind === "launch_task"
-              ? Object.freeze({ method: "POST" as const, path: `/api/tasks/${taskId}/lightsprint-agents/${provider}`, body: Object.freeze({ autoMerge: false }) })
-              : undefined;
-        // verify_task_packet is a read-only operation and must never receive a mutation permit.
-        let unused = expected !== undefined;
-        const permit = (request: Readonly<{ method: "POST" | "PATCH"; path: string; body: Readonly<Record<string, unknown>> }>): boolean => {
-          if (!expected || !unused) return false;
-          unused = false;
-          return request.method === expected.method && request.path === expected.path &&
-            JSON.stringify(request.body) === JSON.stringify(expected.body);
+              ? [Object.freeze({ method: "GET", path: `${base}/tasks/${taskId}` }),
+                Object.freeze({ method: "GET", path: `${base}/tasks/${taskId}` }),
+                Object.freeze({ method: "POST", path: `${base}/agent-sessions`, body: Object.freeze({ taskRef: taskId, branchName: workspaceBranchName(taskId as string), provider, autoMerge: false }) })]
+              : [Object.freeze({ method: "GET", path: `${base}/agent-sessions/${sessionId}/status` }),
+                Object.freeze({ method: "GET", path: `${base}/agent-sessions/${sessionId}/transcript?limit=100&include=text&maxBytes=131072` })];
+        let cursor = 0;
+        const permit = (request: Readonly<{ accountId: string; workspaceId: string; method: string; path: string; body?: Readonly<Record<string, unknown>> }>): boolean => {
+          const candidate = expected[cursor];
+          if (!candidate || request.accountId !== op.selectedAccountId || request.workspaceId !== workspaceId ||
+              request.method !== candidate.method || request.path !== candidate.path ||
+              JSON.stringify(request.body) !== JSON.stringify("body" in candidate ? candidate.body : undefined)) return false;
+          cursor += 1;
+          return true;
         };
-        return new LightSprintJobsAdapter(this.options.store, op.selectedAccountId, {
-          timeoutMs: limits.timeoutMs, ...(expected ? { trustedFreshMutationPermit: permit } : {}),
-        });
+        const upstream = new LightSprintJobsAdapter(this.options.store, op.selectedAccountId, { timeoutMs: limits.timeoutMs, trustedWorkspacePermit: permit });
+        return new LightSprintWorkspacePinnedJobsAdapter(upstream, workspaceId);
       }
       if (op.kind !== "chat_session" || !safeId(op.operationId) || !safeId(op.attemptId) ||
           !Number.isSafeInteger(op.generation) || op.generation < 1 || !safeAccountId(op.selectedAccountId)) return undefined;
@@ -563,8 +577,8 @@ export class SupervisorRuntime implements SupervisorBackend {
           const binding = eligible.map((accountId) => bindings.find((candidate) => candidate.accountId === accountId && candidate.provider === task.execution.provider))
             .find((candidate): candidate is FreshProvisioningBinding => candidate !== undefined);
           if (!binding) throw new JobInputError(`fresh ${task.execution.provider} execution requires an explicitly bound eligible account and stack`);
-          if (freshBinding && (freshBinding.accountId !== binding.accountId || freshBinding.stackId !== binding.stackId || freshBinding.provider !== binding.provider)) {
-            throw new JobInputError("fresh tasks in one job must share one explicit account, stack, and provider binding");
+          if (freshBinding && (freshBinding.accountId !== binding.accountId || freshBinding.workspaceId !== binding.workspaceId || freshBinding.stackId !== binding.stackId || freshBinding.provider !== binding.provider)) {
+            throw new JobInputError("fresh tasks in one job must share one explicit account, workspace, stack, and provider binding");
           }
           freshBinding = binding;
         }
@@ -588,7 +602,7 @@ export class SupervisorRuntime implements SupervisorBackend {
           // both pinned to one configured account/stack/provider tuple.
           return { ...task, instructions: task.instructions + markerLine,
             execution: { mode: "fresh", accountId: freshBinding!.accountId,
-              stackId: freshBinding!.stackId, provider: freshBinding!.provider },
+              workspaceId: freshBinding!.workspaceId, stackId: freshBinding!.stackId, provider: freshBinding!.provider },
             stackId: freshBinding!.stackId, provider: freshBinding!.provider };
         }
         const session = sessions[nextSession++ % sessions.length]!;

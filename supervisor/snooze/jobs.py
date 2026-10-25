@@ -183,9 +183,9 @@ def validate_assignment(body):
             if execution["accountId"] not in accounts:
                 raise ValueError("Registered session account must be eligible")
         elif execution.get("mode") == "fresh":
-            if set(execution) != {"mode", "accountId", "stackId", "provider"}:
+            if set(execution) != {"mode", "accountId", "workspaceId", "stackId", "provider"}:
                 raise ValueError("Invalid fresh execution binding")
-            for field, maximum in (("accountId", 256), ("stackId", 256), ("provider", 64)):
+            for field, maximum in (("accountId", 256), ("workspaceId", 256), ("stackId", 256), ("provider", 64)):
                 _text(execution[field], f"execution.{field}", maximum)
             if execution["provider"] not in {"claude", "codex", "auto", "pi"}:
                 raise ValueError("Unsupported fresh execution provider")
@@ -751,7 +751,7 @@ class JobRegistry:
     def _fresh_operation_input(spec, provider_task_id, dispatch_at):
         execution = spec["execution"]
         return {"instructions": spec["instructions"], "providerTaskId": provider_task_id,
-                "stackId": execution["stackId"], "provider": execution["provider"],
+                "workspaceId": execution["workspaceId"], "stackId": execution["stackId"], "provider": execution["provider"],
                 "dispatchAt": dispatch_at}
 
     def _queue_one_ready(self, db, now):
@@ -874,6 +874,7 @@ class JobRegistry:
                     "instructions": spec["instructions"],
                     "expectedMarker": spec["output"]["expectedMarker"],
                     "dispatchAt": dispatch_at,
+                    "workspaceId": execution["workspaceId"],
                     "stackId": execution["stackId"],
                     "provider": execution["provider"],
                     **({"providerTaskId": spec["providerTaskId"]} if spec.get("providerTaskId") else {}),
@@ -1186,8 +1187,8 @@ class JobRegistry:
                         next_id = uuid.uuid4().hex
                         if next_kind == "create_task":
                             next_input = {"title": f"ROTOXY — {op['task_id']}", "instructions": spec["instructions"],
-                                          "stackId": spec["execution"]["stackId"], "provider": spec["execution"]["provider"],
-                                          "dispatchAt": task["dispatch_at"]}
+                                          "workspaceId": spec["execution"]["workspaceId"], "stackId": spec["execution"]["stackId"],
+                                          "provider": spec["execution"]["provider"], "dispatchAt": task["dispatch_at"]}
                         else:
                             next_input = self._fresh_operation_input(spec, spec.get("providerTaskId"), task["dispatch_at"])
                         db.execute("INSERT INTO operations(id,assignment,task_id,attempt_id,generation,account,kind,input,state,worker,lease_until,result,error_class,created_at,due_at) "
@@ -1248,7 +1249,7 @@ class JobRegistry:
         instruction_hash = payload.get("instructionsHash")
         if instruction_hash is None and isinstance(payload.get("instructions"), str):
             instruction_hash = hashlib.sha256(payload["instructions"].encode("utf-8")).hexdigest()
-        observation = {key: payload[key] for key in ("sessionId", "clientMessageId", "dispatchAt", "expectedMarker")}
+        observation = {key: payload[key] for key in ("sessionId", "clientMessageId", "dispatchAt", "expectedMarker", "workspaceId", "stackId", "provider") if key in payload}
         if isinstance(instruction_hash, str) and re.fullmatch(r"[0-9a-f]{64}", instruction_hash):
             observation["instructionsHash"] = instruction_hash
         db.execute("INSERT INTO operations(id,assignment,task_id,attempt_id,generation,account,kind,input,state,created_at,due_at) VALUES(?,?,?,?,?,?,'observe_session',?,'queued',?,?)",

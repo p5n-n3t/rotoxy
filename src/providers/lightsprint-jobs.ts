@@ -872,6 +872,14 @@ export class LightSprintJobsAdapter {
     return this.api("GET", `${route.route.path}?limit=100&include=text&maxBytes=131072`, undefined, true, false, workspaceId);
   }
 
+  sendWorkspaceMessage(workspaceId: string, sessionId: string, message: string, clientMessageId: string): Promise<JobResult> {
+    validateText(message, "message", MAX_MESSAGE_LENGTH);
+    if (typeof clientMessageId !== "string" || !CLIENT_MESSAGE_ID_RE.test(clientMessageId)) throw new TypeError("clientMessageId is invalid");
+    const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).sessionChatRoute(sessionId);
+    if (!route.ok) throw new TypeError("sessionId is invalid");
+    return this.api("POST", route.route.path, { message, clientMessageId }, false, false, workspaceId);
+  }
+
   cancelWorkspaceTurn(workspaceId: string, sessionId: string): Promise<JobResult> {
     const route = new LightSprintWorkspaceContract({ accountId: this.accountId, workspaceId }).sessionCancelRoute(sessionId);
     if (!route.ok) throw new TypeError("sessionId is invalid");

@@ -55,15 +55,15 @@ test("fresh provisioning config is strict, optional, and account-bound", async (
   t.after(() => rm(dir, { recursive: true, force: true }));
   const configPath = join(dir, "runtime.json");
   const withBindings = structuredClone(config);
-  withBindings.projects[0].freshProvisioningBindings = [{ accountId: "acct-a", stackId: "stack-a", provider: "claude" }];
+  withBindings.projects[0].freshProvisioningBindings = [{ accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" }];
   await writeFile(configPath, JSON.stringify(withBindings), { mode: 0o600 });
   const parsed = await readSupervisorRuntimeConfig(configPath);
   assert.deepEqual(parsed.projects[0].freshProvisioningBindings, withBindings.projects[0].freshProvisioningBindings);
 
   for (const invalid of [
     [{ accountId: "acct-c", stackId: "stack-a", provider: "claude" }],
-    [{ accountId: "acct-a", stackId: "stack-a", provider: "claude" }, { accountId: "acct-a", stackId: "stack-b", provider: "codex" }],
-    [{ accountId: "acct-a", stackId: "stack-a", provider: "claude", workspaceId: "unneeded" }],
+    [{ accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" }, { accountId: "acct-a", workspaceId: "workspace-b", stackId: "stack-b", provider: "codex" }],
+    [{ accountId: "acct-a", stackId: "stack-a", provider: "claude" }],
     [{ accountId: "acct-a", stackId: "../unsafe", provider: "claude" }],
   ]) {
     const invalidConfig = structuredClone(config);
@@ -99,13 +99,14 @@ test("fresh job submit requires an exact eligible binding before bridge submissi
   await unbound.close();
 
   const boundConfig = structuredClone(config);
-  boundConfig.projects[0].freshProvisioningBindings = [{ accountId: "acct-a", stackId: "stack-a", provider: "claude" }];
+  boundConfig.projects[0].freshProvisioningBindings = [{ accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" }];
   const bound = makeRuntime(boundConfig);
   const receipt = await bound.callTool("job_submit", freshSubmission, caller);
   assert.equal(receipt.state, "queued");
   assert.equal(bridgeCalls.length, 1);
   assert.deepEqual(bridgeCalls[0].body.eligibleAccountIds, ["acct-a"], "the job-wide account set pins fresh provisioning to its configured account");
   assert.equal(bridgeCalls[0].body.tasks[0].execution.mode, "fresh");
+  assert.equal(bridgeCalls[0].body.tasks[0].execution.workspaceId, "workspace-a");
   assert.equal(bridgeCalls[0].body.tasks[0].stackId, "stack-a");
   assert.equal(bridgeCalls[0].body.tasks[0].provider, "claude");
   assert.match(bridgeCalls[0].body.tasks[0].instructions, /DONE-task-one/);
