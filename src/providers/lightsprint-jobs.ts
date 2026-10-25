@@ -43,6 +43,13 @@ export interface LightSprintJobsOptions {
   timeoutMs?: number;
   /** Single-use authorization for one exact claimed chat POST when the global policy denies it. Never used by other adapter methods. */
   trustedChatMutationPermit?: (request: Readonly<{ method: "POST"; path: string; body: Readonly<{ message: string; clientMessageId: string }> }>) => boolean;
+  /**
+   * Single-use authorization for one internal fresh-provisioning mutation.
+   * It is deliberately narrower than the raw tool policy: only the task
+   * create, instruction patch, or documented launch request constructed from
+   * a durably claimed operation can present this permit.
+   */
+  trustedFreshMutationPermit?: (request: Readonly<{ method: "POST" | "PATCH"; path: string; body: Readonly<Record<string, unknown>> }>) => boolean;
   /** Explicit internal authorization. Catalog discovery alone never grants policy bypass. */
   trustedWorkspacePermit?: (request: Readonly<{ accountId: string; workspaceId: string; method: string; path: string; body?: Readonly<Record<string, unknown>> }>) => boolean;
 }
@@ -716,7 +723,7 @@ export class LightSprintJobsAdapter {
   }
 
   private async api<T = unknown>(method: string, path: string, body?: Record<string, unknown>, transcript = false,
-    trustedChatMutation = false, trustedWorkspaceId?: string): Promise<JobResult<T>> {
+    trustedChatMutation = false, trustedWorkspaceId?: string, trustedFreshMutation = false): Promise<JobResult<T>> {
     let raw: unknown;
     try {
       const state = await this.store.load();
@@ -728,15 +735,33 @@ export class LightSprintJobsAdapter {
       const accountBoundWorkspace = !allowed && policyResult.code === "endpoint-not-allowed" && trustedWorkspaceId !== undefined &&
         this.options.trustedWorkspacePermit?.(Object.freeze({ accountId: this.accountId, workspaceId: trustedWorkspaceId,
           method, path, ...(body === undefined ? {} : { body: Object.freeze({ ...body }) }) })) === true;
-      if ((!allowed && !accountBoundWorkspace) || trustedChatMutation && this.options.trustedChatMutationPermit) {
+      let trustedMutationGranted = false;
+      if (trustedChatMutation || trustedFreshMutation) {
         const keys = body && Object.keys(body).sort();
         const exactChat = trustedChatMutation && method === "POST" &&
           /^\/api\/agent-sessions\/[A-Za-z0-9_-][A-Za-z0-9_-]{0,127}\/chat$/.test(path) &&
           !!body && keys?.length === 2 && keys[0] === "clientMessageId" && keys[1] === "message" &&
           typeof body.message === "string" && typeof body.clientMessageId === "string";
-        const request = exactChat ? Object.freeze({ method: "POST" as const, path,
+        const chatRequest = exactChat ? Object.freeze({ method: "POST" as const, path,
           body: Object.freeze({ message: body.message as string, clientMessageId: body.clientMessageId as string }) }) : undefined;
-        if (!request || !this.options.trustedChatMutationPermit?.(request)) return rejected<T>(this.accountId, "policy_denied");
+        const exactFresh = trustedFreshMutation && (method === "POST" || method === "PATCH") && !!body &&
+          ((method === "POST" && path === "/api/tasks" && keys?.join(",") === "scope,stackId,title" &&
+            typeof body.title === "string" && body.scope === "stack" && typeof body.stackId === "string") ||
+           (method === "PATCH" && /^\/api\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(path) && keys?.length === 1 && keys[0] === "description" &&
+            typeof body.description === "string") ||
+           (method === "POST" && /^\/api\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/lightsprint-agents\/(?:claude|codex|auto|pi)$/.test(path) &&
+            keys?.length === 1 && keys[0] === "autoMerge" && body.autoMerge === false));
+        const freshRequest = exactFresh ? Object.freeze({ method: method as "POST" | "PATCH", path,
+          body: Object.freeze({ ...body }) }) : undefined;
+        trustedMutationGranted = chatRequest
+          ? this.options.trustedChatMutationPermit?.(chatRequest) === true
+          : freshRequest
+            ? this.options.trustedFreshMutationPermit?.(freshRequest) === true
+            : false;
+      }
+      if ((!allowed && !accountBoundWorkspace && !trustedMutationGranted) ||
+          ((trustedChatMutation || trustedFreshMutation) && !trustedMutationGranted)) {
+        return rejected<T>(this.accountId, "policy_denied");
       }
       const client = await this.client();
       raw = await client.request("tools/call", {
@@ -862,7 +887,8 @@ export class LightSprintJobsAdapter {
   createTask(title: string, stackId: string): Promise<JobResult> {
     validateText(title, "title", MAX_TITLE_LENGTH);
     validateId(stackId, "stackId");
-    return this.api("POST", "/api/tasks", { title, scope: "stack", stackId });
+    return this.api("POST", "/api/tasks", { title, scope: "stack", stackId }, false, false, undefined,
+      this.options.trustedFreshMutationPermit !== undefined);
   }
 
   readTask(taskId: string): Promise<JobResult> {
@@ -874,7 +900,8 @@ export class LightSprintJobsAdapter {
     validateId(taskId, "taskId");
     validateText(description, "description", MAX_INSTRUCTIONS_LENGTH);
     this.verifiedInstructions.delete(taskId);
-    const patch = await this.api("PATCH", `/api/tasks/${taskId}`, { description });
+    const patch = await this.api("PATCH", `/api/tasks/${taskId}`, { description }, false, false, undefined,
+      this.options.trustedFreshMutationPermit !== undefined);
     if (patch.classification === "rejected") return patch;
     // Even an ambiguous PATCH can only unlock launch after an independent, exact readback.
     const readback = await this.readTask(taskId);
@@ -901,7 +928,8 @@ export class LightSprintJobsAdapter {
       return rejected(this.accountId, "instructions_mismatch");
     }
     this.verifiedInstructions.delete(taskId);
-    const result = await this.api("POST", `/api/tasks/${taskId}/lightsprint-agents/${provider}`, { autoMerge: false });
+    const result = await this.api("POST", `/api/tasks/${taskId}/lightsprint-agents/${provider}`, { autoMerge: false }, false, false, undefined,
+      this.options.trustedFreshMutationPermit !== undefined);
     if (result.classification === "accepted") {
       const reportedModel = findField(result.value, ["model", "reportedModel"]);
       const reportedBranchName = findField(result.value, ["branchName"]);
@@ -930,7 +958,8 @@ export class LightSprintJobsAdapter {
     validateSessionId(sessionId, "sessionId");
     validateText(message, "message", MAX_MESSAGE_LENGTH);
     if (typeof clientMessageId !== "string" || !CLIENT_MESSAGE_ID_RE.test(clientMessageId)) throw new TypeError("clientMessageId is invalid");
-    return this.api("POST", `/api/agent-sessions/${sessionId}/chat`, { message, clientMessageId }, false, true);
+    return this.api("POST", `/api/agent-sessions/${sessionId}/chat`, { message, clientMessageId }, false,
+      this.options.trustedChatMutationPermit !== undefined);
   }
 
   cancelTurn(sessionId: string): Promise<JobResult> {

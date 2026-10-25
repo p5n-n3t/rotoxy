@@ -365,6 +365,29 @@ test("a single-use trusted permit authorizes only its exact claimed chat request
   assert.equal(calls, 1);
 });
 
+test("a single-use fresh permit cannot broaden a denied raw task-create policy", async () => {
+  const backing = store(); let calls = 0; let permits = 0; let unused = true;
+  const guarded = { ...backing, load: async () => ({ ...await backing.load(), config: { toolPolicy: { endpoints: [
+    { tool: "lightsprint_api", rules: [{ methods: ["GET"], path: "/api/tasks/{taskId}" }] },
+  ] } } }) };
+  const expected = Object.freeze({ method: "POST", path: "/api/tasks", body: Object.freeze({ title: "Approved task", scope: "stack", stackId: "stack_1" }) });
+  const adapter = new LightSprintJobsAdapter(guarded, ACCOUNT_ID, {
+    clientFactory: clientFactory(async () => { calls++; return ok({ id: TASK_ID }); }),
+    trustedFreshMutationPermit: (request) => {
+      permits++;
+      if (!unused || request.method !== expected.method || request.path !== expected.path || JSON.stringify(request.body) !== JSON.stringify(expected.body)) return false;
+      unused = false;
+      return true;
+    },
+  });
+  assert.equal((await adapter.createTask("Different task", "stack_1")).reason, "policy_denied");
+  assert.equal((await adapter.createTask("Approved task", "other_stack")).reason, "policy_denied");
+  assert.equal((await adapter.createTask("Approved task", "stack_1")).classification, "accepted");
+  assert.equal((await adapter.createTask("Approved task", "stack_1")).reason, "policy_denied");
+  assert.equal(permits, 4);
+  assert.equal(calls, 1);
+});
+
 test("documented item transcript anchors last assistant snapshot to newest user turn", async () => {
   const items = [
     {seq: 40, turnId: 'old-turn', type: 'assistant_snapshot', time: '2026-10-15T10:00:00Z', payload: {content: 'stale'}},

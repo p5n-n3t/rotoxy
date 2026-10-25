@@ -22,8 +22,12 @@ export interface PinnedJobsAdapter {
   patchTaskInstructions?(taskId: string, description: string): Promise<JobResult>;
   readTask?(taskId: string): Promise<JobResult>;
   listTaskAgents?(taskId: string): Promise<JobResult>;
-  /** Must request the exact model; the stock LightSprint API has no such selector. */
-  launchTaskWithModel?(taskId: string, provider: string, model: string): Promise<JobResult>;
+  /**
+   * Starts a verified task through the provider's documented launch API.  The
+   * stock LightSprint API does not expose an exact model or effort selector;
+   * any returned model is therefore recorded as reported metadata only.
+   */
+  launchTask?(taskId: string, provider: string): Promise<JobResult>;
 }
 
 export interface JobBridge {
@@ -60,7 +64,7 @@ export interface JobWorkerOptions {
   requestTimeoutMs?: number;
   adapterTimeoutMs?: number;
   now?: () => number;
-  /** Fresh task operations are opt-in. Launch additionally requires an exact-model adapter method. */
+  /** Fresh task operations are opt-in and require a claimed-operation adapter. */
   allowFreshOperations?: boolean;
   onDiagnostic?: (event: { code: string; operationId?: string; accountId?: string }) => void;
 }
@@ -196,7 +200,9 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
       !Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs >= leaseSeconds * 1_000 ||
       !Number.isInteger(adapterTimeoutMs) || adapterTimeoutMs < 1 || adapterTimeoutMs > 120_000 ||
       adapterTimeoutMs + requestTimeoutMs >= leaseSeconds * 1_000 ||
-      (!Array.isArray(options.allowedModels) || options.allowedModels.length < 1 || options.allowedModels.length > 100 ||
+      // Fresh task provisioning records only provider-reported models and may
+      // legitimately run before any existing session has been registered.
+      (!Array.isArray(options.allowedModels) || options.allowedModels.length > 100 ||
        options.allowedModels.some(model => typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/.test(model)) ||
        new Set(options.allowedModels).size !== options.allowedModels.length)) throw new TypeError("Invalid job worker configuration");
 
@@ -255,7 +261,8 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           !message || !clientMessageId || !MESSAGE_ID.test(clientMessageId))) {
         errorClass = "invalid_operation_input"; return await submit(op, outcome, result, errorClass);
       }
-      const adapter = op.kind === "chat_session" && options.operationAdapterFactory
+      const freshOperation = ["create_task", "patch_task", "verify_task_packet", "launch_task"].includes(op.kind);
+      const adapter = (op.kind === "chat_session" || freshOperation) && options.operationAdapterFactory
         ? await options.operationAdapterFactory(op, { timeoutMs: adapterTimeoutMs })
         : await options.adapterFactory(op.selectedAccountId, { timeoutMs: adapterTimeoutMs });
       if (!adapter) { errorClass = "operation_not_trusted"; return await submit(op, outcome, result, errorClass); }
@@ -354,7 +361,8 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
         if (!await options.isAccountEligible(op.selectedAccountId)) { errorClass = "account_unavailable"; return await submit(op, "rejected", {}, errorClass); }
         const instructions = text(input.instructions, 16_384);
         const taskId = text(op.providerTaskId ?? input.providerTaskId, 128);
-        if (!instructions || !text(input.stackId, 128) && op.kind === "create_task" || !taskId && op.kind !== "create_task") {
+        if (!instructions || (op.kind === "create_task" && !text(input.stackId, 128)) ||
+            (op.kind !== "create_task" && !taskId)) {
           errorClass = "fresh_operation_inputs_incomplete"; return await submit(op, "rejected", {}, errorClass);
         }
         if (op.kind === "create_task" && adapter.createTask && text(input.title, 500)) {
@@ -388,7 +396,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           result = outcome === "accepted" ? { providerTaskId: taskId!, status: "instructions_verified" } : {};
           return await submit(op, outcome, result, errorClass);
         }
-        if (op.kind === "launch_task" && options.allowedModels.includes(MODEL) && adapter.launchTaskWithModel && adapter.readTask && text(input.provider, 32) &&
+        if (op.kind === "launch_task" && adapter.launchTask && adapter.readTask && text(input.provider, 32) &&
             (leaseDeadlines.get(op.operationId) ?? 0) - now() > adapterTimeoutMs + requestTimeoutMs &&
             await options.isAccountEligible(op.selectedAccountId)) {
           const readback = await adapter.readTask(taskId!);
@@ -399,9 +407,17 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
             return await submit(op, outcome, {}, errorClass);
           }
           mutationStarted = true;
-          const launched = await adapter.launchTaskWithModel(taskId!, String(input.provider), MODEL);
-          if (launched.classification === "accepted" && launched.reportedModel === MODEL) { outcome = "accepted"; result = { providerTaskId: taskId!, reportedModel: MODEL }; }
-          else { outcome = launched.classification === "ambiguous" ? "ambiguous" : "rejected"; errorClass = "exact_model_unverified"; }
+          const launched = await adapter.launchTask(taskId!, String(input.provider));
+          const launchedValue = resultRecord(launched.value);
+          const launchedSessionId = text(field(launchedValue, "sessionId", "agentSessionId"), 128);
+          if (launched.classification === "accepted" && launchedSessionId && SESSION_ID.test(launchedSessionId)) {
+            outcome = "accepted";
+            result = { providerTaskId: taskId!, sessionId: launchedSessionId,
+              ...(text(launched.reportedModel, 128) ? { reportedModel: text(launched.reportedModel, 128)! } : {}) };
+          } else {
+            outcome = launched.classification === "ambiguous" || launched.classification === "accepted" ? "ambiguous" : "rejected";
+            errorClass = launched.classification === "accepted" ? "launch_session_identity_unverified" : text(launched.reason, 80) ?? "launch_task_failed";
+          }
           return await submit(op, outcome, result, errorClass);
         }
         errorClass = "operation_not_supported_by_adapter";

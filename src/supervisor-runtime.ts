@@ -397,6 +397,41 @@ export class SupervisorRuntime implements SupervisorBackend {
       // This factory is reached only after the bridge has durably claimed the operation.
       // Bind its single chat mutation to one private runtime registration; never infer
       // authority from the operation's project/client fields or caller-supplied headers.
+      const freshKinds = new Set(["create_task", "patch_task", "verify_task_packet", "launch_task"]);
+      if (freshKinds.has(op.kind)) {
+        const stackId = op.input.stackId;
+        const provider = op.input.provider;
+        const taskId = op.providerTaskId ?? op.input.providerTaskId;
+        const title = op.input.title;
+        const instructions = op.input.instructions;
+        const binding = this.config.projects.flatMap((project) => project.freshProvisioningBindings ?? [])
+          .filter((candidate) => candidate.accountId === op.selectedAccountId && candidate.stackId === stackId && candidate.provider === provider);
+        if (!safeId(op.operationId) || !safeId(op.attemptId) || !Number.isSafeInteger(op.generation) || op.generation < 1 ||
+            !safeAccountId(op.selectedAccountId) || binding.length !== 1 || typeof stackId !== "string" || !STACK_ID.test(stackId) ||
+            typeof provider !== "string" || !(FRESH_PROVIDERS as readonly string[]).includes(provider) ||
+            typeof instructions !== "string" || instructions.trim().length === 0 || instructions.length > 16_384 ||
+            (op.kind === "create_task" && (typeof title !== "string" || title.trim().length === 0 || title.length > 500)) ||
+            (op.kind !== "create_task" && (typeof taskId !== "string" || !safeId(taskId)))) return undefined;
+        if (this.options.adapterFactory) return this.options.adapterFactory(op.selectedAccountId, limits);
+        const expected = op.kind === "create_task"
+          ? Object.freeze({ method: "POST" as const, path: "/api/tasks", body: Object.freeze({ title, scope: "stack", stackId }) })
+          : op.kind === "patch_task"
+            ? Object.freeze({ method: "PATCH" as const, path: `/api/tasks/${taskId}`, body: Object.freeze({ description: instructions }) })
+            : op.kind === "launch_task"
+              ? Object.freeze({ method: "POST" as const, path: `/api/tasks/${taskId}/lightsprint-agents/${provider}`, body: Object.freeze({ autoMerge: false }) })
+              : undefined;
+        // verify_task_packet is a read-only operation and must never receive a mutation permit.
+        let unused = expected !== undefined;
+        const permit = (request: Readonly<{ method: "POST" | "PATCH"; path: string; body: Readonly<Record<string, unknown>> }>): boolean => {
+          if (!expected || !unused) return false;
+          unused = false;
+          return request.method === expected.method && request.path === expected.path &&
+            JSON.stringify(request.body) === JSON.stringify(expected.body);
+        };
+        return new LightSprintJobsAdapter(this.options.store, op.selectedAccountId, {
+          timeoutMs: limits.timeoutMs, ...(expected ? { trustedFreshMutationPermit: permit } : {}),
+        });
+      }
       if (op.kind !== "chat_session" || !safeId(op.operationId) || !safeId(op.attemptId) ||
           !Number.isSafeInteger(op.generation) || op.generation < 1 || !safeAccountId(op.selectedAccountId)) return undefined;
       const sessionId = op.sessionId ?? op.input.sessionId;
@@ -442,9 +477,10 @@ export class SupervisorRuntime implements SupervisorBackend {
       },
     };
       const registeredModels = [...new Set(this.config.projects.flatMap(project => project.registeredSessions.map(session => session.model)))];
+      const freshBindingsConfigured = this.config.projects.some((project) => (project.freshProvisioningBindings?.length ?? 0) > 0);
       // Fleet discovery and collaboration work before the first worker is bound.
       // Empty fleets have no dispatch worker; do not invent an allowed model.
-      if (registeredModels.length) {
+      if (registeredModels.length || freshBindingsConfigured) {
       this.worker = createJobWorker({
         bridge: workerBridge,
         beforeClaim: () => this.syncDispatchPolicy(),
@@ -465,8 +501,10 @@ export class SupervisorRuntime implements SupervisorBackend {
           return signal.enabled && signal.authorized;
         },
         workerId: `token2oauth-${createHash("sha256").update(this.options.configDir).digest("hex").slice(0, 12)}`,
-        allowedModels: registeredModels, maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1, new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size)),
-        allowFreshOperations: false, ...this.options.workerOptions,
+        allowedModels: registeredModels, maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1,
+          new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size,
+          this.config.projects.flatMap((p) => p.freshProvisioningBindings ?? []).length)),
+        allowFreshOperations: freshBindingsConfigured, ...this.options.workerOptions,
       });
       this.worker.start();
       }
@@ -514,7 +552,8 @@ export class SupervisorRuntime implements SupervisorBackend {
       });
       if (!eligible.length) throw new JobInputError("no requested account is currently enabled, authorized, healthy, and quota-eligible");
       const requestedTasks = args.tasks as JobTaskInput[];
-      const freshTasks = requestedTasks.filter((task) => task.execution.mode === "fresh");
+      const freshTasks = requestedTasks.filter((task): task is JobTaskInput & { execution: Extract<JobTaskInput["execution"], { mode: "fresh" }> } =>
+        task.execution.mode === "fresh");
       let dispatchEligible = eligible;
       let freshBinding: FreshProvisioningBinding | undefined;
       if (freshTasks.length) {
@@ -545,10 +584,11 @@ export class SupervisorRuntime implements SupervisorBackend {
         const markerLine = `\n\nInclude this exact completion marker on its own line: ${output.expectedMarker}`;
         if (Buffer.byteLength(task.instructions + markerLine) > 16_384) throw new JobInputError("instructions plus completion marker exceed 16 KiB");
         if (task.execution.mode === "fresh") {
-          // The job's eligible account list is pinned to this exact private
-          // account/stack/provider binding; fresh worker execution stays gated
-          // separately in job-worker until its full lifecycle is implemented.
+          // The job's eligible account list and its private execution binding are
+          // both pinned to one configured account/stack/provider tuple.
           return { ...task, instructions: task.instructions + markerLine,
+            execution: { mode: "fresh", accountId: freshBinding!.accountId,
+              stackId: freshBinding!.stackId, provider: freshBinding!.provider },
             stackId: freshBinding!.stackId, provider: freshBinding!.provider };
         }
         const session = sessions[nextSession++ % sessions.length]!;

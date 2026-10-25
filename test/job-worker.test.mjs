@@ -288,6 +288,42 @@ test("fresh create_task remains disabled unless explicitly enabled", async () =>
   assert.equal(posted.errorClass, "fresh_operations_disabled");
 });
 
+test("fresh launch accepts a provider-reported session without inventing an exact model pin", async () => {
+  const fresh = { ...op("fresh-launch", "account-a"), kind: "launch_task", providerTaskId: "provider-task-1",
+    input: { stackId: "stack-1", provider: "claude", instructions: "bounded task", providerTaskId: "provider-task-1" } };
+  let posted; let launches = 0;
+  const bridge = { async request(_method, route, body) {
+    if (route.endsWith("/claim")) return fresh;
+    posted = body; return {};
+  } };
+  const worker = createJobWorker({ bridge, adapterFactory: (id) => adapter(id, {
+    readTask: async () => ok(id, { id: "provider-task-1", description: "bounded task" }),
+    launchTask: async () => { launches++; return { ...ok(id, { sessionId: "_fresh-session" }), reportedModel: "claude-opus-5-5" }; },
+  }), isAccountEligible: () => true, workerId: "worker-test", allowedModels: [], allowFreshOperations: true, maxConcurrent: 1 });
+  worker.start(); await until(() => posted); await worker.stop();
+  assert.equal(launches, 1);
+  assert.equal(posted.outcome, "accepted");
+  assert.deepEqual(posted.result, { providerTaskId: "provider-task-1", sessionId: "_fresh-session", reportedModel: "claude-opus-5-5" });
+});
+
+test("fresh launch with no verifiable provider session is held as ambiguous and never retried", async () => {
+  const fresh = { ...op("fresh-missing-session", "account-a"), kind: "launch_task", providerTaskId: "provider-task-1",
+    input: { stackId: "stack-1", provider: "claude", instructions: "bounded task", providerTaskId: "provider-task-1" } };
+  let posted; let launches = 0;
+  const bridge = { async request(_method, route, body) {
+    if (route.endsWith("/claim")) return launches ? undefined : fresh;
+    posted = body; return {};
+  } };
+  const worker = createJobWorker({ bridge, adapterFactory: (id) => adapter(id, {
+    readTask: async () => ok(id, { id: "provider-task-1", description: "bounded task" }),
+    launchTask: async () => { launches++; return ok(id, { accepted: true }); },
+  }), isAccountEligible: () => true, workerId: "worker-test", allowedModels: [], allowFreshOperations: true, maxConcurrent: 1 });
+  worker.start(); await until(() => posted); await worker.tick(); await worker.stop();
+  assert.equal(launches, 1);
+  assert.equal(posted.outcome, "ambiguous");
+  assert.equal(posted.errorClass, "launch_session_identity_unverified");
+});
+
 test("current account ineligibility prevents chat send", async () => {
   let checks = 0; let sends = 0; let posted;
   const bridge = { async request(_method, route, body) {
