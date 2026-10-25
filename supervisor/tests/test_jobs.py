@@ -121,6 +121,9 @@ class JobRegistryTests(unittest.TestCase):
                          ("account-a", "workspace-a", "stack-a"))
         self.assertEqual((second["selectedAccountId"], second["input"]["workspaceId"], second["input"]["stackId"]),
                          ("account-b", "workspace-b", "stack-b"))
+        snapshot = self.registry.get_assignment("job-1")
+        self.assertEqual([(row["requestedProvider"], row["workspaceId"], row["modelRequested"]) for row in snapshot["tasks"]],
+                         [("claude", "workspace-a", "not_reported"), ("claude", "workspace-b", "not_reported")])
 
     def test_fresh_lifecycle_pins_account_and_creates_session_only_after_launch(self):
         # A fresh provider task must not depend on a pre-registered session.

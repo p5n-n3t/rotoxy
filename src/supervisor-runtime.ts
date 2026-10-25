@@ -899,8 +899,9 @@ export class SupervisorRuntime implements SupervisorBackend {
         const usage = usageProjection(task.usage);
         const generation = Number.isInteger(task.generation) && Number(task.generation) >= 0 ? Number(task.generation) : undefined;
         tasks.push({ id: `${assignmentId}:${taskId}`, label: typeof task.summary === "string" ? redactString(task.summary,160) : "Task summary not provided", status: typeof task.state === "string" ? task.state : "unknown",
-          ...(session ? { workspace: session.workspaceId, worker: session.sessionId } : {}),
+          ...(session ? { workspace: session.workspaceId, worker: session.sessionId } : typeof task.workspaceId === "string" ? { workspace: redactString(task.workspaceId, 128) } : {}),
           ...(typeof task.selectedAccountId === "string" ? { accountId: task.selectedAccountId } : {}),
+          ...(typeof task.requestedProvider === "string" ? { requestedProvider: redactString(task.requestedProvider, 64) } : {}),
           ...(typeof task.modelReported === "string" ? { reportedModel: redactString(task.modelReported, 64) } : {}),
           ...(typeof task.errorClass === "string" && /^[A-Za-z0-9_.-]{1,128}$/.test(task.errorClass) ? { errorClass: task.errorClass } : {}),
           ...(generation !== undefined ? { generation } : {}), ...(usage ? { usage } : {}) });

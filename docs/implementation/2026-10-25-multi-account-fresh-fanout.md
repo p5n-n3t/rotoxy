@@ -43,3 +43,10 @@ This permits an account to retain independently verified Claude and Codex launch
 paths where the upstream supports them. It does not assume that the two paths
 are equivalent, and it does not activate an additional path without its own
 read-only verification.
+
+## Attribution before model reporting
+
+Fresh task records now retain their requested provider category and workspace
+identifier. The supervisor displays those routing facts before a provider
+reports the actual model. It does not substitute a provider category for a
+model name.

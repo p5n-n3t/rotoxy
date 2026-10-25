@@ -583,13 +583,21 @@ class JobRegistry:
             tasks = []
             for task in db.execute("SELECT * FROM job_tasks WHERE assignment=? ORDER BY rowid", (assignment_id,)):
                 spec = json.loads(task["body"])
+                execution = spec["execution"]
                 dto = {"taskId": task["task_id"], "state": task["state"], "dependsOn": spec["dependsOn"],
                               "priority": spec.get("priority", 0),
                               "attempt": task["attempt_id"], "generation": task["generation"],
                               "selectedAccountId": task["selected_account"], "providerTaskId": task["provider_task_id"],
                               "sessionId": task["session_id"], "dispatchAt": task["dispatch_at"], "releasedAt": task["released_at"],
-                              "modelRequested": "unknown/unsupported", "modelReported": task["reported_model"],
+                              "modelRequested": "not_reported", "modelReported": task["reported_model"],
                               "providerStatus": task["provider_status"], "quota": "unknown", "capacity": "unknown"}
+                # A provider category is a real dispatch attribute, unlike an
+                # exact model pin which the documented LightSprint launch API
+                # does not expose. Surface it before the provider reports the
+                # actual model, and preserve its task workspace for attribution.
+                if execution.get("mode") == "fresh":
+                    dto["requestedProvider"] = execution["provider"]
+                    dto["workspaceId"] = execution["workspaceId"]
                 # A blocked task must explain its last durable, non-sensitive operation
                 # outcome.  This is especially important for preflight refusals: they
                 # prove that no provider mutation was attempted, and operators should
