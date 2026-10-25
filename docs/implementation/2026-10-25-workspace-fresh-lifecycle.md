@@ -27,6 +27,13 @@ the known request sequence for that operation and account/workspace pair.
 An explicit policy denial still wins. The current path has no legacy root-route
 fallback.
 
+The subsequent owner-only LightSprint bindings page verifies the selected
+account's documented workspace contract and its read-only stack catalog before
+persisting a fresh binding. It never creates a task or session during that
+verification. A catalog match establishes only that the selected account,
+workspace, and stack currently agree; it does not establish a worker-slot
+count, exact model/effort pin, entitlement, or a completed execution.
+
 ## Safety boundary
 
 A launch response without a usable session ID becomes an ambiguous operation;
@@ -48,10 +55,11 @@ credential, paid task, or account quota was touched.
 
 ## Release status and next action
 
-The local main branch contains `51dc5d6`. The installed gateway remains on
-the earlier immutable release and is not evidence that this source change is
-active. GitHub HTTPS reset twice while pushing; the remote ref was not
-verifiable at this checkpoint.
+The local main branch contains the workspace lifecycle correction. The
+installed gateway remains on the earlier immutable release and is not evidence
+that this source change is active. The remote `main` ref was later confirmed
+at `1d4c1d208ea8eaafd448c3c0da28fbf993945f8a`; source verification and
+deployment verification remain separate.
 
 Before enabling live fresh dispatch, configure each desired account with a
 verified workspace ID and stack ID, then conduct one controlled launch whose
