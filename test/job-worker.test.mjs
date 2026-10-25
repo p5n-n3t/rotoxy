@@ -67,8 +67,13 @@ test("dispatches pinned accounts concurrently without exceeding configured capac
     } }),
   });
   worker.start();
-  await until(() => resultBodies.length === 3);
-  await worker.stop();
+  try {
+    // CI and a busy self-hosted gateway can briefly delay the polling loop;
+    // always stop the worker even when the diagnostic assertion fails.
+    await until(() => resultBodies.length === 3, 5_000);
+  } finally {
+    await worker.stop();
+  }
   assert.equal(peak, 2);
   assert.deepEqual(sent.map((v) => v.accountId).sort(), ["account-a", "account-b", "account-c"]);
   assert.equal(resultBodies.every((body) => body.outcome === "accepted"), true);

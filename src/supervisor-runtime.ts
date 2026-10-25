@@ -569,23 +569,28 @@ export class SupervisorRuntime implements SupervisorBackend {
       const freshTasks = requestedTasks.filter((task): task is JobTaskInput & { execution: Extract<JobTaskInput["execution"], { mode: "fresh" }> } =>
         task.execution.mode === "fresh");
       let dispatchEligible = eligible;
-      let freshBinding: FreshProvisioningBinding | undefined;
+      // Fresh work is account-pinned per task.  This lets a single durable job
+      // fan out across verified account/workspace/stack tuples while preserving
+      // ownership at the scheduler and provider boundary.  We deliberately do
+      // not infer a model, provider slot limit, or quota from this binding.
+      const freshBindingsByTask = new Map<string, FreshProvisioningBinding>();
       if (freshTasks.length) {
         const bindings = project.freshProvisioningBindings ?? [];
+        const cursorByProvider = new Map<FreshProvisioningBinding["provider"], number>();
         for (const task of freshTasks) {
-          if (task.execution.mode !== "fresh") continue;
-          const binding = eligible.map((accountId) => bindings.find((candidate) => candidate.accountId === accountId && candidate.provider === task.execution.provider))
-            .find((candidate): candidate is FreshProvisioningBinding => candidate !== undefined);
-          if (!binding) throw new JobInputError(`fresh ${task.execution.provider} execution requires an explicitly bound eligible account and stack`);
-          if (freshBinding && (freshBinding.accountId !== binding.accountId || freshBinding.workspaceId !== binding.workspaceId || freshBinding.stackId !== binding.stackId || freshBinding.provider !== binding.provider)) {
-            throw new JobInputError("fresh tasks in one job must share one explicit account, workspace, stack, and provider binding");
-          }
-          freshBinding = binding;
+          const candidates = bindings.filter((candidate) =>
+            eligible.includes(candidate.accountId) && candidate.provider === task.execution.provider);
+          if (!candidates.length) throw new JobInputError(`fresh ${task.execution.provider} execution requires an explicitly bound eligible account and stack`);
+          const cursor = cursorByProvider.get(task.execution.provider) ?? 0;
+          const binding = candidates[cursor % candidates.length]!;
+          cursorByProvider.set(task.execution.provider, cursor + 1);
+          freshBindingsByTask.set(task.taskId, binding);
         }
-        // The bridge assigns one account from the job-wide eligible set. Pin a
-        // fresh launch to its configured account so it cannot inherit another
-        // account's stack/provider tuple from a per-task projection.
-        dispatchEligible = [freshBinding!.accountId];
+        // Keep every eligible account in the assignment.  Each fresh task is
+        // individually pinned below; existing-session tasks retain their own
+        // session affinity.  The bridge enforces that a worker can only claim
+        // the account written into that task's execution binding.
+        dispatchEligible = eligible;
       }
       const sessions = project.registeredSessions.filter((session) => dispatchEligible.includes(session.accountId));
       if (requestedTasks.some((task) => task.execution.mode === "existing-session") && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
@@ -598,12 +603,12 @@ export class SupervisorRuntime implements SupervisorBackend {
         const markerLine = `\n\nInclude this exact completion marker on its own line: ${output.expectedMarker}`;
         if (Buffer.byteLength(task.instructions + markerLine) > 16_384) throw new JobInputError("instructions plus completion marker exceed 16 KiB");
         if (task.execution.mode === "fresh") {
-          // The job's eligible account list and its private execution binding are
-          // both pinned to one configured account/stack/provider tuple.
+          const binding = freshBindingsByTask.get(task.taskId);
+          if (!binding) throw new JobInputError(`fresh ${task.execution.provider} task is missing its verified binding`);
           return { ...task, instructions: task.instructions + markerLine,
-            execution: { mode: "fresh", accountId: freshBinding!.accountId,
-              workspaceId: freshBinding!.workspaceId, stackId: freshBinding!.stackId, provider: freshBinding!.provider },
-            stackId: freshBinding!.stackId, provider: freshBinding!.provider };
+            execution: { mode: "fresh", accountId: binding.accountId,
+              workspaceId: binding.workspaceId, stackId: binding.stackId, provider: binding.provider },
+            stackId: binding.stackId, provider: binding.provider };
         }
         const session = sessions[nextSession++ % sessions.length]!;
         return { ...task, instructions: task.instructions + markerLine,

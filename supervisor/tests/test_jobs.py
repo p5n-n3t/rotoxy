@@ -107,6 +107,21 @@ class JobRegistryTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 validate_assignment(body)
 
+    def test_multi_account_fresh_tasks_preserve_each_task_account_and_workspace_binding(self):
+        self.register("account-a", sessions=[])
+        self.register("account-b", sessions=[])
+        tasks = [
+            fresh_task("fresh-a", account="account-a", workspace="workspace-a", stack="stack-a"),
+            fresh_task("fresh-b", account="account-b", workspace="workspace-b", stack="stack-b"),
+        ]
+        self.registry.submit(assignment(tasks=tasks, accounts=["account-a", "account-b"], max_workers=2), now=1)
+        first = self.registry.claim_operation("worker-a", now=2)
+        second = self.registry.claim_operation("worker-b", now=3)
+        self.assertEqual((first["selectedAccountId"], first["input"]["workspaceId"], first["input"]["stackId"]),
+                         ("account-a", "workspace-a", "stack-a"))
+        self.assertEqual((second["selectedAccountId"], second["input"]["workspaceId"], second["input"]["stackId"]),
+                         ("account-b", "workspace-b", "stack-b"))
+
     def test_fresh_lifecycle_pins_account_and_creates_session_only_after_launch(self):
         # A fresh provider task must not depend on a pre-registered session.
         self.register("account-a", sessions=[])

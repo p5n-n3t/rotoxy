@@ -114,13 +114,46 @@ test("fresh job submit requires an exact eligible binding before bridge submissi
   const receipt = await bound.callTool("job_submit", freshSubmission, caller);
   assert.equal(receipt.state, "queued");
   assert.equal(bridgeCalls.length, 1);
-  assert.deepEqual(bridgeCalls[0].body.eligibleAccountIds, ["acct-a"], "the job-wide account set pins fresh provisioning to its configured account");
+  assert.deepEqual(bridgeCalls[0].body.eligibleAccountIds, ["acct-a", "acct-b"], "the task execution binding pins fresh provisioning while the job keeps its eligible fleet");
   assert.equal(bridgeCalls[0].body.tasks[0].execution.mode, "fresh");
   assert.equal(bridgeCalls[0].body.tasks[0].execution.workspaceId, "workspace-a");
   assert.equal(bridgeCalls[0].body.tasks[0].stackId, "stack-a");
   assert.equal(bridgeCalls[0].body.tasks[0].provider, "claude");
   assert.match(bridgeCalls[0].body.tasks[0].instructions, /DONE-task-one/);
   await bound.close();
+});
+
+test("fresh job submit round-robins verified bindings while pinning every task to its own account", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-fresh-fanout-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bridgeCalls = [];
+  const fanoutConfig = structuredClone(config);
+  fanoutConfig.projects[0].freshProvisioningBindings = [
+    { accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" },
+    { accountId: "acct-b", workspaceId: "workspace-b", stackId: "stack-b", provider: "claude" },
+  ];
+  const runtime = new SupervisorRuntime(fanoutConfig, { configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"),
+    supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite"),
+    oracleConfigPath: join(dir, "oracle.json"), oracleDbPath: join(dir, "oracle.sqlite"), store });
+  runtime.started = true;
+  runtime.bridge.request = async (method, path, body) => {
+    bridgeCalls.push({ method, path, body });
+    return { assignmentId: body.assignmentId, projectId: body.projectId, state: "queued", tasks: body.tasks };
+  };
+  const freshSubmission = structuredClone(submission);
+  freshSubmission.tasks.forEach((task) => { task.execution = { mode: "fresh", provider: "claude" }; });
+  const receipt = await runtime.callTool("job_submit", freshSubmission, caller);
+  assert.equal(receipt.state, "queued");
+  assert.equal(bridgeCalls.length, 1);
+  const body = bridgeCalls[0].body;
+  assert.deepEqual(body.eligibleAccountIds, ["acct-a", "acct-b"]);
+  assert.deepEqual(body.tasks.map((task) => task.execution), [
+    { mode: "fresh", accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" },
+    { mode: "fresh", accountId: "acct-b", workspaceId: "workspace-b", stackId: "stack-b", provider: "claude" },
+  ]);
+  assert.deepEqual(body.tasks.map((task) => task.stackId), ["stack-a", "stack-b"]);
+  await runtime.close();
 });
 
 const submission = {
