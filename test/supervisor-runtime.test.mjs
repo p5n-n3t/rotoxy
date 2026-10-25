@@ -48,6 +48,70 @@ test("expired transient cooldown restores eligibility without clearing auth or q
     assert.equal(snapshot.workers.find(w=>w.accountId==="acct-a").eligible,eligible,stats.state);
   }
 });
+
+test("fresh provisioning config is strict, optional, and account-bound", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-fresh-config-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "runtime.json");
+  const withBindings = structuredClone(config);
+  withBindings.projects[0].freshProvisioningBindings = [{ accountId: "acct-a", stackId: "stack-a", provider: "claude" }];
+  await writeFile(configPath, JSON.stringify(withBindings), { mode: 0o600 });
+  const parsed = await readSupervisorRuntimeConfig(configPath);
+  assert.deepEqual(parsed.projects[0].freshProvisioningBindings, withBindings.projects[0].freshProvisioningBindings);
+
+  for (const invalid of [
+    [{ accountId: "acct-c", stackId: "stack-a", provider: "claude" }],
+    [{ accountId: "acct-a", stackId: "stack-a", provider: "claude" }, { accountId: "acct-a", stackId: "stack-b", provider: "codex" }],
+    [{ accountId: "acct-a", stackId: "stack-a", provider: "claude", workspaceId: "unneeded" }],
+    [{ accountId: "acct-a", stackId: "../unsafe", provider: "claude" }],
+  ]) {
+    const invalidConfig = structuredClone(config);
+    invalidConfig.projects[0].freshProvisioningBindings = invalid;
+    await writeFile(configPath, JSON.stringify(invalidConfig), { mode: 0o600 });
+    await assert.rejects(readSupervisorRuntimeConfig(configPath), /fresh-provisioning|Fresh-provisioning|Invalid supervisor config fields/);
+  }
+});
+
+test("fresh job submit requires an exact eligible binding before bridge submission and pins the projection", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-fresh-submit-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bridgeCalls = [];
+  const makeRuntime = (runtimeConfig) => {
+    const runtime = new SupervisorRuntime(runtimeConfig, { configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"),
+      supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite"),
+      oracleConfigPath: join(dir, "oracle.json"), oracleDbPath: join(dir, "oracle.sqlite"), store });
+    runtime.started = true;
+    runtime.bridge.request = async (method, path, body) => {
+      bridgeCalls.push({ method, path, body });
+      return { assignmentId: body.assignmentId, projectId: body.projectId, state: "queued", tasks: body.tasks };
+    };
+    return runtime;
+  };
+  const freshSubmission = structuredClone(submission);
+  freshSubmission.tasks = [structuredClone(submission.tasks[0])];
+  freshSubmission.tasks[0].execution = { mode: "fresh", provider: "claude" };
+
+  const unbound = makeRuntime(config);
+  await assert.rejects(unbound.callTool("job_submit", freshSubmission, caller), /explicitly bound eligible account and stack/);
+  assert.equal(bridgeCalls.length, 0, "unbound fresh jobs are refused before the bridge is contacted");
+  await unbound.close();
+
+  const boundConfig = structuredClone(config);
+  boundConfig.projects[0].freshProvisioningBindings = [{ accountId: "acct-a", stackId: "stack-a", provider: "claude" }];
+  const bound = makeRuntime(boundConfig);
+  const receipt = await bound.callTool("job_submit", freshSubmission, caller);
+  assert.equal(receipt.state, "queued");
+  assert.equal(bridgeCalls.length, 1);
+  assert.deepEqual(bridgeCalls[0].body.eligibleAccountIds, ["acct-a"], "the job-wide account set pins fresh provisioning to its configured account");
+  assert.equal(bridgeCalls[0].body.tasks[0].execution.mode, "fresh");
+  assert.equal(bridgeCalls[0].body.tasks[0].stackId, "stack-a");
+  assert.equal(bridgeCalls[0].body.tasks[0].provider, "claude");
+  assert.match(bridgeCalls[0].body.tasks[0].instructions, /DONE-task-one/);
+  await bound.close();
+});
+
 const submission = {
   schemaVersion: 1, jobId: "job-one", idempotencyKey: "idem-one", projectId: "project-a",
   eligibleAccountIds: ["acct-a", "acct-b"], scheduling: { profile: "custom", maxConcurrency: 2 },

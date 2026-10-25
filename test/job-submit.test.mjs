@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { pkceS256 } from "../dist/crypto.js";
 import { StateStore } from "../dist/store.js";
 import { buildApp } from "../dist/server.js";
-import { JobInputError, requiredJobScope, validateJobSubmission, validateJobToolArguments } from "../dist/job-submit.js";
+import { JOB_TOOL_DEFINITIONS, JobInputError, requiredJobScope, validateJobSubmission, validateJobToolArguments } from "../dist/job-submit.js";
 
 const ADMIN = "correct-horse-battery-staple";
 const names = ["job_submit", "job_status", "job_workers", "job_results", "job_control", "job_inbox", "job_inbox_ack"];
@@ -36,6 +36,25 @@ test("job submission validates bounded DAGs and permits a single eligible accoun
   const noMarker = validJob();
   delete noMarker.tasks[0].output.expectedMarker;
   assert.throws(() => validateJobSubmission(noMarker), /expectedMarker/);
+});
+
+test("job submission accepts only explicit supported providers for fresh tasks", () => {
+  for (const provider of ["claude", "codex", "auto", "pi"]) {
+    const input = validJob();
+    input.tasks[0].execution = { mode: "fresh", provider };
+    assert.deepEqual(validateJobSubmission(input).tasks[0].execution, { mode: "fresh", provider });
+  }
+  const missingProvider = validJob();
+  missingProvider.tasks[0].execution = { mode: "fresh" };
+  assert.throws(() => validateJobSubmission(missingProvider), /fresh execution requires provider/);
+  const unsupportedProvider = validJob();
+  unsupportedProvider.tasks[0].execution = { mode: "fresh", provider: "lightsprint" };
+  assert.throws(() => validateJobSubmission(unsupportedProvider), /fresh execution requires provider/);
+  const extraField = validJob();
+  extraField.tasks[0].execution = { mode: "fresh", provider: "claude", accountId: "account-a" };
+  assert.throws(() => validateJobSubmission(extraField), /unsupported field/);
+  const executionSchema = JOB_TOOL_DEFINITIONS.find((tool) => tool.name === "job_submit").inputSchema.properties.tasks.items.properties.execution;
+  assert.equal(executionSchema.oneOf[1].properties.provider.enum.join(","), "claude,codex,auto,pi");
 });
 
 test("job scopes remain separate", () => {

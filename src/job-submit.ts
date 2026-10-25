@@ -93,7 +93,11 @@ function parseTask(raw: unknown): JobTaskInput {
   if (!object(raw.execution)) throw new JobInputError("execution must be an object");
   let execution: JobTaskInput["execution"];
   if (raw.execution.mode === "fresh") {
-    throw new JobInputError("the current supervisor supports registered existing sessions only");
+    only(raw.execution, ["mode", "provider"], "execution");
+    if (typeof raw.execution.provider !== "string" || !["claude", "codex", "auto", "pi"].includes(raw.execution.provider)) {
+      throw new JobInputError("fresh execution requires provider claude, codex, auto, or pi");
+    }
+    execution = { mode: "fresh", provider: raw.execution.provider as Extract<JobTaskInput["execution"], { mode: "fresh" }>["provider"] };
   } else if (raw.execution.mode === "existing-session") {
     only(raw.execution, ["mode"], "execution");
     execution = { mode: "existing-session" };
@@ -177,7 +181,12 @@ export const JOB_TOOL_DEFINITIONS = [
         inputRef: { type: "string", minLength: 1, maxLength: 2048 }, inputSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
         observationTimeoutSeconds: { type: "integer", minimum: 60, maximum: 604800, description: "Monitoring deadline only; expiry requires reconciliation and does not cancel the upstream worker. Default six hours." },
         instructions: { type: "string", minLength: 1, maxLength: 16384 },
-        execution: { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { const: "existing-session" } } },
+        execution: { oneOf: [
+          { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { const: "existing-session" } } },
+          { type: "object", additionalProperties: false, required: ["mode", "provider"], properties: {
+            mode: { const: "fresh" }, provider: { type: "string", enum: ["claude", "codex", "auto", "pi"] },
+          } },
+        ] },
         output: { type: "object", additionalProperties: false, required: ["kind", "maxBytes", "format", "expectedMarker"], properties: {
           kind: { const: "text" }, maxBytes: { type: "integer", minimum: 1, maximum: 32768 },
           format: { type: "string", minLength: 1, maxLength: 64 }, expectedMarker: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\r\\n]+$" },

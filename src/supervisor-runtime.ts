@@ -26,6 +26,8 @@ const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 // Provider-generated session IDs may begin with '_' or '-'; neither is a path separator.
 const SESSION_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
+const FRESH_PROVIDERS = ["claude", "codex", "auto", "pi"] as const;
+const STACK_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CONFIG = 64 * 1024;
 type RuntimeStateGroup = "supervision" | "oracle-pool";
 const STATE_FILES: Record<RuntimeStateGroup, string[]> = {
@@ -43,7 +45,8 @@ export function runtimeStateRoot(group: RuntimeStateGroup, home = homedir()): st
 }
 export function runtimeStatePath(group: RuntimeStateGroup, ...parts: string[]): string { return join(runtimeStateRoot(group), group, ...parts); }
 type RegisteredSession = { sessionId: string; accountId: string; model: string; workspaceId: string };
-type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[] };
+type FreshProvisioningBinding = { accountId: string; stackId: string; provider: "claude" | "codex" | "auto" | "pi" };
+type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[]; freshProvisioningBindings?: FreshProvisioningBinding[] };
 /** An operator-opted-in shared provider workspace, distinct from project folders. */
 type SharedWorkspacePolicy = { projectId: string; membership: "consented_oauth" | "authenticated_mcp" };
 export interface SupervisorRuntimeConfig {
@@ -176,7 +179,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
       !Number.isInteger(raw.localLimits.maxOutputBytes) || Number(raw.localLimits.maxOutputBytes) < 1 || Number(raw.localLimits.maxOutputBytes) > 32_768) throw new Error("Supervisor limits exceed supported bounds");
   const projects: ProjectPolicy[] = raw.projects.map((candidate: unknown): ProjectPolicy => {
     if (!object(candidate)) throw new Error("Invalid project policy");
-    assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions"], "project");
+    assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions", "freshProvisioningBindings"], "project");
     const projectId = candidate.projectId, rawClientIds = candidate.clientIds, rawAccountIds = candidate.accountIds, rawSessions = candidate.registeredSessions;
     if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeClientId) || new Set(rawClientIds).size !== rawClientIds.length ||
         !Array.isArray(rawAccountIds) || rawAccountIds.length > 50 || !rawAccountIds.every(safeAccountId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
@@ -189,7 +192,22 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
     });
     if (registeredSessions.length * rawClientIds.length > 1000) throw new Error("Project has too many registered monitoring bindings");
     if (new Set(registeredSessions.map((item) => item.sessionId)).size !== registeredSessions.length) throw new Error("Duplicate registered session");
-    return { projectId, clientIds: rawClientIds as string[], accountIds, registeredSessions };
+    let freshProvisioningBindings: FreshProvisioningBinding[] | undefined;
+    if (candidate.freshProvisioningBindings !== undefined) {
+      if (!Array.isArray(candidate.freshProvisioningBindings) || candidate.freshProvisioningBindings.length > 50) throw new Error("Invalid fresh-provisioning bindings");
+      freshProvisioningBindings = candidate.freshProvisioningBindings.map((item: unknown): FreshProvisioningBinding => {
+        if (!object(item)) throw new Error("Invalid fresh-provisioning binding");
+        assertKeys(item, ["accountId", "stackId", "provider"], "freshProvisioningBinding");
+        if (!safeAccountId(item.accountId) || !accountIds.includes(item.accountId) || typeof item.stackId !== "string" || !STACK_ID.test(item.stackId) ||
+            typeof item.provider !== "string" || !(FRESH_PROVIDERS as readonly string[]).includes(item.provider)) {
+          throw new Error("Fresh-provisioning bindings must name a project account, safe stack ID, and supported provider");
+        }
+        return { accountId: item.accountId, stackId: item.stackId, provider: item.provider as FreshProvisioningBinding["provider"] };
+      });
+      if (new Set(freshProvisioningBindings.map((item) => item.accountId)).size !== freshProvisioningBindings.length) throw new Error("Each account may have only one fresh-provisioning binding");
+    }
+    return { projectId, clientIds: rawClientIds as string[], accountIds, registeredSessions,
+      ...(freshProvisioningBindings ? { freshProvisioningBindings } : {}) };
   });
   if (!projects.length || new Set(projects.map((item) => item.projectId)).size !== projects.length) throw new Error("Supervisor config needs unique projects");
   let sharedWorkspace: SharedWorkspacePolicy | undefined;
@@ -495,21 +513,50 @@ export class SupervisorRuntime implements SupervisorBackend {
         return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
       });
       if (!eligible.length) throw new JobInputError("no requested account is currently enabled, authorized, healthy, and quota-eligible");
-      const sessions = project.registeredSessions.filter((session) => eligible.includes(session.accountId));
-      if (!sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
+      const requestedTasks = args.tasks as JobTaskInput[];
+      const freshTasks = requestedTasks.filter((task) => task.execution.mode === "fresh");
+      let dispatchEligible = eligible;
+      let freshBinding: FreshProvisioningBinding | undefined;
+      if (freshTasks.length) {
+        const bindings = project.freshProvisioningBindings ?? [];
+        for (const task of freshTasks) {
+          if (task.execution.mode !== "fresh") continue;
+          const binding = eligible.map((accountId) => bindings.find((candidate) => candidate.accountId === accountId && candidate.provider === task.execution.provider))
+            .find((candidate): candidate is FreshProvisioningBinding => candidate !== undefined);
+          if (!binding) throw new JobInputError(`fresh ${task.execution.provider} execution requires an explicitly bound eligible account and stack`);
+          if (freshBinding && (freshBinding.accountId !== binding.accountId || freshBinding.stackId !== binding.stackId || freshBinding.provider !== binding.provider)) {
+            throw new JobInputError("fresh tasks in one job must share one explicit account, stack, and provider binding");
+          }
+          freshBinding = binding;
+        }
+        // The bridge assigns one account from the job-wide eligible set. Pin a
+        // fresh launch to its configured account so it cannot inherit another
+        // account's stack/provider tuple from a per-task projection.
+        dispatchEligible = [freshBinding!.accountId];
+      }
+      const sessions = project.registeredSessions.filter((session) => dispatchEligible.includes(session.accountId));
+      if (requestedTasks.some((task) => task.execution.mode === "existing-session") && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
+      if (!freshTasks.length && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
       let nextSession = 0;
-      const tasks = (args.tasks as JobTaskInput[]).map((task) => {
+      const tasks = requestedTasks.map((task) => {
         const output = task.output;
         if (output.kind !== "text") throw new JobInputError("the current supervisor supports bounded text output only");
         if (output.maxBytes > this.config.localLimits.maxOutputBytes) throw new JobInputError("text output exceeds the configured supervisor limit");
-        const session = sessions[nextSession++ % sessions.length]!;
         const markerLine = `\n\nInclude this exact completion marker on its own line: ${output.expectedMarker}`;
         if (Buffer.byteLength(task.instructions + markerLine) > 16_384) throw new JobInputError("instructions plus completion marker exceed 16 KiB");
+        if (task.execution.mode === "fresh") {
+          // The job's eligible account list is pinned to this exact private
+          // account/stack/provider binding; fresh worker execution stays gated
+          // separately in job-worker until its full lifecycle is implemented.
+          return { ...task, instructions: task.instructions + markerLine,
+            stackId: freshBinding!.stackId, provider: freshBinding!.provider };
+        }
+        const session = sessions[nextSession++ % sessions.length]!;
         return { ...task, instructions: task.instructions + markerLine,
           execution: { mode: "existing-session", accountId: session.accountId, sessionId: session.sessionId } };
       });
       const assignment = { schemaVersion: 1, assignmentId: args.jobId, idempotencyKey: args.idempotencyKey,
-        projectId: project.projectId, eligibleAccountIds: eligible, maxWorkers: this.config.maxWorkers,
+        projectId: project.projectId, eligibleAccountIds: dispatchEligible, maxWorkers: this.config.maxWorkers,
         ...(args.scheduling ? { scheduling: args.scheduling } : {}), tasks };
       if (Buffer.byteLength(JSON.stringify(assignment)) > this.config.localLimits.maxJobBytes) throw new JobInputError("job exceeds the configured supervisor byte limit");
       return boundedJson(await this.bridge.request("POST", "/v1/assignments", assignment, owner));
