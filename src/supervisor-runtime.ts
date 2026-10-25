@@ -651,11 +651,13 @@ export class SupervisorRuntime implements SupervisorBackend {
         const signal = accountSignal(account, nativeTarget);
         const sessions = project.registeredSessions.filter((session) => session.accountId === account.id);
         const bound = project.accountIds.includes(account.id);
+        const freshBinding = (project.freshProvisioningBindings ?? []).find((binding) => binding.accountId === account.id);
         return { accountId: account.id, label: redactString(typeof account.label === "string" ? account.label : account.id, 120), enabled: signal.enabled,
           dispatchBound: bound, health: signal.health, quota: signal.quota,
           registeredSessionCount: sessions.length, providerSlotLimit: null, availableSlots: null,
-          provisioningState: !signal.enabled ? "disabled" : !bound ? "not_bound" : !sessions.length ? "needs_sessions" : "registered_sessions",
-          automaticProvisioning: false };
+          provisioningState: !signal.enabled ? "disabled" : freshBinding ? "fresh_ready" : !bound ? "not_bound" : !sessions.length ? "needs_sessions" : "registered_sessions",
+          automaticProvisioning: freshBinding !== undefined,
+          ...(freshBinding ? { freshProvisioning: { workspaceId: freshBinding.workspaceId, stackId: freshBinding.stackId, provider: freshBinding.provider } } : {}) };
       });
       return boundedJson({ projectId: project.projectId, accounts, workers, maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
     }

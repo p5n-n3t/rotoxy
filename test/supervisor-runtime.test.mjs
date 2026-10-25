@@ -59,6 +59,16 @@ test("fresh provisioning config is strict, optional, and account-bound", async (
   await writeFile(configPath, JSON.stringify(withBindings), { mode: 0o600 });
   const parsed = await readSupervisorRuntimeConfig(configPath);
   assert.deepEqual(parsed.projects[0].freshProvisioningBindings, withBindings.projects[0].freshProvisioningBindings);
+  const runtime = new SupervisorRuntime(parsed, { configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"),
+    supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite"),
+    oracleConfigPath: join(dir, "oracle.json"), oracleDbPath: join(dir, "oracle.sqlite"), store });
+  runtime.started = true;
+  const inventory = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
+  const freshAccount = inventory.accounts.find((account) => account.accountId === "acct-a");
+  assert.equal(freshAccount.automaticProvisioning, true);
+  assert.equal(freshAccount.provisioningState, "fresh_ready");
+  assert.deepEqual(freshAccount.freshProvisioning, { workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" });
+  await runtime.close();
 
   for (const invalid of [
     [{ accountId: "acct-c", stackId: "stack-a", provider: "claude" }],
