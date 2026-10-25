@@ -205,7 +205,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
         }
         return { accountId: item.accountId, workspaceId: item.workspaceId, stackId: item.stackId, provider: item.provider as FreshProvisioningBinding["provider"] };
       });
-      if (new Set(freshProvisioningBindings.map((item) => item.accountId)).size !== freshProvisioningBindings.length) throw new Error("Each account may have only one fresh-provisioning binding");
+      if (new Set(freshProvisioningBindings.map((item) => `${item.accountId}:${item.provider}`)).size !== freshProvisioningBindings.length) throw new Error("Each account/provider pair may have only one fresh-provisioning binding");
     }
     return { projectId, clientIds: rawClientIds as string[], accountIds, registeredSessions,
       ...(freshProvisioningBindings ? { freshProvisioningBindings } : {}) };
@@ -656,13 +656,15 @@ export class SupervisorRuntime implements SupervisorBackend {
         const signal = accountSignal(account, nativeTarget);
         const sessions = project.registeredSessions.filter((session) => session.accountId === account.id);
         const bound = project.accountIds.includes(account.id);
-        const freshBinding = (project.freshProvisioningBindings ?? []).find((binding) => binding.accountId === account.id);
+        const freshBindings = (project.freshProvisioningBindings ?? []).filter((binding) => binding.accountId === account.id);
+        const freshBinding = freshBindings[0];
         return { accountId: account.id, label: redactString(typeof account.label === "string" ? account.label : account.id, 120), enabled: signal.enabled,
           dispatchBound: bound, health: signal.health, quota: signal.quota,
           registeredSessionCount: sessions.length, providerSlotLimit: null, availableSlots: null,
           provisioningState: !signal.enabled ? "disabled" : freshBinding ? "fresh_ready" : !bound ? "not_bound" : !sessions.length ? "needs_sessions" : "registered_sessions",
           automaticProvisioning: freshBinding !== undefined,
-          ...(freshBinding ? { freshProvisioning: { workspaceId: freshBinding.workspaceId, stackId: freshBinding.stackId, provider: freshBinding.provider } } : {}) };
+          ...(freshBinding ? { freshProvisioning: { workspaceId: freshBinding.workspaceId, stackId: freshBinding.stackId, provider: freshBinding.provider },
+            freshProvisioningBindings: freshBindings.map(({ workspaceId, stackId, provider }) => ({ workspaceId, stackId, provider })) } : {}) };
       });
       return boundedJson({ projectId: project.projectId, accounts, workers, maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
     }

@@ -34,3 +34,12 @@ submits an authorized, bounded job.
 The worker concurrency test now has a bounded five-second wait and always
 stops its background worker in `finally`, preventing a failed assertion from
 leaving a test process alive on a busy host.
+
+## Multiple provider categories per account
+
+A fresh-binding key is now `(accountId, provider)`, rather than account alone.
+The administrative page verifies and removes each provider category separately.
+This permits an account to retain independently verified Claude and Codex launch
+paths where the upstream supports them. It does not assume that the two paths
+are equivalent, and it does not activate an additional path without its own
+read-only verification.

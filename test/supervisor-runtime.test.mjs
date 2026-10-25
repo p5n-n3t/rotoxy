@@ -70,9 +70,17 @@ test("fresh provisioning config is strict, optional, and account-bound", async (
   assert.deepEqual(freshAccount.freshProvisioning, { workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" });
   await runtime.close();
 
+  const multiProvider = structuredClone(config);
+  multiProvider.projects[0].freshProvisioningBindings = [
+    { accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" },
+    { accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-b", provider: "codex" },
+  ];
+  await writeFile(configPath, JSON.stringify(multiProvider), { mode: 0o600 });
+  assert.equal((await readSupervisorRuntimeConfig(configPath)).projects[0].freshProvisioningBindings?.length, 2);
+
   for (const invalid of [
     [{ accountId: "acct-c", stackId: "stack-a", provider: "claude" }],
-    [{ accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" }, { accountId: "acct-a", workspaceId: "workspace-b", stackId: "stack-b", provider: "codex" }],
+    [{ accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" }, { accountId: "acct-a", workspaceId: "workspace-b", stackId: "stack-b", provider: "claude" }],
     [{ accountId: "acct-a", stackId: "stack-a", provider: "claude" }],
     [{ accountId: "acct-a", stackId: "../unsafe", provider: "claude" }],
   ]) {

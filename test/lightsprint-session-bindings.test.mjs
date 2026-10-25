@@ -86,11 +86,20 @@ test("fresh bindings require an authenticated, revision-fenced exact workspace a
   assert.deepEqual(parsed.projects[0].accountIds, [ctx.account.id]);
   const current = await get(); const currentHtml = await current.text();
   const currentRevision = /name="expectedRevision" value="([a-f0-9]{64})"/.exec(currentHtml)?.[1]; assert.ok(currentRevision);
-  assert.equal((await post({ action: "bind_fresh", expectedRevision: currentRevision, projectId: "shared-workspace", accountId: ctx.account.id, workspaceId: "workspace-1", stackId: "stack-1", provider: "claude" })).status, 400);
-  const noExtra = await post({ action: "bind_fresh", expectedRevision: currentRevision, projectId: "shared-workspace", accountId: ctx.account.id, workspaceId: "workspace-1", stackId: "stack-2", provider: "claude", unexpected: "no" });
+  // A second independently verified provider category may share this account,
+  // but duplicate account/provider pairs are refused.
+  assert.equal((await post({ action: "bind_fresh", expectedRevision: currentRevision, projectId: "shared-workspace", accountId: ctx.account.id, workspaceId: "workspace-1", stackId: "stack-codex", provider: "codex" })).status, 303);
+  const afterSecond = await get(); const afterSecondHtml = await afterSecond.text();
+  const secondRevision = /name="expectedRevision" value="([a-f0-9]{64})"/.exec(afterSecondHtml)?.[1]; assert.ok(secondRevision);
+  assert.equal((await post({ action: "bind_fresh", expectedRevision: secondRevision, projectId: "shared-workspace", accountId: ctx.account.id, workspaceId: "workspace-1", stackId: "stack-1", provider: "claude" })).status, 400);
+  const noExtra = await post({ action: "bind_fresh", expectedRevision: secondRevision, projectId: "shared-workspace", accountId: ctx.account.id, workspaceId: "workspace-1", stackId: "stack-2", provider: "claude", unexpected: "no" });
   assert.equal(noExtra.status, 400);
-  const removed = await post({ action: "unbind_fresh", expectedRevision: currentRevision, projectId: "shared-workspace", accountId: ctx.account.id });
-  assert.equal(removed.status, 303);
+  const removedClaude = await post({ action: "unbind_fresh", expectedRevision: secondRevision, projectId: "shared-workspace", accountId: ctx.account.id, provider: "claude" });
+  assert.equal(removedClaude.status, 303);
+  const afterRemove = await get(); const afterRemoveHtml = await afterRemove.text();
+  const removeRevision = /name="expectedRevision" value="([a-f0-9]{64})"/.exec(afterRemoveHtml)?.[1]; assert.ok(removeRevision);
+  const removedCodex = await post({ action: "unbind_fresh", expectedRevision: removeRevision, projectId: "shared-workspace", accountId: ctx.account.id, provider: "codex" });
+  assert.equal(removedCodex.status, 303);
   const final = JSON.parse(await readFile(ctx.configPath, "utf8")); assert.deepEqual(final.projects[0].freshProvisioningBindings, []);
 });
 
