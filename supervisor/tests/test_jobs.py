@@ -20,6 +20,15 @@ def task(task_id="task-1", *, account="account-a", session_id=None, depends=None
     return value
 
 
+def fresh_task(task_id="fresh-1", *, account="account-a", stack="stack-a", provider="claude"):
+    return {
+        "taskId": task_id, "dependsOn": [], "scopeKeys": [f"path:src/{task_id}.txt"],
+        "instructions": f"Do bounded work for {task_id}",
+        "execution": {"mode": "fresh", "accountId": account, "stackId": stack, "provider": provider},
+        "output": {"kind": "text", "maxBytes": 1024, "format": "plain", "expectedMarker": "DONE"},
+    }
+
+
 def assignment(assignment_id="job-1", key="key-1", tasks=None, *, accounts=None, max_workers=3, project="project-a"):
     return {
         "schemaVersion": 1, "assignmentId": assignment_id, "idempotencyKey": key,
@@ -45,7 +54,7 @@ class JobRegistryTests(unittest.TestCase):
             "accountId": account, "enabled": enabled, "authorized": authorized, "health": health,
             "quota": quota, "allowUnknownQuota": False,
             "localCapacity": capacity,
-            "registeredSessions": sessions or [{"id": f"session-{account}", "model": "unknown", "workspace": "workspace-a"}],
+            "registeredSessions": sessions if sessions is not None else [{"id": f"session-{account}", "model": "unknown", "workspace": "workspace-a"}],
         })
 
     def tearDown(self):
@@ -81,6 +90,90 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(operation["selectedAccountId"], "account-a")
         self.assertEqual(operation["input"]["instructions"], "Do bounded work for task-1")
         self.assertEqual(operation["input"]["sessionId"], "session-account-a")
+
+    def test_fresh_execution_requires_explicit_eligible_account_stack_and_provider(self):
+        body = assignment(tasks=[fresh_task()], accounts=["account-a"])
+        self.assertEqual(validate_assignment(body)["tasks"][0]["execution"]["mode"], "fresh")
+        for invalid in (
+            {"mode": "fresh", "stackId": "stack-a", "provider": "claude"},
+            {"mode": "fresh", "accountId": "account-a", "provider": "claude"},
+            {"mode": "fresh", "accountId": "account-a", "stackId": "stack-a"},
+            {"mode": "fresh", "accountId": "account-b", "stackId": "stack-a", "provider": "claude"},
+            {"mode": "fresh", "accountId": "account-a", "stackId": "stack-a", "provider": "unknown"},
+            {"mode": "fresh", "accountId": "account-a", "stackId": "stack-a", "provider": "claude", "sessionId": "session-a"},
+        ):
+            body = assignment(tasks=[fresh_task()], accounts=["account-a"])
+            body["tasks"][0]["execution"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_assignment(body)
+
+    def test_fresh_lifecycle_pins_account_and_creates_session_only_after_launch(self):
+        # A fresh provider task must not depend on a pre-registered session.
+        self.register("account-a", sessions=[])
+        self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
+        with self.registry.connection() as db:
+            self.assertIsNone(db.execute("SELECT session_id FROM job_tasks WHERE assignment='job-1'").fetchone()[0])
+
+        create = self.registry.claim_operation("worker", now=2)
+        self.assertEqual((create["kind"], create["selectedAccountId"], create["sessionId"]),
+                         ("create_task", "account-a", None))
+        self.assertEqual(create["input"]["title"], "ROTOXY — fresh-1")
+        self.assertEqual(create["input"]["stackId"], "stack-a")
+        self.assertEqual(create["input"]["provider"], "claude")
+        self.assertEqual(create["input"]["instructions"], "Do bounded work for fresh-1")
+        self.registry.record_result(create["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-1"}}, now=3)
+
+        patch = self.registry.claim_operation("worker", now=4)
+        self.assertEqual(patch["kind"], "patch_task")
+        self.assertIsNone(patch["sessionId"])
+        self.assertEqual(patch["providerTaskId"], "ls-task-1")
+        self.assertEqual(patch["input"]["providerTaskId"], "ls-task-1")
+        self.assertEqual(patch["input"]["instructions"], "Do bounded work for fresh-1")
+        self.registry.record_result(patch["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-1", "status": "instructions_verified"}}, now=5)
+
+        verify = self.registry.claim_operation("worker", now=6)
+        self.assertEqual(verify["kind"], "verify_task_packet")
+        self.assertIsNone(verify["sessionId"])
+        self.assertEqual(verify["input"]["providerTaskId"], "ls-task-1")
+        self.registry.record_result(verify["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-1", "status": "instructions_verified"}}, now=7)
+
+        launch = self.registry.claim_operation("worker", now=8)
+        self.assertEqual(launch["kind"], "launch_task")
+        self.assertIsNone(launch["sessionId"])
+        self.assertEqual(launch["input"]["providerTaskId"], "ls-task-1")
+        self.registry.record_result(launch["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-1", "sessionId": "fresh-session-1",
+                                               "reportedModel": "claude-sonnet-4-6"}}, now=9)
+        with self.registry.connection() as db:
+            row = db.execute("SELECT session_id,reported_model FROM job_tasks WHERE assignment='job-1'").fetchone()
+            self.assertEqual((row["session_id"], row["reported_model"]), ("fresh-session-1", "claude-sonnet-4-6"))
+
+        observe = self.registry.claim_operation("worker", now=11)
+        self.assertEqual(observe["kind"], "observe_session")
+        self.assertEqual(observe["sessionId"], "fresh-session-1")
+        self.assertEqual(observe["input"]["sessionId"], "fresh-session-1")
+        self.assertEqual(observe["input"]["expectedMarker"], "DONE")
+
+    def test_fresh_launch_result_without_session_does_not_advance(self):
+        self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
+        create = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(create["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-2"}}, now=3)
+        patch = self.registry.claim_operation("worker", now=4)
+        self.registry.record_result(patch["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-2"}}, now=5)
+        verify = self.registry.claim_operation("worker", now=6)
+        self.registry.record_result(verify["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-2"}}, now=7)
+        launch = self.registry.claim_operation("worker", now=8)
+        with self.assertRaisesRegex(ValueError, "sessionId"):
+            self.registry.record_result(launch["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                                "result": {"providerTaskId": "ls-task-2"}}, now=9)
+        with self.registry.connection() as db:
+            self.assertIsNone(db.execute("SELECT session_id FROM job_tasks WHERE assignment='job-1'").fetchone()[0])
 
     def test_blocked_preflight_exposes_safe_failure_class_without_prompt_data(self):
         self.registry.submit(assignment(), now=1)

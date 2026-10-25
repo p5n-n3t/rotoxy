@@ -23,8 +23,9 @@ MAX_JOB_BYTES = 1024 * 1024
 MAX_DEPENDENCIES = 8
 MAX_PAGE = 200
 MUTATING_KINDS = {"create_task", "patch_task", "launch_task", "chat_session", "cancel_session"}
-OPERATION_KINDS = {"observe_session", "chat_session", "cancel_session"}
+OPERATION_KINDS = {"observe_session", "chat_session", "cancel_session", "create_task", "patch_task", "verify_task_packet", "launch_task"}
 USAGE_KEYS = {"reportedSessionCostUsd", "promptCount", "budgetUsed", "maxBudget", "fundingSource", "sandboxTier"}
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # Node job-worker.ts returns these only on the chat_session path before
 # mutationStarted is set. A rejected outcome alone is never proof of no dispatch.
 SAFE_CHAT_PREFLIGHT_REJECTIONS = {
@@ -174,12 +175,24 @@ def validate_assignment(body):
         if has_ref and re.match(r"(?i)https?://", task["inputRef"]):
             raise ValueError("inputRef must be an opaque local reference")
         execution = task["execution"]
-        if not isinstance(execution, dict) or execution.get("mode") != "existing-session":
-            raise ValueError("Fresh launches are disabled until account policy is implemented")
-        if set(execution) != {"mode", "sessionId", "accountId"} or not all(isinstance(execution[k], str) and execution[k] for k in ("sessionId", "accountId")):
-            raise ValueError("Invalid registered-session execution")
-        if execution["accountId"] not in accounts:
-            raise ValueError("Registered session account must be eligible")
+        if not isinstance(execution, dict):
+            raise ValueError("Invalid task execution")
+        if execution.get("mode") == "existing-session":
+            if set(execution) != {"mode", "sessionId", "accountId"} or not all(isinstance(execution[k], str) and execution[k] for k in ("sessionId", "accountId")):
+                raise ValueError("Invalid registered-session execution")
+            if execution["accountId"] not in accounts:
+                raise ValueError("Registered session account must be eligible")
+        elif execution.get("mode") == "fresh":
+            if set(execution) != {"mode", "accountId", "stackId", "provider"}:
+                raise ValueError("Invalid fresh execution binding")
+            for field, maximum in (("accountId", 256), ("stackId", 256), ("provider", 64)):
+                _text(execution[field], f"execution.{field}", maximum)
+            if execution["provider"] not in {"claude", "codex", "auto", "pi"}:
+                raise ValueError("Unsupported fresh execution provider")
+            if execution["accountId"] not in accounts:
+                raise ValueError("Fresh execution account must be eligible")
+        else:
+            raise ValueError("Unsupported task execution mode")
         output = task["output"]
         if not isinstance(output, dict) or output.get("kind") not in OUTPUT_KEYS or set(output) - OUTPUT_KEYS[output.get("kind")] or not OUTPUT_KEYS[output.get("kind")] - {"expectedMarker"} <= set(output):
             raise ValueError("Unsupported output contract")
@@ -194,6 +207,10 @@ def validate_assignment(body):
             _text(task["stackId"], "stackId", 256)
         if "provider" in task:
             _text(task["provider"], "provider", 64)
+        if execution["mode"] == "fresh" and (
+                ("stackId" in task and task["stackId"] != execution["stackId"]) or
+                ("provider" in task and task["provider"] != execution["provider"])):
+            raise ValueError("Fresh task routing fields must match its execution binding")
         if output["kind"] == "json-records" and (not isinstance(output["ids"], list) or not output["ids"] or not isinstance(output["requiredFields"], list) or not output["requiredFields"]):
             raise ValueError("Invalid JSON records output contract")
         if output["kind"] == "json-records" and (len(output["ids"]) > 100 or len(output["requiredFields"]) > 100 or
@@ -472,7 +489,8 @@ class JobRegistry:
                 return self._receipt(prior)
             for task in body["tasks"]:
                 execution = task["execution"]
-                self._account(db, execution["accountId"], execution["sessionId"])
+                session_id = execution.get("sessionId")
+                self._account(db, execution["accountId"], session_id)
             assignment_row = {"owner_principal": body.get("ownerPrincipalId"), "client_id": body.get("clientId")}
             state = "queued" if approved else "draft"
             db.execute("INSERT INTO assignments(id,project,idem,fingerprint,eligible,body,state,approved,revision,created_at,owner_principal,client_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -729,6 +747,13 @@ class JobRegistry:
                     "verified": "launch_task"}.get(task.get("dispatchPhase", "queued"))
         return "chat_session" if task.get("dispatchPhase", "queued") == "queued" else None
 
+    @staticmethod
+    def _fresh_operation_input(spec, provider_task_id, dispatch_at):
+        execution = spec["execution"]
+        return {"instructions": spec["instructions"], "providerTaskId": provider_task_id,
+                "stackId": execution["stackId"], "provider": execution["provider"],
+                "dispatchAt": dispatch_at}
+
     def _queue_one_ready(self, db, now):
         control = db.execute("SELECT paused,emergency_stop FROM bridge_control WHERE id=1").fetchone()
         if control["paused"] or control["emergency_stop"]:
@@ -802,9 +827,10 @@ class JobRegistry:
                             external_occupancy += 1
                 if job_occupancy + external_occupancy < account_data["localCapacity"]:
                     available.append(candidate)
-            if spec["execution"]["mode"] == "existing-session":
+            if spec["execution"]["mode"] in {"existing-session", "fresh"}:
                 pinned = spec["execution"]["accountId"]
                 available = [account for account in available if account == pinned]
+            if spec["execution"]["mode"] == "existing-session":
                 session_id = spec["execution"]["sessionId"]
                 session_occupancy = db.execute(
                     "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND (" + _SLOT_SQL + ")",
@@ -827,7 +853,9 @@ class JobRegistry:
                 continue
             rr = db.execute("SELECT value FROM scheduler_meta WHERE key='round_robin'").fetchone()[0]
             account = available[rr % len(available)]
-            account_data, session = self._account(db, account, spec["execution"]["sessionId"])
+            execution = spec["execution"]
+            session_id = execution.get("sessionId")
+            account_data, session = self._account(db, account, session_id)
             db.execute("UPDATE scheduler_meta SET value=? WHERE key='round_robin'", (rr + 1,))
             generation = row["generation"] + 1
             attempt = uuid.uuid4().hex
@@ -840,20 +868,31 @@ class JobRegistry:
                        (generation, account, attempt, row["id"], row["task_id"]))
             operation_id = uuid.uuid4().hex
             dispatch_at = now
-            operation_input = {"sessionId": session["id"], "instructions": spec["instructions"],
-                               "clientMessageId": f"{attempt}:{generation}", "expectedMarker": spec["output"]["expectedMarker"],
-                               "dispatchAt": dispatch_at, "providerTaskId": spec.get("providerTaskId"),
-                               "stackId": spec.get("stackId"), "provider": spec.get("provider"),
-                               "workspace": session["workspace"], "model": session["model"]}
+            if execution["mode"] == "fresh":
+                operation_input = {
+                    "title": f"ROTOXY — {row['task_id']}",
+                    "instructions": spec["instructions"],
+                    "expectedMarker": spec["output"]["expectedMarker"],
+                    "dispatchAt": dispatch_at,
+                    "stackId": execution["stackId"],
+                    "provider": execution["provider"],
+                    **({"providerTaskId": spec["providerTaskId"]} if spec.get("providerTaskId") else {}),
+                }
+            else:
+                operation_input = {"sessionId": session["id"], "instructions": spec["instructions"],
+                                   "clientMessageId": f"{attempt}:{generation}", "expectedMarker": spec["output"]["expectedMarker"],
+                                   "dispatchAt": dispatch_at, "providerTaskId": spec.get("providerTaskId"),
+                                   "stackId": spec.get("stackId"), "provider": spec.get("provider"),
+                                   "workspace": session["workspace"], "model": session["model"]}
             db.execute("UPDATE job_tasks SET dispatch_at=?,session_id=? WHERE assignment=? AND task_id=? AND generation=?",
-                       (dispatch_at, session["id"], row["id"], row["task_id"], generation))
+                       (dispatch_at, session["id"] if session else None, row["id"], row["task_id"], generation))
             db.execute("INSERT INTO operations(id,assignment,task_id,attempt_id,generation,account,kind,input,state,worker,lease_until,result,error_class,created_at,due_at) VALUES(?,?,?,?,?,?,?,?,'queued',NULL,NULL,NULL,NULL,?,?)",
                        (operation_id, row["id"], row["task_id"], attempt, generation, account, kind,
                         json.dumps(operation_input), now, now))
             if self.repository is not None:
                 db.execute("INSERT INTO attempts(id,task,project,account,generation,idempotency_key,session,state,scopes,started_at,lease_until,data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                            (attempt, f"r21:{row['id']}:{row['task_id']}", row["project"], account, generation,
-                            uuid.uuid4().hex, session["id"], "reserved", json.dumps(spec["scopeKeys"]), now,
+                           uuid.uuid4().hex, session["id"] if session else None, "reserved", json.dumps(spec["scopeKeys"]), now,
                             now + 600, json.dumps({"r21Assignment": row["id"], "r21TaskId": row["task_id"]})))
             self._event(db, row["id"], "operation_queued", {"state": "queued", "taskId": row["task_id"],
                                                                "accountId": account, "generation": generation,
@@ -941,6 +980,8 @@ class JobRegistry:
             if control["paused"] or control["emergency_stop"] or project_control["paused"] or project_control["emergency_stop"] or assignment["state"] != "queued":
                 return None
             task_spec = json.loads(task_row["body"])
+            execution = task_spec["execution"]
+            session_id = task_row["session_id"]
             # observe_session is a read-only poll; it must remain claimable even when retained
             # uncertain executions fill or exceed a lowered capacity limit, otherwise explicit
             # reconciliation deadlocks.  Mutation dispatch caps stay enforced for all other kinds.
@@ -951,7 +992,8 @@ class JobRegistry:
                                                (assignment["project"], op["assignment"], op["task_id"])).fetchone()[0]
                 if active_in_project >= project_control["max_workers"]:
                     return None
-                account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"])
+                registered_session = execution.get("sessionId") if execution["mode"] == "existing-session" else None
+                account_data, _ = self._account(db, op["account"], registered_session)
                 occupied = db.execute(
                     "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) "
                     "AND (" + _SLOT_SQL + ")",
@@ -959,15 +1001,19 @@ class JobRegistry:
                 if occupied >= account_data["localCapacity"]:
                     return None
             else:
-                account_data, _ = self._account(db, op["account"], task_spec["execution"]["sessionId"], observation=True)
-            session_id = task_spec["execution"]["sessionId"]
-            session_occupancy = db.execute(
-                "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND NOT (assignment=? AND task_id=?) "
-                "AND (" + _SLOT_SQL + ")",
-                (session_id, op["assignment"], op["task_id"])).fetchone()[0]
-            if session_occupancy:
+                registered_session = execution.get("sessionId") if execution["mode"] == "existing-session" else None
+                account_data, _ = self._account(db, op["account"], registered_session, observation=True)
+            if op["kind"] == "observe_session" and not session_id:
+                db.execute("UPDATE operations SET state='rejected',error_class='MissingLaunchedSession' WHERE id=? AND state='queued'", (op["id"],))
                 return None
-            if self.repository is not None:
+            if session_id:
+                session_occupancy = db.execute(
+                    "SELECT COUNT(*) FROM job_tasks WHERE session_id=? AND NOT (assignment=? AND task_id=?) "
+                    "AND (" + _SLOT_SQL + ")",
+                    (session_id, op["assignment"], op["task_id"])).fetchone()[0]
+                if session_occupancy:
+                    return None
+            if self.repository is not None and session_id:
                 external = 0
                 # Registered sessions are independent execution lanes. An active
                 # attempt on another session of the same provider account must not
@@ -1013,8 +1059,9 @@ class JobRegistry:
                        (worker_id, when + lease_seconds, op["id"]))
             return {"operationId": op["id"], "attemptId": op["attempt_id"], "generation": op["generation"],
                     "selectedAccountId": op["account"], "kind": op["kind"], "providerTaskId": task_spec.get("providerTaskId"),
-                    "stackId": task_spec.get("stackId"), "provider": task_spec.get("provider"),
-                    "sessionId": task_spec["execution"]["sessionId"], "input": json.loads(op["input"])}
+                    "stackId": execution.get("stackId", task_spec.get("stackId")),
+                    "provider": execution.get("provider", task_spec.get("provider")),
+                    "sessionId": session_id, "input": json.loads(op["input"])}
 
     def record_result(self, operation_id, body, now=None):
         if not isinstance(body, dict) or set(body) - {"workerId", "outcome", "observedAt", "result", "errorClass"}:
@@ -1084,6 +1131,13 @@ class JobRegistry:
                 raise RuntimeError("Conflicting operation result")
             if op["state"] != "claimed" or op["worker"] != worker:
                 raise RuntimeError("Operation is not owned by this worker")
+            if outcome == "accepted" and op["kind"] in {"create_task", "patch_task", "verify_task_packet"}:
+                if not isinstance(result.get("providerTaskId"), str) or not result["providerTaskId"]:
+                    raise ValueError("Accepted fresh task phase requires providerTaskId")
+            if outcome == "accepted" and op["kind"] == "launch_task":
+                fresh_session_id = result.get("sessionId")
+                if not isinstance(fresh_session_id, str) or not SESSION_ID_RE.fullmatch(fresh_session_id):
+                    raise ValueError("Accepted fresh launch requires a valid sessionId")
             debit = result.get("creditDebit")
             if debit is not None:
                 if self.credit_admission is None or op["kind"] != "chat_session" or outcome != "accepted":
@@ -1116,10 +1170,13 @@ class JobRegistry:
                     db.execute("UPDATE job_tasks SET provider_status=? WHERE assignment=? AND task_id=? AND generation=?",
                                (observed_status, op["assignment"], op["task_id"], op["generation"]))
             else:
-                state = "running" if op["kind"] == "launch_task" else "starting"
                 spec = json.loads(task["body"])
                 phase_map = {"create_task": "created", "patch_task": "patched", "verify_task_packet": "verified"}
                 phase = phase_map.get(op["kind"])
+                if result.get("providerTaskId"):
+                    spec["providerTaskId"] = result["providerTaskId"]
+                    db.execute("UPDATE job_tasks SET provider_task_id=? WHERE assignment=? AND task_id=? AND generation=?",
+                               (result["providerTaskId"], op["assignment"], op["task_id"], op["generation"]))
                 if phase:
                     spec["dispatchPhase"] = phase
                     db.execute("UPDATE job_tasks SET body=? WHERE assignment=? AND task_id=? AND generation=?",
@@ -1127,15 +1184,36 @@ class JobRegistry:
                     next_kind = self._next_kind(spec)
                     if next_kind:
                         next_id = uuid.uuid4().hex
-                        db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,'queued',NULL,NULL,NULL,NULL,?)",
+                        if next_kind == "create_task":
+                            next_input = {"title": f"ROTOXY — {op['task_id']}", "instructions": spec["instructions"],
+                                          "stackId": spec["execution"]["stackId"], "provider": spec["execution"]["provider"],
+                                          "dispatchAt": task["dispatch_at"]}
+                        else:
+                            next_input = self._fresh_operation_input(spec, spec.get("providerTaskId"), task["dispatch_at"])
+                        db.execute("INSERT INTO operations(id,assignment,task_id,attempt_id,generation,account,kind,input,state,worker,lease_until,result,error_class,created_at,due_at) "
+                                   "VALUES(?,?,?,?,?,?,?,?,'queued',NULL,NULL,NULL,NULL,?,?)",
                                    (next_id, op["assignment"], op["task_id"], op["attempt_id"], op["generation"], op["account"], next_kind,
-                                    json.dumps({"assignmentId": op["assignment"], "taskId": op["task_id"], "phase": phase}), when))
-                if result.get("providerTaskId"):
-                    db.execute("UPDATE job_tasks SET provider_task_id=? WHERE assignment=? AND task_id=? AND generation=?",
-                               (result["providerTaskId"], op["assignment"], op["task_id"], op["generation"]))
-                if result.get("sessionId"):
-                    db.execute("UPDATE job_tasks SET session_id=? WHERE assignment=? AND task_id=? AND generation=?",
-                               (result["sessionId"], op["assignment"], op["task_id"], op["generation"]))
+                                    json.dumps(next_input), when, when))
+                    state = "starting"
+                else:
+                    # A successful launch is the first point where a remote session
+                    # exists. Bind it durably now, then queue observation against it.
+                    state = "awaiting_output"
+                    session_id = result["sessionId"]
+                    spec["dispatchPhase"] = "launched"
+                    db.execute("UPDATE job_tasks SET body=?,session_id=?,provider_task_id=COALESCE(?,provider_task_id),reported_model=? "
+                               "WHERE assignment=? AND task_id=? AND generation=?",
+                               (json.dumps(spec), session_id, result.get("providerTaskId"), result.get("reportedModel"),
+                                op["assignment"], op["task_id"], op["generation"]))
+                    if self.repository is not None:
+                        db.execute("UPDATE attempts SET session=? WHERE id=? AND released_at IS NULL",
+                                   (session_id, op["attempt_id"]))
+                    launch_payload = {"sessionId": session_id,
+                                      "clientMessageId": f"{op['attempt_id']}:{op['generation']}:fresh",
+                                      "dispatchAt": when,
+                                      "expectedMarker": spec["output"]["expectedMarker"],
+                                      "instructions": spec["instructions"]}
+                    self._queue_observation(db, op, launch_payload, when, delay=1)
             if outcome == "rejected" and op["kind"] == "chat_session" and error_class in SAFE_CHAT_PREFLIGHT_REJECTIONS:
                 # These explicit worker classes prove dispatch was not attempted.
                 # Keep observe failures, post-send rejections, and generic errors reserved.
