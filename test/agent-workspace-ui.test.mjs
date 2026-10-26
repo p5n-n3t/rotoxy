@@ -162,13 +162,13 @@ test("review and artifact controls remain available but closed until selected", 
   assert.match(html, /\.aw-review-list li,.aw-events li\{[^}]*font-size:12px/);
 });
 
-test("keeps the nonce-protected refresh poll and explicit unknown execution fields", () => {
+test("keeps the nonce-protected refresh poll and explicit missing execution fields", () => {
   const html = renderAgentWorkspace({ ...snapshot, executions: [{}] }, { ...options, nonce: "0123456789abcdef" });
   assert.match(html, /<script nonce="0123456789abcdef">/);
-  assert.match(html, /Execution ID unknown/);
-  assert.match(html, /State unknown/);
-  assert.match(html, /Provider unknown/);
-  assert.match(html, /<dt>Tasks<\/dt><dd>Unknown<\/dd>/);
+  assert.match(html, /Execution ID not reported/);
+  assert.match(html, /State not reported/);
+  assert.match(html, /Provider not reported/);
+  assert.match(html, /<dt>Tasks<\/dt><dd>Not reported<\/dd>/);
   assert.match(html, /location\.reload\(\)/);
   assert.match(html, /data-workspace-feed/);
 });
@@ -188,7 +188,7 @@ test("conversation combines persisted messages and activity chronologically with
   const later = html.indexOf("task claimed");
   assert.ok(earlier < message && message < later, "persisted feed entries are chronological");
   assert.match(html, /Runner A · Codex · reported-model \(reported\) · Account acct-a/);
-  assert.match(html, /Sender context unknown/);
+  assert.match(html, /Sender context not reported/);
   assert.match(html, /data-task-id="task-w"/);
   assert.match(html, /data-feed-filter/);
   assert.match(html, /Guide live workers in Supervisor/);

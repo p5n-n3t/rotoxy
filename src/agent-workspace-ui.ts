@@ -61,7 +61,7 @@ function normalizeWorkspace(raw: unknown, projectId: string): Workspace | undefi
     const from = safeId(row.from ?? row.sender), taskId = safeId(row.taskId), createdAt = safeDate(row.createdAt ?? row.at);
     const context = record(row.senderContext) ? row.senderContext : undefined;
     const senderContext = context && context.source === "participant_reported" && typeof context.label === "string" && typeof context.provider === "string"
-      ? { label: cleanText(context.label, 120) || "Sender unknown", provider: cleanText(context.provider, 80) || "Provider unknown", ...(cleanText(context.model, 120) ? { model: cleanText(context.model, 120) } : {}), ...(safeId(context.accountId) ? { accountId: safeId(context.accountId) } : {}), source: "participant_reported" as const }
+      ? { label: cleanText(context.label, 120) || "Sender not reported", provider: cleanText(context.provider, 80) || "Provider not reported", ...(cleanText(context.model, 120) ? { model: cleanText(context.model, 120) } : {}), ...(safeId(context.accountId) ? { accountId: safeId(context.accountId) } : {}), source: "participant_reported" as const }
       : undefined;
     return [{ id, to, text, ...(from ? { from } : {}), ...(taskId ? { taskId } : {}), ...(createdAt ? { createdAt } : {}), ...(senderContext ? { senderContext } : {}) }];
   });
@@ -91,20 +91,20 @@ function normalizeWorkspace(raw: unknown, projectId: string): Workspace | undefi
     const taskCount = Number.isSafeInteger(row.taskCount) && Number(row.taskCount) >= 0 && Number(row.taskCount) <= 100000 ? Number(row.taskCount) : undefined;
     const updatedAt = safeDate(row.updatedAt);
     return {
-      jobId: cleanText(row.jobId, 128) || "Execution ID unknown",
-      state: cleanText(row.state, 48) || "State unknown",
-      provider: cleanText(row.provider, 80) || "Provider unknown",
+      jobId: cleanText(row.jobId, 128) || "Execution ID not reported",
+      state: cleanText(row.state, 48) || "State not reported",
+      provider: cleanText(row.provider, 80) || "Provider not reported",
       ...(taskCount !== undefined ? { taskCount } : {}),
       ...(updatedAt ? { updatedAt } : {}),
     };
   });
   const executionResources: ExecutionResource[] = safeArray(raw.executionResources).slice(0, 50).map((row) => ({
-    provider: cleanText(row.provider, 80) || "Provider unknown",
-    sessionId: cleanText(row.sessionId, 180) || "Session unknown",
-    workspaceId: cleanText(row.workspaceId, 180) || "Workspace unknown",
-    accountId: cleanText(row.accountId, 128) || "Account unknown",
-    accountLabel: cleanText(row.accountLabel, 120) || "Account label unknown",
-    model: cleanText(row.model, 120) || "Model unknown",
+    provider: cleanText(row.provider, 80) || "Provider not reported",
+    sessionId: cleanText(row.sessionId, 180) || "Session not reported",
+    workspaceId: cleanText(row.workspaceId, 180) || "Workspace not reported",
+    accountId: cleanText(row.accountId, 128) || "Account not reported",
+    accountLabel: cleanText(row.accountLabel, 120) || "Account label not reported",
+    model: cleanText(row.model, 120) || "Model not reported",
     source: cleanText(row.modelSource, 120) || cleanText(row.source, 120) || "Source not reported",
     availability: cleanText(row.executionAvailability, 160) || "Availability not reported",
   }));
@@ -129,14 +129,14 @@ function field(label: string, name: string, options: { type?: string; value?: st
   return `<label for="${id}">${esc(label)}</label>${options.type === "textarea" ? `<textarea ${common} rows="3">${esc(options.value ?? "")}</textarea>` : `<input ${common} type="${esc(options.type ?? "text")}" value="${esc(options.value ?? "")}">`}`;
 }
 function executionSummary(workspace: Workspace, base: string): string {
-  const rows = workspace.executions.map((execution) => `<article class="aw-execution-card"><div><strong>${esc(execution.jobId)}</strong><span class="aw-execution-state">${esc(execution.state)}</span></div><dl><div><dt>Provider</dt><dd>${esc(execution.provider)}</dd></div><div><dt>Tasks</dt><dd>${execution.taskCount === undefined ? "Unknown" : execution.taskCount}</dd></div><div><dt>Updated</dt><dd>${execution.updatedAt ? esc(execution.updatedAt) : "Unknown"}</dd></div></dl></article>`).join("");
+  const rows = workspace.executions.map((execution) => `<article class="aw-execution-card"><div><strong>${esc(execution.jobId)}</strong><span class="aw-execution-state">${esc(execution.state)}</span></div><dl><div><dt>Provider</dt><dd>${esc(execution.provider)}</dd></div><div><dt>Tasks</dt><dd>${execution.taskCount === undefined ? "Not reported" : execution.taskCount}</dd></div><div><dt>Updated</dt><dd>${execution.updatedAt ? esc(execution.updatedAt) : "Not reported"}</dd></div></dl></article>`).join("");
   const body = rows || `<p class="aw-empty">${workspace.executionsReported ? "No executions reported in this snapshot." : "Execution rows were not included in this snapshot."}</p>`;
   const count = workspace.executionsReported ? `${workspace.executions.length} reported` : "not reported";
   return `<details class="aw-executions aw-executions-compact"><summary>Job executions · ${esc(count)}</summary><nav aria-label="Execution tools"><a href="${esc(base)}/admin/supervisor">Supervisor</a><a href="${esc(base)}/admin/jobs">Jobs</a></nav>${body}</details>`;
 }
 function configuredResources(workspace: Workspace): string {
   const rows = workspace.executionResources.map((resource) => `<li><div class="aw-resource-primary"><strong>${esc(resource.accountLabel)}</strong><span>${esc(resource.accountId)}</span><span>${esc(resource.provider)}</span></div><dl><div><dt>Model</dt><dd>${esc(resource.model)}</dd></div><div><dt>Session</dt><dd>${esc(resource.sessionId)}</dd></div><div><dt>Workspace</dt><dd>${esc(resource.workspaceId)}</dd></div><div><dt>Availability</dt><dd>${esc(resource.availability)}</dd></div><div><dt>Source</dt><dd>${esc(resource.source)}</dd></div></dl></li>`).join("");
-  const summary = workspace.resourcesReported ? `Configured LightSprint resources · ${workspace.executionResources.length}` : "Configured LightSprint resources · status unknown";
+  const summary = workspace.resourcesReported ? `Configured LightSprint resources · ${workspace.executionResources.length}` : "Configured LightSprint resources · status not reported";
   const content = rows ? `<ul class="aw-resource-list">${rows}</ul>` : `<p class="aw-empty">${workspace.resourcesReported ? "No configured resources reported." : "Resource configuration was not included in this snapshot."}</p>`;
   return `<details class="aw-resource-disclosure"><summary>${esc(summary)}</summary><p class="aw-note">Configured account sessions are resource metadata; they do not indicate an active worker or verified execution availability.</p>${content}</details>`;
 }
@@ -193,11 +193,11 @@ function conversation(workspace: Workspace, endpoint: string, base: string): str
   const feed = items.map((item) => {
     if (item.kind === "message") {
       const message = item.message;
-      const sender = message.senderContext ? `${message.senderContext.label} · ${message.senderContext.provider}${message.senderContext.model ? ` · ${message.senderContext.model} (reported)` : ""}${message.senderContext.accountId ? ` · Account ${message.senderContext.accountId}` : ""}` : "Sender context unknown";
-      return `<article class="aw-message" data-task-id="${esc(message.taskId ?? "")}" data-kind="message"><div class="aw-message-head"><strong>${esc(sender)}</strong><span>→ ${esc(message.to === "all" ? "all participants" : message.to)}</span>${message.taskId ? `<code>${esc(taskById.get(message.taskId)?.title ?? message.taskId)}</code>` : ""}</div><p>${esc(message.text)}</p>${message.createdAt ? `<time datetime="${esc(message.createdAt)}">${esc(message.createdAt)}</time>` : "<span class=\"aw-time-unknown\">Time unknown</span>"}</article>`;
+      const sender = message.senderContext ? `${message.senderContext.label} · ${message.senderContext.provider}${message.senderContext.model ? ` · ${message.senderContext.model} (reported)` : ""}${message.senderContext.accountId ? ` · Account ${message.senderContext.accountId}` : ""}` : "Sender context not reported";
+      return `<article class="aw-message" data-task-id="${esc(message.taskId ?? "")}" data-kind="message"><div class="aw-message-head"><strong>${esc(sender)}</strong><span>→ ${esc(message.to === "all" ? "all participants" : message.to)}</span>${message.taskId ? `<code>${esc(taskById.get(message.taskId)?.title ?? message.taskId)}</code>` : ""}</div><p>${esc(message.text)}</p>${message.createdAt ? `<time datetime="${esc(message.createdAt)}">${esc(message.createdAt)}</time>` : "<span class=\"aw-time-unknown\">Time not reported</span>"}</article>`;
     }
     const event = item.event;
-    return `<article class="aw-message aw-activity-message" data-task-id="${esc(event.taskId ?? "")}" data-kind="activity"><div class="aw-message-head"><strong>${esc(event.actor ? event.actor : "Actor unknown")}</strong><span>${esc(event.type.replaceAll("_", " "))}</span>${event.taskId ? `<code>${esc(taskById.get(event.taskId)?.title ?? event.taskId)}</code>` : ""}</div>${event.artifactId ? `<p>Artifact ${esc(event.artifactId)}</p>` : ""}${event.createdAt ? `<time datetime="${esc(event.createdAt)}">${esc(event.createdAt)}</time>` : "<span class=\"aw-time-unknown\">Time unknown</span>"}</article>`;
+    return `<article class="aw-message aw-activity-message" data-task-id="${esc(event.taskId ?? "")}" data-kind="activity"><div class="aw-message-head"><strong>${esc(event.actor ? event.actor : "Actor not reported")}</strong><span>${esc(event.type.replaceAll("_", " "))}</span>${event.taskId ? `<code>${esc(taskById.get(event.taskId)?.title ?? event.taskId)}</code>` : ""}</div>${event.artifactId ? `<p>Artifact ${esc(event.artifactId)}</p>` : ""}${event.createdAt ? `<time datetime="${esc(event.createdAt)}">${esc(event.createdAt)}</time>` : "<span class=\"aw-time-unknown\">Time not reported</span>"}</article>`;
   }).join("");
   const recipients = `<label for="aw-message-to">Recipient</label><select id="aw-message-to" name="to"><option value="all">All participants</option>${workspace.participants.map((person) => `<option value="${esc(person.id)}">${esc(person.label)}</option>`).join("")}</select>`;
   const tasks = `<label for="aw-message-task">Task (optional)</label><select id="aw-message-task" name="taskId"><option value="">No task</option>${workspace.tasks.map((task) => `<option value="${esc(task.id)}">${esc(task.title)} · ${esc(task.id)}</option>`).join("")}</select>`;
@@ -216,14 +216,14 @@ function deliverables(workspace: Workspace, endpoint: string, byId: Map<string, 
     const task = taskById.get(artifact.taskId ?? ""), review = reviewByArtifact.get(artifact.id);
     const decision = review ? `<p class="aw-review-state">Workspace review: ${esc(review.decision.replaceAll("_", " "))}${review.reviewer ? ` · ${esc(labelFor(review.reviewer, byId))}` : ""}</p>${review.note ? `<p>${esc(review.note)}</p>` : ""}` : task?.state === "review" ? "<p class=\"aw-review-state\">Pending workspace review</p>" : "";
     const controls = task?.state === "review" && !review ? `<details class="aw-review-actions"><summary>Workspace review</summary><p class="aw-review-note">This records an Agent Workspace decision only. It does not approve a provider request or merge a pull request.</p>${actionForm("review_decide", endpoint, workspace.revision, `<input type="hidden" name="artifactId" value="${esc(artifact.id)}"><label for="decision-${esc(artifact.id)}">Workspace decision</label><select id="decision-${esc(artifact.id)}" name="decision"><option value="approved">Approve in workspace</option><option value="changes_requested">Request changes in workspace</option></select>${field("Review note (optional)", "note", { max: 2000 })}`, "Record workspace review")}</details>` : "";
-    return `<article class="aw-artifact"><div class="aw-artifact-head"><span class="aw-state">${esc(artifact.kind.replaceAll("_", " "))}</span><code>${esc(artifact.id)}</code></div><h3>${esc(artifact.title)}</h3><p class="aw-artifact-ref">${esc(artifact.reference)}</p><small>Task ${esc(artifact.taskId ?? "unknown")} · submitted by ${esc(labelFor(artifact.submittedBy, byId))}</small>${decision}${controls}</article>`;
+    return `<article class="aw-artifact"><div class="aw-artifact-head"><span class="aw-state">${esc(artifact.kind.replaceAll("_", " "))}</span><code>${esc(artifact.id)}</code></div><h3>${esc(artifact.title)}</h3><p class="aw-artifact-ref">${esc(artifact.reference)}</p><small>Task ${esc(artifact.taskId ?? "not reported")} · submitted by ${esc(labelFor(artifact.submittedBy, byId))}</small>${decision}${controls}</article>`;
   }).join("");
   const reviews = workspace.reviews.map((review) => `<li><strong>${esc(review.decision.replaceAll("_", " "))}</strong> · artifact ${esc(review.artifactId)}${review.reviewer ? ` · ${esc(labelFor(review.reviewer, byId))}` : ""}${review.note ? `<p>${esc(review.note)}</p>` : ""}</li>`).join("");
   return `<section class="aw-panel-grid"><section class="aw-panel-block"><header class="aw-section-head"><div><p class="eyebrow">Deliverables</p><h2>Artifacts <span class="aw-count">${workspace.artifacts.length}</span></h2></div></header>${cards || `<p class="aw-empty">No artifacts submitted in this project.</p>`}</section><section class="aw-panel-block"><header class="aw-section-head"><div><p class="eyebrow">Review queue</p><h2>Reviews <span class="aw-count">${pending.length}</span></h2></div></header>${pending.length ? `<p class="aw-note">Review actions are checked by the server against task ownership.</p>` : `<p class="aw-empty">No pending reviews reported.</p>`}${reviews ? `<ul class="aw-review-list">${reviews}</ul>` : ""}</section></section>`;
 }
 
 function activity(workspace: Workspace, byId: Map<string, Participant>): string {
-  const rows = workspace.events.map((event) => `<li><span class="aw-state">${esc(event.type.replaceAll("_", " "))}</span><span>${event.actor ? esc(labelFor(event.actor, byId)) : "Actor unknown"}${event.taskId ? ` · task ${esc(event.taskId)}` : ""}${event.artifactId ? ` · artifact ${esc(event.artifactId)}` : ""}</span>${event.createdAt ? `<time datetime="${esc(event.createdAt)}">${esc(event.createdAt)}</time>` : ""}</li>`).join("");
+  const rows = workspace.events.map((event) => `<li><span class="aw-state">${esc(event.type.replaceAll("_", " "))}</span><span>${event.actor ? esc(labelFor(event.actor, byId)) : "Actor not reported"}${event.taskId ? ` · task ${esc(event.taskId)}` : ""}${event.artifactId ? ` · artifact ${esc(event.artifactId)}` : ""}</span>${event.createdAt ? `<time datetime="${esc(event.createdAt)}">${esc(event.createdAt)}</time>` : ""}</li>`).join("");
   return `<section class="aw-panel-block"><header class="aw-section-head"><div><p class="eyebrow">Audit trail</p><h2>Recent activity <span class="aw-count">${workspace.events.length}</span></h2></div></header>${rows ? `<ul class="aw-events">${rows}</ul>` : `<p class="aw-empty">No activity events in this snapshot.</p>`}</section>`;
 }
 
@@ -283,16 +283,16 @@ function liveWorkspaceScript(nonce?: string): string {
         const head = document.createElement("div"); head.className = "aw-message-head";
         if (item.kind === "message") {
           const context = row.senderContext;
-          const sender = context && context.source === "participant_reported" ? [context.label, context.provider, context.model ? `${context.model} (reported)` : "", context.accountId ? `Account ${context.accountId}` : ""].filter(Boolean).join(" · ") : "Sender context unknown";
-          head.append(makeText("strong", sender), makeText("span", `→ ${(row.to ?? row.recipient) === "all" ? "all participants" : typeof (row.to ?? row.recipient) === "string" ? (row.to ?? row.recipient) : "Recipient unknown"}`));
-        } else head.append(makeText("strong", typeof row.actor === "string" ? row.actor : "Actor unknown"), makeText("span", kind.replaceAll("_", " ")));
+          const sender = context && context.source === "participant_reported" ? [context.label, context.provider, context.model ? `${context.model} (reported)` : "", context.accountId ? `Account ${context.accountId}` : ""].filter(Boolean).join(" · ") : "Sender context not reported";
+          head.append(makeText("strong", sender), makeText("span", `→ ${(row.to ?? row.recipient) === "all" ? "all participants" : typeof (row.to ?? row.recipient) === "string" ? (row.to ?? row.recipient) : "Recipient not reported"}`));
+        } else head.append(makeText("strong", typeof row.actor === "string" ? row.actor : "Actor not reported"), makeText("span", kind.replaceAll("_", " ")));
         if (taskId) { const title = taskById.get(taskId)?.title; head.append(makeText("code", typeof title === "string" ? `${title} · ${taskId}` : taskId)); }
         article.append(head);
         if (item.kind === "message") article.append(makeText("p", row.text));
         else if (typeof row.artifactId === "string") article.append(makeText("p", `Artifact ${row.artifactId}`));
         const at = feedDate(row.createdAt ?? row.at);
         if (typeof at === "string") { const time = makeText("time", at) as HTMLTimeElement; time.dateTime = at; article.append(time); }
-        else article.append(makeText("span", "Time unknown", "aw-time-unknown"));
+        else article.append(makeText("span", "Time not reported", "aw-time-unknown"));
         fragment.append(article);
       }
       if (!rows.length) fragment.append(makeText("p", "No messages or activity in this project snapshot.", "aw-empty"));
