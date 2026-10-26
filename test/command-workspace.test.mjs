@@ -98,7 +98,7 @@ test("workspace command centre is authenticated and renders bounded real resourc
   assert.match(html, /href="\/token2oauth\/admin\/oracle"/);
   assert.match(html, /href="\/token2oauth\/admin\/codex"/);
   assert.match(html, /Running tasks 2/);
-  assert.match(html, /Models unknown · Last seen unknown/);
+  assert.match(html, /Models not reported · Last seen not reported/);
   assert.match(html, /Profile&lt;\/script&gt;/);
   assert.match(html, /class="cw-split"/);
   assert.match(html, /@media\(max-width:390px\)/);

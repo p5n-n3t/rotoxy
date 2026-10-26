@@ -98,7 +98,7 @@ test("loader rejects non-absolute trusted paths and out-of-bound pagination befo
   assert.equal(calls, 0);
 });
 
-test("rendered operator page is escaped, bounded in scope, and labels unknown data honestly", () => {
+test("rendered operator page is escaped, bounded in scope, and labels missing data clearly", () => {
   const snapshot = fixture();
   snapshot.hosts.push({ host: "ora7-lab", models: ["team/model-x:4b"], lastCatalogCheck: 20, catalogCheckState: "checked",
     configured: true, enabled: true, assignedTasks: 4, completedTasks: 3, runningTasks: 1 });
@@ -115,8 +115,8 @@ test("rendered operator page is escaped, bounded in scope, and labels unknown da
   assert.match(html, /Oracle pool/);
   assert.match(html, /ora7-lab/);
   assert.match(html, /team\/model-x:4b/);
-  assert.match(html, /Provider: Unknown/);
-  assert.match(html, /Utilization unknown: no stored host-slot capacity/);
+  assert.match(html, /Provider: Not reported/);
+  assert.match(html, /Utilization not reported: no stored host-slot capacity/);
   assert.match(html, /1 completed · 1 error/);
   assert.match(html, /Requested model/);
   assert.match(html, /Reported model/);
@@ -124,8 +124,8 @@ test("rendered operator page is escaped, bounded in scope, and labels unknown da
   assert.match(html, /\/gateway\/admin\/services/);
   assert.match(html, /min-width:1050px/);
   assert.match(html, /Lightweight advisory model/);
-  assert.match(html, /share unknown/);
-  assert.match(html, /Prompt tokens observed<\/div><div class="metric">Unknown/);
+  assert.match(html, /share not reported/);
+  assert.match(html, /Prompt tokens observed<\/div><div class="metric">Not reported/);
   assert.match(html, /&lt;script&gt;owner-secret&lt;\/script&gt;/);
   assert.doesNotMatch(html, /<script>owner-secret/);
   assert.doesNotMatch(html, /source-owner|private-prompt|private-result|task-id/);

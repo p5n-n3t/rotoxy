@@ -23,7 +23,7 @@ test("runner admin protects changes and only forwards trusted executable profile
  assert.equal((await send({action:"add",revision},{origin:"https://attacker.invalid"})).status,403);assert.equal(calls.length,before);
  const page=await fetch(`${base}/admin/runners`,{headers:{cookie}}),html=await page.text();assert.equal(page.status,200);assert.match(html,/not confirm account entitlement, quota, or working inference/);assert.match(html,/No runner profiles configured/);assert.match(html,/name="_csrf"/);
  const result=await send({action:"add",revision,kind:"claude",label:"Local Claude",cwd,binary,enabled:"1",allowedModels:""});assert.equal(result.status,303);const payload=JSON.parse(calls.at(-1).input);assert.equal(payload.request.action,"add");assert.equal(payload.request.profile.binary,binary);assert.deepEqual(payload.request.profile.allowedModels,[]);
- const afterAdd=await fetch(`${base}/admin/runners`,{headers:{cookie}});assert.match(await afterAdd.text(),/Unknown \/ not configured/);
+ const afterAdd=await fetch(`${base}/admin/runners`,{headers:{cookie}});assert.match(await afterAdd.text(),/Not configured/);
  const count=calls.length;const untrusted=await send({action:"add",revision,kind:"claude",label:"bad",cwd,binary:"/tmp/attacker",enabled:"1",allowedModels:"model"});assert.equal(untrusted.status,400);assert.equal(calls.length,count);
  const injection=await send({action:"add",revision,kind:"claude",label:"bad",cwd,binary,enabled:"1",allowedModels:"model",extra:"--version;id"});assert.equal(injection.status,400);assert.equal(calls.length,count);
 });
