@@ -70,7 +70,7 @@ test("profile admin controls enforce session and CSRF, scope removals, and keep 
     assert.match(codexHtml, /<title>ChatGPT &amp; Codex accounts · ROTOXY<\/title>/);
     assert.match(codexHtml, /<h1>ChatGPT &amp; Codex accounts<\/h1>/);
     assert.match(codexHtml, /ChatGPT &amp; Codex<\/a>/);
-    assert.equal((codexHtml.match(/href="\/t2o\/admin\/codex"/g) || []).length, 2, "each responsive navigation renders one Codex route");
+    assert.equal((codexHtml.match(/href="\/t2o\/admin\/codex"/g) || []).length, 1, "the shared responsive navigation renders one Codex route");
     assert.match(codexHtml, /Start ChatGPT device-code sign-in/);
     assert.match(codexHtml, /learn\.chatgpt\.com\/docs\/app-server#auth-endpoints/);
     assert.match(codexHtml, /developers\.openai\.com\/siwc/);
