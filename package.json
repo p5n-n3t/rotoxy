@@ -11,6 +11,7 @@
   "files": [
     "dist",
     "scripts/monitor-workforce.mjs",
+    "scripts/monitor-lifecycle.mjs",
     "scripts/desktop-alarm-hook.mjs",
     "assets/brand/*.svg",
     "docs",

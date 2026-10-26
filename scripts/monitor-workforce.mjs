@@ -9,6 +9,7 @@ import { StateStore } from '../dist/store.js';
 import { serverMessages } from '../dist/jsonrpc-wire.js';
 import { boundObservationDiagnostics, classifyObservationFailure, normalizeSessionObservation, WorkerObservationFailure } from '../dist/worker-observation.js';
 import { runDesktopAlarm } from './desktop-alarm-hook.mjs';
+import { childExitState } from './monitor-lifecycle.mjs';
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const configPath=process.argv[2];
@@ -37,7 +38,7 @@ function python(command,item){return new Promise((yes,no)=>{
   let out='',size=0;const limit=command==='registrations'?1024*1024:16384;const timer=setTimeout(()=>p.kill('SIGKILL'),60000);
   p.stdout.on('data',b=>{size+=b.length;if(size>limit)p.kill('SIGKILL');else out+=b;});
   p.on('error',()=>{clearTimeout(timer);no(Error('guidance_unavailable'));});
-  p.on('exit',code=>{clearTimeout(timer);if(code!==0)no(Error('guidance_failed'));else{try{yes(JSON.parse(out));}catch{no(Error('guidance_invalid_receipt'));}}});
+  p.on('exit',(code,signal)=>{clearTimeout(timer);const state=childExitState(stopping,code,signal);if(state==='stopped')return yes({stopped:true});if(state==='failed')no(Error('guidance_failed'));else{try{yes(JSON.parse(out));}catch{no(Error('guidance_invalid_receipt'));}}});
   p.stdin.on('error',()=>{});p.stdin.end(item?JSON.stringify(item):'');
 });}
 function recoveryOnce(){return new Promise((yes,no)=>{
@@ -46,7 +47,7 @@ function recoveryOnce(){return new Promise((yes,no)=>{
   let out='',size=0;const timer=setTimeout(()=>p.kill('SIGKILL'),60000);
   p.stdout.on('data',b=>{size+=b.length;if(size>16384)p.kill('SIGKILL');else out+=b;});
   p.on('error',()=>{clearTimeout(timer);no(Error('recovery_service_unavailable'));});
-  p.on('exit',code=>{clearTimeout(timer);if(code!==0)no(Error('recovery_service_failed'));else{try{yes(JSON.parse(out));}catch{no(Error('recovery_service_invalid_receipt'));}}});
+  p.on('exit',(code,signal)=>{clearTimeout(timer);const state=childExitState(stopping,code,signal);if(state==='stopped')return yes({stopped:true});if(state==='failed')no(Error('recovery_service_failed'));else{try{yes(JSON.parse(out));}catch{no(Error('recovery_service_invalid_receipt'));}}});
 });}
 async function observation(worker,state){
   const account=state.accounts.find(a=>a.id===worker.accountId);
@@ -111,14 +112,16 @@ async function check(){
       checked+=group.length;
     }));
   }
+  if(stopping)return;
   phase='guidance';const guide=cfg.guide===true?await python('guide'):undefined;
+  if(stopping)return;
   phase='recovery';let recovery,recoveryStatus=cfg.recoveryServiceConfig?'completed':'not_configured';
   if(cfg.recoveryServiceConfig){
     try{recovery=await recoveryOnce();}
     catch{recoveryStatus='failed';console.error(JSON.stringify({at:new Date().toISOString(),event:'recovery_service_outcome',status:'failed',error:'recovery_service_failed'}));}
   }
   let desktopAlarm={status:'not_configured',scanned:0,submitted:0,failed:0,ambiguous:0};
-  if(cfg.desktopAlarm){
+  if(cfg.desktopAlarm&&!stopping){
     desktopAlarm=await runDesktopAlarm({config:cfg.desktopAlarm,root});
     if(desktopAlarm.status!=='completed')console.error(JSON.stringify({at:new Date().toISOString(),event:'desktop_alarm_outcome',...desktopAlarm}));
   }
@@ -127,7 +130,7 @@ async function check(){
   if(recoveryStatus==='failed'&&process.argv.includes('--once'))process.exitCode=1;
 }
 do{
-  try{await check();}catch{console.error(JSON.stringify({at:new Date().toISOString(),error:'monitor_check_failed',phase}));if(process.argv.includes('--once'))process.exitCode=1;}
+  try{await check();}catch{if(!stopping){console.error(JSON.stringify({at:new Date().toISOString(),error:'monitor_check_failed',phase}));if(process.argv.includes('--once'))process.exitCode=1;}}
   if(process.argv.includes('--once')||stopping)break;
   for(let i=0;i<cfg.intervalSeconds&&!stopping;i++)await new Promise(r=>setTimeout(r,1000));
 }while(!stopping);
