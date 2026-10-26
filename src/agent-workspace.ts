@@ -205,30 +205,46 @@ export class AgentWorkspaceService {
 
   async dispatch(raw: unknown, clientId: string): Promise<unknown> {
     if (!this.backend?.authorizeWorkspace) throw new WorkspaceExecutionError("supervisor_unavailable");
-    const submission = validateJobSubmission(raw);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new WorkspaceExecutionError("invalid_input");
+    const request = { ...(raw as Record<string, unknown>) };
+    const shareMode = request.shareMode === undefined ? "private" : request.shareMode;
+    delete request.shareMode;
+    if (shareMode !== "private" && shareMode !== "fleet") throw new WorkspaceExecutionError("invalid_input");
+    let submission: JobSubmission;
+    try { submission = validateJobSubmission(request); } catch { throw new WorkspaceExecutionError("invalid_input"); }
     await this.backend.authorizeWorkspace(submission.projectId, clientId);
-    const result = await this.execution.dispatch(submission, { projectId: submission.projectId, clientId });
+    const result = await this.execution.dispatch({ ...submission, shareMode }, { projectId: submission.projectId, clientId });
     // Replays can race the original submit. Avoid concurrent projection writes;
     // explicit workspace_sync repairs a missing projection after a crash.
     let projectionPending = false;
-    if (result.accepted && !result.replayed) {
+    if (result.accepted && !result.replayed && result.dispatch.shareMode === "fleet") {
       await this.backend.authorizeWorkspace(submission.projectId, clientId);
       try { projectionPending = await this.projectSubmission(submission, `client:${clientId}`, [], []); }
       catch { projectionPending = true; }
     }
-    return { dispatch: result.dispatch, accepted: result.accepted, replayed: result.replayed, projectionPending, ...(result.providerError ? { providerError: result.providerError } : {}) };
+    return { dispatch: result.dispatch, accepted: result.accepted, replayed: result.replayed, projectionPending, ...(result.shareHandle ? { shareHandle: result.shareHandle } : {}), ...(result.providerError ? { providerError: result.providerError } : {}) };
   }
 
-  async sync(projectId: string, jobId: string, clientId: string): Promise<unknown> {
+  async sync(raw: Record<string, unknown>, clientId: string): Promise<unknown>;
+  async sync(projectId: string, jobId: string, clientId: string): Promise<unknown>;
+  async sync(rawOrProjectId: Record<string, unknown> | string, clientIdOrJobId: string, legacyClientId?: string): Promise<unknown> {
     if (!this.backend?.authorizeWorkspace) throw new WorkspaceExecutionError("supervisor_unavailable");
+    const raw: Record<string, unknown> = typeof rawOrProjectId === "string" ? { projectId: rawOrProjectId, jobId: clientIdOrJobId } : rawOrProjectId;
+    const clientId = typeof rawOrProjectId === "string" ? legacyClientId : clientIdOrJobId;
+    if (!clientId) throw new WorkspaceExecutionError("invalid_input");
+    const { projectId, jobId } = raw ?? {};
+    if (typeof projectId !== "string" || (jobId !== undefined && typeof jobId !== "string") || (raw.shareHandle !== undefined && typeof raw.shareHandle !== "string")) throw new WorkspaceExecutionError("invalid_input");
     await this.backend.authorizeWorkspace(projectId, clientId);
-    const result = await this.execution.sync(projectId, jobId, { projectId, clientId });
-    const stored = await this.execution.getOwned(projectId, jobId, clientId);
+    const result = await this.execution.sync({ projectId, ...(typeof jobId === "string" ? { jobId } : {}), ...(typeof raw.shareHandle === "string" ? { shareHandle: raw.shareHandle } : {}) }, { projectId, clientId });
     await this.backend.authorizeWorkspace(projectId, clientId);
+    if (!result.isInitiator) return { dispatch: result.dispatch, status: result.status, results: result.results, shared: true, resultsUnavailable: result.resultsUnavailable, resultsTruncated: result.resultsTruncated, ...(result.resultError ? { resultError: result.resultError } : {}) };
+    const stored = await this.execution.getOwned(projectId, jobId ?? result.dispatch.jobId, clientId);
     if (stored.actor !== `client:${clientId}`) throw new WorkspaceExecutionError("execution_not_found");
     let projectionPending = false;
-    try { projectionPending = await this.projectSubmission(stored.submission, stored.actor, result.results, result.status.tasks); }
-    catch { projectionPending = true; }
+    if (stored.dispatch.shareMode === "fleet") {
+      try { projectionPending = await this.projectSubmission(stored.submission, stored.actor, result.results, result.status.tasks); }
+      catch { projectionPending = true; }
+    }
     return { dispatch: result.dispatch, status: result.status, results: result.results, projectionPending, resultsUnavailable: result.resultsUnavailable, resultsTruncated: result.resultsTruncated, ...(result.resultError ? { resultError: result.resultError } : {}) };
   }
 

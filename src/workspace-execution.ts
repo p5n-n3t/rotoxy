@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -15,8 +15,8 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export type WorkspaceExecutionToolName = "workspace_dispatch" | "workspace_sync";
 export const WORKSPACE_EXECUTION_TOOLS = Object.freeze([
-  { name: "workspace_dispatch", description: "Publish one bounded job DAG to this project's collaborators as task metadata. Prompt text stays owner-private; only the submitting OAuth client can reconcile provider results.", inputSchema: JOB_TOOL_DEFINITIONS[0].inputSchema },
-  { name: "workspace_sync", description: "Reconcile an execution previously published by this OAuth client. Reads owner-scoped job status and results; never resubmits.", inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "jobId"], properties: { projectId: { type: "string", maxLength: 128 }, jobId: { type: "string", maxLength: 128 } } } },
+  { name: "workspace_dispatch", description: "Submit a bounded job DAG. Jobs are private by default; set shareMode to fleet to grant currently authorized Fleet collaborators status and result access through the returned shareHandle. Sharing never changes the initiating provider account/session binding.", inputSchema: (() => { const schema = structuredClone(JOB_TOOL_DEFINITIONS[0].inputSchema) as any; schema.properties.shareMode = { type: "string", enum: ["private", "fleet"], description: "Optional. Defaults to private. Use fleet only when collaborators should be able to inspect and sync this job." }; return schema; })() },
+  { name: "workspace_sync", description: "Reconcile an existing execution without resubmitting. Owners use jobId; authorized Fleet collaborators use the shareHandle returned by an explicitly shared dispatch.", inputSchema: { type: "object", additionalProperties: false, required: ["projectId"], oneOf: [{ required: ["jobId"], not: { required: ["shareHandle"] } }, { required: ["shareHandle"], not: { required: ["jobId"] } }], properties: { projectId: { type: "string", maxLength: 128 }, jobId: { type: "string", maxLength: 128 }, shareHandle: { type: "string", pattern: "^share_[A-Za-z0-9_-]{32}$", maxLength: 38 } } } },
 ] as const);
 
 export function isWorkspaceExecutionToolName(name: unknown): name is WorkspaceExecutionToolName {
@@ -28,7 +28,7 @@ export class WorkspaceExecutionError extends Error {
   constructor(readonly code: "invalid_input" | "invalid_limit" | "execution_not_found" | "idempotency_conflict" | "supervisor_unavailable" | "ledger_unavailable" | "bridge_timeout" | "bridge_output_invalid") { super(code); }
 }
 
-export type WorkspaceExecutionSummary = { projectId: string; jobId: string; state: string; provider: "lightsprint"; taskCount: number; createdAt: number; updatedAt: number };
+export type WorkspaceExecutionSummary = { projectId: string; jobId: string; state: string; provider: "lightsprint"; taskCount: number; createdAt: number; updatedAt: number; shareMode?: "private" | "fleet" };
 export interface WorkspaceReconciliationBinding { projectId: string; jobId: string; clientId: string }
 export interface WorkspaceReconciliationCallbacks {
   claim(limit: number): Promise<WorkspaceReconciliationBinding[]>;
@@ -69,7 +69,7 @@ async function runPython(executable: string, args: string[], stdin: string, opti
     const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new WorkspaceExecutionError("bridge_timeout")); }, options.timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => { size += chunk.length; if (size > options.maxStdoutBytes) { child.kill("SIGKILL"); finish(new WorkspaceExecutionError("bridge_output_invalid")); } else buffers.push(Buffer.from(chunk)); });
     child.on("error", () => finish(new WorkspaceExecutionError("ledger_unavailable")));
-    child.on("close", code => { const output = Buffer.concat(buffers).toString("utf8"); if (code !== 0) { try { const failure = JSON.parse(output); const allowed = ["execution_not_found", "idempotency_conflict", "invalid_input", "invalid_limit", "invalid_owner", "invalid_request", "invalid_state"]; finish(new WorkspaceExecutionError(allowed.includes(failure.error) ? failure.error : "ledger_unavailable")); } catch { finish(new WorkspaceExecutionError("ledger_unavailable")); } } else finish(undefined, output); });
+    child.on("close", code => { const output = Buffer.concat(buffers).toString("utf8"); if (code !== 0) { try { const failure = JSON.parse(output); const allowed = ["execution_not_found", "idempotency_conflict", "invalid_input", "invalid_limit", "invalid_owner", "invalid_request", "invalid_state", "invalid_sharing_mode"]; finish(new WorkspaceExecutionError(allowed.includes(failure.error) ? failure.error : "ledger_unavailable")); } catch { finish(new WorkspaceExecutionError("ledger_unavailable")); } } else finish(undefined, output); });
     child.stdin.on("error", () => finish(new WorkspaceExecutionError("ledger_unavailable")));
     child.stdin.end(stdin);
   });
@@ -91,33 +91,42 @@ export class WorkspaceExecutionService {
 
   async summaries(projectId: string): Promise<WorkspaceExecutionSummary[]> {
     const result = await this.ledger<{ executions?: WorkspaceExecutionSummary[] }>({ command: "list", projectId });
-    return Array.isArray(result.executions) ? result.executions.filter(row => isObject(row) && row.projectId === projectId && safeId(row.jobId)).slice(0, 100) : [];
+    return Array.isArray(result.executions) ? result.executions.filter(row => isObject(row) && row.projectId === projectId && safeId(row.jobId) && row.shareMode === "fleet").slice(0, 100) : [];
   }
 
-  async dispatch(raw: unknown, caller: SupervisorCaller): Promise<{ dispatch: WorkspaceExecutionSummary; accepted: boolean; replayed: boolean; providerError?: string }> {
+  async dispatch(raw: unknown, caller: SupervisorCaller): Promise<{ dispatch: WorkspaceExecutionSummary; accepted: boolean; replayed: boolean; shareHandle?: string; providerError?: string }> {
     if (!this.backend) throw new WorkspaceExecutionError("supervisor_unavailable");
-    const submission = validateJobSubmission(raw);
+    if (!isObject(raw)) throw new WorkspaceExecutionError("invalid_input");
+    const shareMode = raw.shareMode === undefined ? "private" : raw.shareMode;
+    if (shareMode !== "private" && shareMode !== "fleet") throw new WorkspaceExecutionError("invalid_input");
+    const submissionInput = { ...raw }; delete submissionInput.shareMode;
+    let submission: JobSubmission;
+    try { submission = validateJobSubmission(submissionInput); } catch { throw new WorkspaceExecutionError("invalid_input"); }
     if (submission.projectId !== caller.projectId || !safeClientId(caller.clientId)) throw new WorkspaceExecutionError("invalid_input");
     await this.backend.authorizeWorkspace?.(caller.projectId, caller.clientId);
-    const requestHash = createHash("sha256").update(canonical(submission)).digest("hex");
+    // Preserve old private idempotency hashes; include the sharing choice for
+    // new Fleet shares so replay cannot silently change a job's visibility.
+    const requestHash = createHash("sha256").update(shareMode === "private" ? canonical(submission) : canonical({ submission, shareMode })).digest("hex");
+    const shareHandle = shareMode === "fleet" ? `share_${randomBytes(24).toString("base64url")}` : null;
     const remoteJobId = workspaceId("job", caller.projectId, caller.clientId, submission.jobId);
     const remoteIdempotencyKey = workspaceId("idem", caller.projectId, caller.clientId, submission.idempotencyKey);
     const remoteSubmission: JobSubmission = { ...submission, jobId: remoteJobId, idempotencyKey: remoteIdempotencyKey };
     const reservation = await this.ledger<{ created: boolean; shouldSubmit: boolean; dispatch: WorkspaceExecutionSummary }>({
       command: "reserve", projectId: caller.projectId, jobId: submission.jobId, remoteJobId, clientId: caller.clientId,
-      actor: `client:${caller.clientId}`, idempotencyKey: submission.idempotencyKey, remoteIdempotencyKey, requestHash, submission, remoteSubmission,
+      actor: `client:${caller.clientId}`, idempotencyKey: submission.idempotencyKey, remoteIdempotencyKey, requestHash, submission, remoteSubmission, shareMode, shareHandle,
     });
+    const returnedHandle = shareMode === "fleet" && typeof (reservation as any).shareHandle === "string" ? (reservation as any).shareHandle as string : undefined;
     if (!reservation.shouldSubmit) {
-      const dispatch = reservation.dispatch.state === "pending" ? await this.setState(caller, submission.jobId, "needs_reconciliation") : reservation.dispatch;
-      return { dispatch, accepted: ["accepted", "queued", "running", "held", "blocked", "complete", "completed"].includes(dispatch.state), replayed: true };
+      const dispatch = reservation.dispatch.state === "pending" ? await this.setState(caller, submission.jobId, "needs_reconciliation", caller.clientId) : reservation.dispatch;
+      return { dispatch, accepted: ["accepted", "queued", "running", "held", "blocked", "complete", "completed"].includes(dispatch.state), replayed: true, ...(returnedHandle ? { shareHandle: returnedHandle } : {}) };
     }
     try { await this.backend.callTool("job_submit", remoteSubmission, caller); }
     catch (error) {
-      const state = await this.setState(caller, submission.jobId, "needs_reconciliation");
-      return { dispatch: state, accepted: false, replayed: false, providerError: safeProviderError(error) };
+      const state = await this.setState(caller, submission.jobId, "needs_reconciliation", caller.clientId);
+      return { dispatch: state, accepted: false, replayed: false, ...(returnedHandle ? { shareHandle: returnedHandle } : {}), providerError: safeProviderError(error) };
     }
-    const state = await this.setState(caller, submission.jobId, "accepted");
-    return { dispatch: state, accepted: true, replayed: false };
+    const state = await this.setState(caller, submission.jobId, "accepted", caller.clientId);
+    return { dispatch: state, accepted: true, replayed: false, ...(returnedHandle ? { shareHandle: returnedHandle } : {}) };
   }
 
   async getOwned(projectId: string, jobId: string, clientId: string): Promise<{ dispatch: WorkspaceExecutionSummary; submission: JobSubmission; remoteJobId: string; actor: string }> {
@@ -153,15 +162,22 @@ export class WorkspaceExecutionService {
     if (result.settled !== true) throw new WorkspaceExecutionError("bridge_output_invalid");
   }
 
-  async sync(projectId: string, jobId: string, caller: SupervisorCaller): Promise<{ dispatch: WorkspaceExecutionSummary; status: { state: string; revision?: number; error?: string; tasks: { taskId: string; state?: string; error?: string }[] }; results: { taskId: string; text: string; truncated?: boolean; reportedModel?: string; assistantAt?: number }[]; resultsUnavailable: boolean; resultsTruncated: boolean; resultError?: string }> {
-    if (!this.backend || projectId !== caller.projectId || !safeId(jobId) || !safeClientId(caller.clientId)) throw new WorkspaceExecutionError("invalid_input");
+  async sync(raw: { projectId: string; jobId?: string; shareHandle?: string }, caller: SupervisorCaller): Promise<{ dispatch: WorkspaceExecutionSummary; isInitiator: boolean; status: { state: string; revision?: number; error?: string; tasks: { taskId: string; state?: string; error?: string }[] }; results: { taskId: string; text: string; truncated?: boolean; reportedModel?: string; assistantAt?: number }[]; resultsUnavailable: boolean; resultsTruncated: boolean; resultError?: string }> {
+    const { projectId, jobId, shareHandle } = raw ?? {};
+    if (!this.backend || projectId !== caller.projectId || !safeId(projectId) || !safeClientId(caller.clientId) ||
+        (shareHandle === undefined ? !safeId(jobId) : (!/^share_[A-Za-z0-9_-]{32}$/.test(shareHandle) || jobId !== undefined))) throw new WorkspaceExecutionError("invalid_input");
     await this.backend.authorizeWorkspace?.(projectId, caller.clientId);
-    const binding = await this.getOwned(projectId, jobId, caller.clientId);
+    const binding = shareHandle
+      ? await this.ledger<{ dispatch: WorkspaceExecutionSummary; submission: JobSubmission; remoteJobId: string; actor: string; ownerClientId: string }>({ command: "get_shared", projectId, shareHandle, actorClientId: caller.clientId })
+      : await this.getOwned(projectId, jobId!, caller.clientId);
+    const ownerClientId = (binding as any).ownerClientId ?? caller.clientId;
+    const isInitiator = ownerClientId === caller.clientId;
     let rawStatus: unknown;
     try { rawStatus = await this.backend.callTool("job_status", { projectId, jobId: binding.remoteJobId }, caller); }
-    catch (error) { const dispatch = await this.setState(caller, jobId, "needs_reconciliation"); return { dispatch, status: { state: "unknown", error: safeProviderError(error), tasks: [] }, results: [], resultsUnavailable: true, resultsTruncated: false }; }
+    catch (error) { await this.backend.authorizeWorkspace?.(projectId, caller.clientId); const dispatch = await this.setState(caller, binding.dispatch.jobId, "needs_reconciliation", ownerClientId); return { dispatch, isInitiator, status: { state: "unknown", error: safeProviderError(error), tasks: [] }, results: [], resultsUnavailable: true, resultsTruncated: false }; }
+    await this.backend.authorizeWorkspace?.(projectId, caller.clientId);
     const state = remoteState(rawStatus);
-    const dispatch = await this.setState(caller, jobId, state);
+    const dispatch = await this.setState(caller, binding.dispatch.jobId, state, ownerClientId);
     const statusObj = isObject(rawStatus) ? rawStatus : {};
     const allowedTasks = new Set(binding.submission.tasks.map(task => task.taskId));
     const taskRows = Array.isArray(statusObj.tasks) ? statusObj.tasks.filter(isObject).slice(0, 100).map(task => {
@@ -174,8 +190,13 @@ export class WorkspaceExecutionService {
     let resultsUnavailable = false;
     let resultsTruncated = false;
     let resultError: string | undefined;
-    try {
-      const rawResults = await this.backend.callTool("job_results", { projectId, jobId: binding.remoteJobId }, caller);
+    let rawResults: unknown;
+    try { rawResults = await this.backend.callTool("job_results", { projectId, jobId: binding.remoteJobId }, caller); }
+    catch (error) { resultsUnavailable = true; resultError = safeProviderError(error); }
+    // Recheck after the remote call even when the provider call failed, so a
+    // client revoked mid-request cannot still receive status-only responses.
+    await this.backend.authorizeWorkspace?.(projectId, caller.clientId);
+    if (!resultsUnavailable) {
       const list = isObject(rawResults) && Array.isArray(rawResults.results) ? rawResults.results : [];
       let resultBytes = 0;
       results = list.filter(isObject).slice(0, 100).flatMap(item => {
@@ -190,12 +211,12 @@ export class WorkspaceExecutionService {
         if (truncated) resultsTruncated = true;
         return [{ taskId, text: kept, ...(truncated ? { truncated: true } : {}), ...(typeof item.reportedModel === "string" ? { reportedModel: item.reportedModel.slice(0, 128) } : {}), ...(Number.isFinite(item.assistantAt) ? { assistantAt: Number(item.assistantAt) } : {}) }];
       });
-    } catch (error) { resultsUnavailable = true; resultError = safeProviderError(error); /* status is still useful; result read stays owner scoped */ }
-    return { dispatch, status: { state, ...(Number.isSafeInteger(statusObj.revision) ? { revision: statusObj.revision } : {}), ...(typeof statusObj.error === "string" ? { error: safeProviderError(new Error(statusObj.error)) } : {}), tasks: taskRows }, results, resultsUnavailable, resultsTruncated, ...(resultError ? { resultError } : {}) };
+    }
+    return { dispatch, isInitiator, status: { state, ...(Number.isSafeInteger(statusObj.revision) ? { revision: statusObj.revision } : {}), ...(typeof statusObj.error === "string" ? { error: safeProviderError(new Error(statusObj.error)) } : {}), tasks: taskRows }, results, resultsUnavailable, resultsTruncated, ...(resultError ? { resultError } : {}) };
   }
 
-  private setState(caller: SupervisorCaller, jobId: string, state: string): Promise<WorkspaceExecutionSummary> {
-    return this.ledger({ command: "set_state", projectId: caller.projectId, jobId, clientId: caller.clientId, state: STATES.has(state) ? state : "unknown" });
+  private setState(caller: SupervisorCaller, jobId: string, state: string, bindingClientId: string): Promise<WorkspaceExecutionSummary> {
+    return this.ledger({ command: "set_state", projectId: caller.projectId, jobId, clientId: bindingClientId, actorClientId: caller.clientId, state: STATES.has(state) ? state : "unknown" });
   }
 }
 const STATES = new Set(["pending", "accepted", "needs_reconciliation", "draft", "queued", "running", "held", "paused", "emergency_stopped", "complete", "completed", "blocked", "failed", "cancelled", "unknown"]);
