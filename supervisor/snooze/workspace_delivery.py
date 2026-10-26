@@ -150,9 +150,12 @@ class WorkspaceDelivery:
                     (worker, project, owner),
                 ).fetchone()
                 event = db.execute(
-                    "SELECT worker,kind,model,owner,job,account_id,session_id,question_json "
-                    "FROM guidance_events WHERE id=? AND worker=? AND job=? AND owner=?",
-                    (guidance_event_id, worker, project, owner),
+                    "SELECT e.worker,e.kind,e.model,COALESCE(v.owner,e.owner) AS owner,e.job,e.account_id,e.session_id,e.question_json "
+                    "FROM guidance_events e LEFT JOIN canonical_event_viewers v "
+                    "ON v.event_id=e.id AND v.project=? AND v.owner=? "
+                    "WHERE e.id=? AND e.worker=? AND e.job=? AND "
+                    "((e.canonical_target_id IS NULL AND e.owner=?) OR (e.canonical_target_id IS NOT NULL AND v.owner IS NOT NULL))",
+                    (project, owner, guidance_event_id, worker, project, owner),
                 ).fetchone()
         except sqlite3.Error as error:
             raise WorkspaceDeliveryError("guidance_inbox_unavailable") from error
@@ -178,10 +181,10 @@ class WorkspaceDelivery:
             with closing(sqlite3.connect(uri, uri=True, timeout=10)) as db:
                 db.row_factory = sqlite3.Row
                 rows = db.execute(
-                    "SELECT e.worker,e.owner,e.kind,e.account_id AS event_account_id,e.session_id AS event_session_id,"
+                    "SELECT e.worker,COALESCE(v.owner,e.owner) AS owner,e.kind,e.account_id AS event_account_id,e.session_id AS event_session_id,"
                     "r.project,r.owner AS registered_owner,r.account_id,r.session_id,r.model "
-                    "FROM guidance_events e JOIN monitor_registrations r "
-                    "ON r.id=e.worker AND r.project=e.job AND r.owner=e.owner "
+                    "FROM guidance_events e LEFT JOIN canonical_event_viewers v ON v.event_id=e.id "
+                    "JOIN monitor_registrations r ON r.id=e.worker AND r.project=e.job AND r.owner=COALESCE(v.owner,e.owner) "
                     "WHERE e.id=? AND e.job=?",
                     (guidance_event_id, project),
                 ).fetchall()

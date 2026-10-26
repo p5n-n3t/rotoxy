@@ -184,7 +184,11 @@ class GrantedSupervisor:
         row = rows[0]
         registrations = {item["id"]: item for item in self.inbox.registrations()}
         registration = registrations.get(row["worker"])
-        if (not registration or registration["project"] != row["job"] or registration["owner"] != row["owner"] or
+        # Canonical events have no singular owner in guidance_events; their
+        # authorization lives in viewer grants.  The durable worker
+        # registration remains the authoritative source for a headless mapping.
+        if (not registration or registration["project"] != row["job"] or
+                (row["owner"] is not None and registration["owner"] != row["owner"]) or
                 not registration["session_id"]):
             raise GrantedSupervisorError("trusted_registration_missing")
         return {

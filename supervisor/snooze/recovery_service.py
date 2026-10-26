@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import argparse
+from collections.abc import Mapping
 import fcntl
 import hashlib
 import json
@@ -204,20 +205,31 @@ class RecoveryService:
             os.umask(old)
 
     def _adapter(self, action):
-        def owner_for(event_id):
-            match = re.fullmatch(r"guidance-([1-9][0-9]*)", event_id)
+        def owner_for(context):
+            event_id = context.get("event_id") if isinstance(context, Mapping) else None
+            match = re.fullmatch(r"guidance-([1-9][0-9]*)", event_id or "")
             if not match:
                 raise ValueError("guidance_event_binding_missing")
-            with self.inbox.connection() as db:
-                row = db.execute("SELECT owner FROM guidance_events WHERE id=?", (int(match.group(1)),)).fetchone()
-            if not row:
+            project = context.get("project") if isinstance(context, Mapping) else None
+            if not isinstance(project, str) or not re.fullmatch(r"[A-Za-z0-9_.:@/-]{1,160}", project):
                 raise ValueError("guidance_event_binding_missing")
-            return row["owner"]
+            with self.inbox.connection() as db:
+                rows = db.execute(
+                    "SELECT r.owner FROM guidance_events e JOIN monitor_registrations r "
+                    "ON r.id=e.worker AND r.project=e.job AND r.account_id=e.account_id AND r.session_id=e.session_id "
+                    "LEFT JOIN canonical_event_viewers v ON v.event_id=e.id AND v.project=r.project AND v.owner=r.owner "
+                    "WHERE e.id=? AND e.job=? AND ((e.canonical_target_id IS NULL AND e.owner=r.owner) "
+                    "OR (e.canonical_target_id IS NOT NULL AND v.owner IS NOT NULL))",
+                    (int(match.group(1)), project),
+                ).fetchall()
+            if len(rows) != 1:
+                raise ValueError("guidance_event_binding_missing")
+            return rows[0]["owner"]
         if action == "notify":
             def notify(context, _timeout):
                 with self._connection() as db:
                     db.execute("INSERT OR IGNORE INTO recovery_service_notifications VALUES(?,?,?,?,?,?)",
-                               (context["event_id"], context["project"], owner_for(context["event_id"]), context["job"], context["kind"], self.clock()))
+                               (context["event_id"], context["project"], owner_for(context), context["job"], context["kind"], self.clock()))
                 return {"state": "accepted", "receipt": {"adapter": "local-notification", "state": "durable-handoff"}}
             return notify
         if action == "ack-inbox":
@@ -225,7 +237,7 @@ class RecoveryService:
                 match = re.fullmatch(r"guidance-([1-9][0-9]*)", context["event_id"])
                 if not match:
                     return {"state": "rejected", "definitely_not_started": True}
-                self.inbox.acknowledge(int(match.group(1)), owner=owner_for(context["event_id"]), job=context["job"])
+                self.inbox.acknowledge(int(match.group(1)), owner=owner_for(context), job=context["job"])
                 return {"state": "accepted", "receipt": {"adapter": "guidance-inbox-ack", "state": "acknowledged"}}
             return acknowledge
         if action == "headless" and "headless" in self.config:
@@ -234,7 +246,7 @@ class RecoveryService:
             runner = HeadlessCodex(executable=cfg["executable"], project_dir=cfg["projectDir"],
                 codex_home=cfg["codexHome"], sessions=allowed, timeout_seconds=cfg["timeoutSeconds"])
             def resume(context, timeout):
-                owner = owner_for(context["event_id"])
+                owner = owner_for(context)
                 return runner({**dict(context), "owner": owner}, timeout)
             return resume
         return None
@@ -273,17 +285,33 @@ class RecoveryService:
         return next((item for item in self.config["projects"] if item["project"] == project and owner in item["owners"]), None)
 
     def _process(self, row):
+        # Canonical events intentionally carry no single owner: one physical
+        # provider session can be visible to several authorized clients.  This
+        # recovery service consumes the original durable registration, whose
+        # worker/account/session binding is the trusted source for its owner.
+        # Never let the event payload choose a different owner.
+        row = dict(row)
         source_id = row["id"]
         event_id = "guidance-" + str(source_id)
+        registrations = {r["id"]: r for r in self.inbox.registrations()}
+        binding = registrations.get(row["worker"])
+        binding_matches_job = bool(binding and binding["project"] == row["job"])
+        reported_owner = row["owner"]
+        if reported_owner is None and binding_matches_job:
+            # The event is canonical, so its viewer rows hold the owners.  The
+            # registration's owner is the one this recovery configuration is
+            # permitted to act for.
+            row["owner"] = binding["owner"]
+        project = self._scope(row["job"], row["owner"])
+        trusted_binding = bool(binding_matches_job and binding["owner"] == row["owner"])
+        acknowledgement_owner = row["owner"] if trusted_binding else (binding["owner"] if binding_matches_job else None)
         with self._connection() as db:
             prior = db.execute("SELECT receipt FROM recovery_service_sources WHERE inbox_event_id=?", (source_id,)).fetchone()
         if prior:
-            self.inbox.acknowledge(source_id, owner=row["owner"], job=row["job"])
+            if acknowledgement_owner is not None:
+                self.inbox.acknowledge(source_id, owner=acknowledgement_owner, job=row["job"])
             return json.loads(prior["receipt"])
-        project = self._scope(row["job"], row["owner"])
-        registrations = {r["id"]: r for r in self.inbox.registrations()}
-        binding = registrations.get(row["worker"])
-        if not project or not binding or binding["project"] != row["job"] or binding["owner"] != row["owner"]:
+        if not project or not trusted_binding:
             receipt = {"eventId": event_id, "state": "handoff", "reason": "trusted_registration_or_project_policy_missing"}
             with self._connection() as db:
                 db.execute("INSERT OR IGNORE INTO recovery_service_sources(inbox_event_id,recovery_event_id,state,receipt,processed,project,owner) VALUES(?,?,?,?,?,?,?)",
@@ -297,8 +325,14 @@ class RecoveryService:
             with self._connection() as db:
                 db.execute("INSERT OR IGNORE INTO recovery_service_sources(inbox_event_id,recovery_event_id,state,receipt,processed,project,owner) VALUES(?,?,?,?,?,?,?)",
                            (source_id, event_id, receipt["state"], json.dumps(receipt, sort_keys=True), self.clock(), row["job"], row["owner"]))
-        # Ack only after the local receipt is durable. A crash before cursor advance replays safely.
-        self.inbox.acknowledge(source_id, owner=row["owner"], job=row["job"])
+        # Ack only after the local receipt is durable.  If a canonical event's
+        # stored owner was tampered with or became stale, acknowledge only via
+        # its registration-derived owner; never trust the event field to choose
+        # a viewer.  Without any trustworthy registration, leave the event
+        # unacknowledged and advance the durable service cursor after recording
+        # the handoff, rather than raising or acting as an arbitrary client.
+        if acknowledgement_owner is not None:
+            self.inbox.acknowledge(source_id, owner=acknowledgement_owner, job=row["job"])
         return receipt
 
     def run_once(self):

@@ -66,7 +66,11 @@ def normalized_error_code(value):
 
 
 def identity(value):
-    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', value):
+    # Keep durable inbox identities compatible with the bounded identifiers used
+    # by the grant-gated supervisor.  OAuth client identities intentionally use
+    # ``oauth-client:<id>`` and may contain ``@`` or a provider path segment.
+    # Values remain length-bounded and are always passed to SQLite as parameters.
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:@/-]{1,160}', value):
         raise ValueError('invalid_identity')
     return value
 
@@ -407,12 +411,16 @@ class GuidanceInbox:
             if owner is not None: cquery += ' AND v.owner=?'; cargs.append(identity(owner))
             if job is not None: cquery += ' AND v.project=?'; cargs.append(identity(job))
             if owner is None:
-                cquery = ('SELECT e.*,NULL AS viewer_ack FROM guidance_events e WHERE e.id>? '
-                          'AND e.canonical_target_id IS NOT NULL AND EXISTS (SELECT 1 FROM canonical_event_viewers v WHERE v.event_id=e.id')
+                # The unscoped internal view never attributes a canonical event
+                # to one client.  It can, however, truthfully report it
+                # acknowledged once every authorized viewer has acknowledged it.
+                cquery = ('SELECT e.*,CASE WHEN COUNT(v.event_id)=COUNT(v.ack_at) THEN MAX(v.ack_at) ELSE NULL END AS viewer_ack '
+                          'FROM guidance_events e JOIN canonical_event_viewers v ON v.event_id=e.id WHERE e.id>? '
+                          'AND e.canonical_target_id IS NOT NULL')
                 cargs = [after]
                 if job is not None:
                     cquery += ' AND v.project=?'; cargs.append(identity(job))
-                cquery += ')'
+                cquery += ' GROUP BY e.id'
             rows.extend(db.execute(cquery+' ORDER BY e.id LIMIT ?', (*cargs,limit)))
             rows.sort(key=lambda row: row['id'])
             output = []

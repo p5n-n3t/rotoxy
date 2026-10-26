@@ -69,7 +69,15 @@ class GrantedSupervisorTests(unittest.TestCase):
 
     def event_row(self, event_id):
         with sqlite3.connect(self.inbox_path) as db:
-            return db.execute("SELECT ack_at FROM guidance_events WHERE id=?", (event_id,)).fetchone()
+            # Canonical session incidents retain acknowledgement per authorized
+            # viewer rather than putting one client's acknowledgement onto the
+            # shared event row.
+            return db.execute(
+                "SELECT COALESCE((SELECT ack_at FROM canonical_event_viewers "
+                "WHERE event_id=? AND project='project-a' AND owner='oauth-client:client-a'), "
+                "(SELECT ack_at FROM guidance_events WHERE id=?))",
+                (event_id, event_id),
+            ).fetchone()
 
     def test_failed_and_idle_events_spawn_once_persist_advice_and_survive_restart(self):
         for state, expected_kind in (("failed", "failed"), ("idle", "idle_needs_review")):
