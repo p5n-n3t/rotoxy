@@ -44,7 +44,7 @@ ROTOXY has one provider Fleet that can serve authorized clients from different f
 
 ## Canonical flow
 1. Call tools/list — see every tool authorized for your token.
-2. Call workspace_projects when it appears in tools/list, then use only an authorized Fleet or task-context ID. An empty list means the client ID has no access record. Ask a ROTOXY administrator to grant Fleet access through the configured administration path, then reconnect and retry. Do not assume access or use another client's authorization.
+2. Call workspace_projects when it appears in tools/list, then use only an authorized Fleet or task-context ID. A Fleet configured for authenticated MCP membership admits a valid OAuth-connected MCP client automatically; no repository-specific grant is needed. If the list is empty, the current gateway policy does not admit this client, so ask a ROTOXY administrator to check Fleet access and reconnect. Do not assume access or use another client's authorization.
 3. Discover current account health and capacity via live discovery tools. Idle sessions and registered accounts do not prove quota or usable capacity.
 4. Split the objective into independent bounded tasks; assign explicit file or record scope keys, inputs, acceptance criteria, and an artifact destination to each task.
 5. Submit with workspace_dispatch (DAG + ledger) or job_submit (simple jobs). Always use a stable idempotency key.

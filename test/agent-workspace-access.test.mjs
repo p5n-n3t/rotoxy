@@ -152,6 +152,26 @@ test("shared resource workspace admits only OAuth-consented clients, without gra
   await assert.rejects(runtime.authorizeWorkspace("project-a", "client-c"), /not authorized/);
 });
 
+test("authenticated MCP Fleet membership exposes one shared Fleet without a repository-specific grant", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "rotoxy-shared-authenticated-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "supervisor.json");
+  const policy = { ...config, sharedWorkspace: { projectId: "project-a", membership: "authenticated_mcp" } };
+  await writeFile(configPath, JSON.stringify(policy), { mode: 0o600 });
+  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), {
+    configPath,
+    configDir: dir,
+    // OAuth has already authenticated the caller before this runtime receives
+    // its client ID.  No static client-list grant or refresh-token lookup is
+    // required for the explicitly selected authenticated_mcp policy.
+    store: { async load() { return { oauthClients: [], refreshTokens: [] }; } },
+  });
+  t.after(() => runtime.close());
+  assert.deepEqual(await runtime.workspaceProjects("new-mcp-client"), [{ projectId: "project-a", label: "project-a", kind: "task_context" }]);
+  await assert.doesNotReject(runtime.authorizeWorkspace("project-a", "new-mcp-client"));
+  await assert.rejects(runtime.authorizeWorkspace("project-b", "new-mcp-client"), /not authorized/);
+});
+
 test("shared workspace policy fails closed on invalid/unrelated project or membership mode", async t => {
   const dir = await mkdtemp(join(tmpdir(), "rotoxy-shared-invalid-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
