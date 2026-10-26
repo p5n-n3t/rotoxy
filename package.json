@@ -74,5 +74,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/p5n-n3t/rotoxy.git"
+  },
+  "overrides": {
+    "body-parser": "2.4.0"
   }
 }
