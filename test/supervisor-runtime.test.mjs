@@ -223,6 +223,11 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
     workerOptions: { pollIntervalMs: 20, adapterTimeoutMs: 1000 } };
   runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
   await runtime.start();
+  const registeredSupervision = await runtime.readSupervision("project-a", 0, 10);
+  assert.deepEqual(registeredSupervision.monitorRegistration, {
+    expected: 2, sessions: 2, authorizedViewers: 2, remoteReads: 2, registered: 2, failed: 0,
+  }, "two physical sessions remain two monitor targets even with two authorized clients");
+  assert.equal(registeredSupervision.workers.length, 2, "supervision does not duplicate workers per OAuth client");
   const receipt = await runtime.callTool("job_submit", submission, caller);
   assert.equal(receipt.assignmentId, "job-one");
   assert.equal(receipt.state, "queued");

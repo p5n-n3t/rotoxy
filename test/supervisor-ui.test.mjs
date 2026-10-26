@@ -419,6 +419,33 @@ test("human timestamps preserve exact machine heartbeat and explain missing attr
  assert.match(view.html,/data-timestamp="2026-/);
  assert.match(view.html,/Oct 2026/);
  assert.match(view.html,/Account not attributed/);
- assert.match(view.html,/not reported by provider/);
+ assert.match(view.html,/Not reported by provider/);
  assert.doesNotMatch(view.html,/>Unknown</);
+});
+
+test("missing supervisor statuses and labels are human-readable while raw status values remain stable",()=>{
+ const snapshot=normalizeSupervisorSnapshot({
+  state:"ready",
+  providers:[{id:"unknown",label:"Unknown",status:"unknown",accounts:[{id:"unknown",label:"Unknown",status:"unknown",workspaces:[{id:"unknown",label:"Unknown",workers:[{id:"unknown",label:"Unknown",status:"unknown",monitorState:"unknown",actualModel:"unknown",requestedModel:"unknown",accountId:"unknown",accountLabel:"unknown"}]}]}]}],
+  events:[{severity:"unknown",message:"No severity from provider"}],
+  workers:[{id:"session-1",status:"unknown",question:{text:"Please review",source:"provider",kind:"unrecognized"}}],
+ });
+ const html=renderSupervisorDashboard(snapshot);
+ assert.equal(snapshot.workers[0].status,"unknown");
+ assert.match(html,/Status not reported/);
+ assert.match(html,/Provider name not reported/);
+ assert.match(html,/Account name not reported/);
+ assert.match(html,/Workspace name not reported/);
+ assert.match(html,/Worker name not reported/);
+ assert.match(html,/Not reported by provider/);
+ assert.match(html,/Severity not reported/);
+ assert.match(html,/request type not reported/);
+ assert.doesNotMatch(html,/>unknown<\/span>/i,"machine enums may remain inside the expandable sanitized event payload");
+ assert.doesNotMatch(html,/>Unknown</);
+});
+
+test("nested account workers show their available account, workspace, model, and task attribution",()=>{
+ const html=renderSupervisorDashboard(normalizeSupervisorSnapshot({providers:[{id:"lightsprint",label:"LightSprint",status:"ready",accounts:[{id:"acct-7",label:"Mary Jo",status:"ready",workspaces:[{id:"ws-7",label:"engineering",workers:[{id:"sess-7",status:"running",actualModel:"claude-opus",taskId:"task-92"}]}]}]}]}));
+ assert.match(html,/Mary Jo · acct-7 · Workspace engineering/);
+ assert.match(html,/Model claude-opus · Task task-92/);
 });

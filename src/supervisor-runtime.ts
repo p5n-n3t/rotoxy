@@ -247,7 +247,11 @@ export class SupervisorRuntime implements SupervisorBackend {
   private readonly supervisorCwd: string;
   private readonly supervisionDbPath: string;
   private readonly recoveryDbPath: string;
-  private readonly monitorRegistrationByProject = new Map<string, { expected: number; registered: number; failed: number }>();
+  /**
+   * Monitoring counts physical remote sessions. OAuth clients are authorized
+   * viewers of those sessions; they are never additional remote workers.
+   */
+  private readonly monitorRegistrationByProject = new Map<string, { expected: number; sessions: number; authorizedViewers: number; remoteReads: number; registered: number; failed: number }>();
   private readonly workerGuidance: WorkerGuidanceService;
 
   constructor(private config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
@@ -349,14 +353,23 @@ export class SupervisorRuntime implements SupervisorBackend {
   private async registerMonitoredSessions(): Promise<void> {
     this.monitorRegistrationByProject.clear();
     for (const project of this.config.projects) {
-      const registration = { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 };
+      const registration = { expected: project.registeredSessions.length, sessions: project.registeredSessions.length,
+        authorizedViewers: project.clientIds.length, remoteReads: project.registeredSessions.length, registered: 0, failed: 0 };
       this.monitorRegistrationByProject.set(project.projectId, registration);
-      const workers = project.clientIds.flatMap((clientId) => project.registeredSessions.map((session) => ({
-        worker: `worker:${createHash("sha256").update(`${project.projectId}\0${clientId}\0${session.sessionId}`).digest("hex").slice(0, 40)}`,
-        owner: `oauth-client:${clientId}`, account: session.accountId, session: session.sessionId, model: session.model,
-      })));
+      const workers = project.registeredSessions.map((session) => ({
+        // Deliberately omit project/client from this stable identity: the same
+        // upstream session is one physical monitor target, even when shared.
+        worker: `worker:${createHash("sha256").update(`${session.accountId}\0${session.sessionId}`).digest("hex").slice(0, 40)}`,
+        owners: project.clientIds.map((clientId) => `oauth-client:${clientId}`),
+        account: session.accountId, session: session.sessionId, model: session.model,
+      }));
       try {
-        await this.guidanceCommand("sync-project", { project: project.projectId, workers });
+        const receipt = await this.guidanceCommand("sync-project", { project: project.projectId, workers });
+        if (object(receipt)) {
+          registration.sessions = Number.isSafeInteger(receipt.sessions) && Number(receipt.sessions) >= 0 ? Number(receipt.sessions) : workers.length;
+          registration.remoteReads = Number.isSafeInteger(receipt.remoteReads) && Number(receipt.remoteReads) >= 0 ? Number(receipt.remoteReads) : registration.sessions;
+          registration.authorizedViewers = Number.isSafeInteger(receipt.authorizedViewers) && Number(receipt.authorizedViewers) >= 0 ? Number(receipt.authorizedViewers) : project.clientIds.length;
+        }
         registration.registered = workers.length;
       } catch {
         // Monitoring registration is best-effort; it never blocks task dispatch or changes provider state.
@@ -981,7 +994,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     try { recovery = await this.recoverySnapshot(project.projectId, recoveryOwners, 0, 20); }
     catch { recovery = { available: false, project: project.projectId, state: "unavailable", cursor: 0, decisions: [], pendingHandoffs: [], notifyReceipts: [], oracleAdvice: [] }; }
     if (object(supervision)) supervision = { ...supervision, recovery };
-    if (object(supervision)) supervision = { ...supervision, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 }) } };
+    if (object(supervision)) supervision = { ...supervision, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.registeredSessions.length, sessions: project.registeredSessions.length, authorizedViewers: project.clientIds.length, remoteReads: project.registeredSessions.length, registered: 0, failed: 0 }) } };
     const rawCredit = parseJson(await this.bridge.request("GET", "/admin/api/v1/credit-admission"));
     const creditAdmission = { mode: rawCredit.mode === "strict" || rawCredit.mode === "disabled" ? rawCredit.mode : "legacy", accounts: (Array.isArray(rawCredit.accounts) ? rawCredit.accounts.filter(object) : [])
       .filter(account => accountIds.includes(String(account.accountId)))
@@ -1021,7 +1034,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     try { recovery = await this.recoverySnapshot(project.projectId, owners, after, limit); }
     catch { recovery = { available: false, project: project.projectId, state: "unavailable", cursor: after, decisions: [], pendingHandoffs: [], notifyReceipts: [], oracleAdvice: [] }; }
     if (object(value)) value = { ...value, recovery };
-    return boundedJson(object(value) ? { ...value, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.clientIds.length * project.registeredSessions.length, registered: 0, failed: 0 }) } } : value);
+    return boundedJson(object(value) ? { ...value, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.registeredSessions.length, sessions: project.registeredSessions.length, authorizedViewers: project.clientIds.length, remoteReads: project.registeredSessions.length, registered: 0, failed: 0 }) } } : value);
   }
   async readCompactSummary(projectId: string, after = 0, limit = 20): Promise<unknown> {
     const project = this.config.projects.find((item) => item.projectId === projectId);

@@ -123,7 +123,7 @@ class GuidanceTests(unittest.TestCase):
         self.inbox.observe('worker-a',{'state':'idle','needsInput':False},owner='client-a',job='job-a',now=14)
         self.assertIsNone(self.inbox.project_workers(project='job-a',owners=['client-a'])[0]['question'])
         with self.inbox.connection() as db:
-            stored=db.execute('SELECT question_json,heartbeat_at FROM watched_workers WHERE id=?',('worker-a',)).fetchone()
+            stored=db.execute('SELECT question_json,heartbeat_at FROM monitor_targets WHERE account_id=? AND session_id=?',('acct-a','session-a')).fetchone()
         self.assertIsNone(stored['question_json'])
         self.assertEqual(stored['heartbeat_at'],14)
 
@@ -189,11 +189,75 @@ class GuidanceTests(unittest.TestCase):
             self.inbox.register(worker=worker, project='job-a', owner=owner,
                                 account=account, session=session, model='gpt-6-luna')
         snapshot = self.inbox.compact_summary(project='job-a', owners=['client-a','client-b'])
-        self.assertEqual(snapshot['counts']['registrations'], 2)
+        self.assertEqual(snapshot['counts']['registrations'], 1)
+        self.assertEqual(snapshot['counts']['sessions'], 1)
+        self.assertEqual(snapshot['counts']['authorizedViewers'], 2)
+        self.assertEqual(snapshot['counts']['remoteReads'], 1)
         self.assertEqual(snapshot['counts']['distinctSessions'], 1)
         self.assertEqual(snapshot['counts']['distinctAccounts'], 1)
         self.assertNotIn('private-account', json.dumps(snapshot))
-        self.assertEqual(len(snapshot['workers']), 2, 'owner bindings remain separate')
+        self.assertEqual(len(snapshot['workers']), 1, 'physical sessions are represented once')
+
+    def test_canonical_target_event_shared_visibility_and_owner_specific_ack(self):
+        self.inbox.sync_project('project-a',[{'worker':'physical-session','account':'acct-a',
+            'session':'session-a','model':'claude-sonnet-4-6','owners':['client-a','client-b']}])
+        first=self.inbox.observe('physical-session',{'state':'failed','errorCode':'ACP_RELAY_DIED',
+            'model':'claude-opus-5-5'},owner='client-a',job='project-a',now=10)
+        repeated=self.inbox.observe('physical-session',{'state':'failed','errorCode':'ACP_RELAY_DIED',
+            'model':'claude-opus-5-5'},owner='client-b',job='project-a',now=11)
+        self.assertIsNotNone(first['eventId'])
+        self.assertIsNone(repeated['eventId'])
+        with self.inbox.connection() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM guidance_events WHERE canonical_target_id IS NOT NULL').fetchone()[0],1)
+        self.assertEqual(len(self.inbox.inbox(owner='client-a',job='project-a')),1)
+        self.assertEqual(len(self.inbox.inbox(owner='client-b',job='project-a')),1)
+        self.inbox.acknowledge(first['eventId'],owner='client-a',job='project-a')
+        ack_at=self.inbox.inbox(owner='client-a',job='project-a')[0]['ack_at']
+        self.assertIsNotNone(ack_at)
+        self.assertIsNone(self.inbox.inbox(owner='client-b',job='project-a')[0]['ack_at'])
+        self.inbox.sync_project('project-a',[{'worker':'physical-session','account':'acct-a',
+            'session':'session-a','model':'claude-sonnet-4-6','owners':['client-a','client-b']}])
+        self.assertEqual(self.inbox.inbox(owner='client-a',job='project-a')[0]['ack_at'],ack_at,
+                         'idempotent registration sync preserves acknowledgement state')
+        self.assertIsNone(self.inbox.inbox(owner='client-b',job='project-a')[0]['ack_at'])
+        snapshot=self.inbox.compact_summary(project='project-a',owners=['client-a','client-b'])
+        self.assertEqual(len(snapshot['workers']),1)
+        self.assertEqual(len(snapshot['events']),1)
+        self.assertIsNone(snapshot['events'][0]['ackAt'],'shared summary stays open until all authorized viewers acknowledge')
+
+    def test_canonical_session_can_be_authorized_in_multiple_projects(self):
+        for project, owner in [('project-a','client-a'),('project-b','client-b')]:
+            self.inbox.sync_project(project,[{'worker':'same-session','account':'acct-shared',
+                'session':'session-shared','model':'gpt-6-luna','owners':[owner]}])
+        observed=self.inbox.observe('same-session',{'state':'failed'},owner='client-a',job='project-a',now=20)
+        self.assertIsNotNone(observed['eventId'])
+        self.assertEqual(len(self.inbox.inbox(owner='client-a',job='project-a')),1)
+        self.assertEqual(len(self.inbox.inbox(owner='client-b',job='project-b')),1)
+        self.assertEqual(len(self.inbox.project_workers(project='project-a',owners=['client-a'])),1)
+        self.assertEqual(len(self.inbox.project_workers(project='project-b',owners=['client-b'])),1)
+
+    def test_legacy_duplicate_bindings_migrate_to_one_canonical_target_without_losing_events(self):
+        path=Path(self.temp.name)/'legacy-bindings.sqlite'
+        with sqlite3.connect(path) as db:
+            db.executescript('''CREATE TABLE watched_workers(id TEXT PRIMARY KEY,status TEXT,fingerprint TEXT,progress_at REAL,heartbeat_at REAL,model TEXT,owner TEXT,job TEXT);
+                CREATE TABLE monitor_registrations(id TEXT PRIMARY KEY,project TEXT NOT NULL,owner TEXT NOT NULL,account_id TEXT NOT NULL,session_id TEXT NOT NULL,model TEXT NOT NULL,registered_at REAL NOT NULL);
+                CREATE TABLE guidance_events(id INTEGER PRIMARY KEY,worker TEXT,kind TEXT,model TEXT,at REAL,owner TEXT,job TEXT,ack_at REAL,guidance_state TEXT,guidance_job TEXT,submitted_at REAL);
+                INSERT INTO monitor_registrations VALUES('legacy-a','project-a','client-a','acct-a','session-a','gpt-6-luna',1);
+                INSERT INTO monitor_registrations VALUES('legacy-b','project-a','client-b','acct-a','session-a','gpt-6-luna',2);
+                INSERT INTO guidance_events VALUES(1,'legacy-a','idle_needs_review','gpt-6-luna',3,'client-a','project-a',NULL,'inbox_only',NULL,NULL);''')
+        migrated=GuidanceInbox(path)
+        roster=migrated.project_workers(project='project-a',owners=['client-a','client-b'])
+        self.assertEqual(len(roster),1)
+        self.assertEqual(roster[0]['accountId'],'acct-a')
+        self.assertEqual(len(migrated.inbox(owner='client-a',job='project-a')),1)
+        self.assertEqual(migrated.sync_project('project-a',[{'worker':'physical-session','account':'acct-a',
+            'session':'session-a','model':'gpt-6-luna','owners':['client-a','client-b']}])['remoteReads'],1)
+        first=migrated.observe('physical-session',{'state':'failed'},owner='client-a',job='project-a',now=10)
+        second=migrated.observe('physical-session',{'state':'failed'},owner='client-b',job='project-a',now=11)
+        self.assertIsNotNone(first['eventId'])
+        self.assertIsNone(second['eventId'])
+        with migrated.connection() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM guidance_events').fetchone()[0],2)
 
     def test_error_code_only_stores_safe_class_and_summary_bounds(self):
         self.observe('idle',now=1,errorCode='api_key=private-value')
