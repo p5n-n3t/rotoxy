@@ -55,14 +55,14 @@ test("account buckets: disabled wins, ready counts healthy, exhausted/cooldown a
     { healthy: 2, depleted: 2, failing: 1, disabled: 1, unknown: 1 });
 });
 
-test("overview leads with operational verdict and keeps unobserved telemetry and quota unknown, never zero", () => {
+test("overview leads with operational verdict and marks unreported telemetry and quota without zero-filling", () => {
   const html = renderOverview({ ...base, accounts: [acct("a", "healthy"), acct("b", "cooldown")] });
   assert.match(html, /<h1>Credential gateway<\/h1>/);
   assert.match(html, /1 of 2 credentials can route; 1 need attention/);
   assert.match(html, /href="https:\/\/gw\.example\/admin\/supervisor"/);
   assert.match(html, /Requests seen<\/dt><dd class="">Not observed yet/);
   assert.match(html, /Latency<\/dt><dd class="unknown">Not observed/);
-  assert.match(html, /Quota \/ capacity<\/dt><dd class="unknown">Unknown/);
+  assert.match(html, /Quota \/ capacity<\/dt><dd class="unknown">Not reported by provider/);
   assert.match(html, /No requests observed since this gateway process started/);
   assert.match(html, /one MCP connection<\/strong>/);
   assert.match(html, /mcp\.provider\.example/);
