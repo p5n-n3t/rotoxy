@@ -109,3 +109,21 @@ test("jobs page redirects unauthenticated visitors and unknown task data stays u
   assert.equal(snapshot.projects[0].counts.active, 0);
   assert.equal(snapshot.projects[0].counts.pending, null);
 });
+
+test("jobs page sends the primary ROTOXY Fleet to its canonical Fleet view", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "t2o-jobs-admin-fleet-"));
+  const oldHome = process.env.HOME, oldConfig = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.HOME = join(root, "home"); process.env.TOKEN2OAUTH_CONFIG_DIR = join(root, "config");
+  t.after(async () => { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; if (oldConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = oldConfig; await rm(root, { recursive: true, force: true }); });
+  const store = new StateStore();
+  await store.init({ adminPassword: "test-only-admin", publicBaseUrl: "https://gateway.example/token2oauth" });
+  const app = express(), sessions = new AdminSessions();
+  app.use(createJobsAdminRouter(store, sessions, { callTool: async () => ({}), listProjects: () => ["token2oauth"], readAdmin: async () => ({ projectControl: { projectId: "token2oauth", state: "running", revision: 1, maxConcurrency: 1, activeTaskCount: 0 } }) }));
+  const server = createServer(app), address = await listen(server);
+  t.after(() => close(server));
+  const response = await fetch(`http://127.0.0.1:${address.port}/admin/jobs`, { headers: { cookie: `t2o_admin=${sessions.create()}` } });
+  const html = await response.text();
+  assert.match(html, /href="\/token2oauth\/admin\/fleet">token2oauth/);
+  assert.doesNotMatch(html, /href="\/token2oauth\/admin\/supervisor\/token2oauth"/);
+  assert.doesNotMatch(html, />Unknown</);
+});

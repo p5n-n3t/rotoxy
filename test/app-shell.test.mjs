@@ -10,7 +10,7 @@ test("shared renderer exposes the three operational workspace groups and current
   assert.deepEqual(NAV_GROUPS.map((group) => group.label), ["Command", "Resources", "Settings"]);
   for (const label of ["Overview", "Supervisor", "Workspace accounts", "Models &amp; APIs", "ChatGPT &amp; Codex", "Private workers", "Search", "Auth", "Diagnostics"]) assert.ok(html.includes(label));
   for (const path of ["/token2oauth/admin", "/token2oauth/admin/supervisor", "/token2oauth/admin#accounts", "/token2oauth/admin/providers", "/token2oauth/admin/codex", "/token2oauth/admin/oracle", "/token2oauth/admin/resources", "/token2oauth/admin/security", "/token2oauth/admin/diagnostics"]) assert.ok(html.includes(`href="${path}"`), path);
-  assert.equal((html.match(/aria-current="page"/g) || []).length, 2);
+  assert.equal((html.match(/aria-current="page"/g) || []).length, 1);
   assert.match(html, /aria-current="page">Supervisor/);
   assert.doesNotMatch(html, /<span class="nav-link nav-unavailable"/);
 
@@ -26,8 +26,8 @@ test("shared navigation has one stable destination per entry and resolves compat
   assert.ok(!items.some((item) => item.key === "clients"), "client link is omitted until a dedicated client-connections page exists");
 
   const html = render("chatgpt-codex");
-  assert.equal((html.match(/href="\/token2oauth\/admin\/codex"/g) || []).length, 2, "desktop and mobile menus each render one Codex link");
-  assert.equal((html.match(/aria-current="page">ChatGPT &amp; Codex/g) || []).length, 2, "both menus highlight the same destination");
+  assert.equal((html.match(/href="\/token2oauth\/admin\/codex"/g) || []).length, 1, "one responsive navigation tree renders one Codex link");
+  assert.equal((html.match(/aria-current="page">ChatGPT &amp; Codex/g) || []).length, 1, "the current destination has one active marker");
 });
 
 test("integrated shell carries workspace context, skip target, accessible mobile menu, and focus styling", () => {
