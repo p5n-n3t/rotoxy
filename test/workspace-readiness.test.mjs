@@ -38,16 +38,16 @@ function makeHarness(t, credit, options = {}) {
   return { runtime, get reads() { return reads; } };
 }
 
-test("workspace readiness treats strict empty policies as blocked and unknown credit responses as unknown", async (t) => {
+test("workspace readiness names incomplete credit policy states without presenting them as worker status", async (t) => {
   const empty = makeHarness(t, { mode: "strict", accounts: [] });
   const blocked = await empty.runtime.workspaceResources("project-a");
   assert.equal(blocked[0].executionAvailability, "Blocked: no verified credit policy");
   assert.equal(empty.reads, 1);
 
   for (const [label, credit, unavailable, expected] of [
-    ["malformed", { mode: "strict", accounts: [{ accountId: "acct-a", available: 100, operationUpperBound: 1, boundVerified: true }] }, false, "Unknown: credit admission response malformed"],
-    ["legacy", { mode: "legacy", accounts: [] }, false, "Unknown: legacy credit admission"],
-    ["unavailable", undefined, true, "Unknown: credit admission unavailable"],
+    ["malformed", { mode: "strict", accounts: [{ accountId: "acct-a", available: 100, operationUpperBound: 1, boundVerified: true }] }, false, "Credit admission data needs correction; live session readiness not checked"],
+    ["legacy", { mode: "legacy", accounts: [] }, false, "Legacy credit policy needs confirmation; live session readiness not checked"],
+    ["unavailable", undefined, true, "Credit admission check unavailable; live session readiness not checked"],
   ]) {
     const h = makeHarness(t, credit, { unavailable });
     const resources = await h.runtime.workspaceResources("project-a");

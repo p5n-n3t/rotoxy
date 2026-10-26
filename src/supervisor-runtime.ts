@@ -730,9 +730,9 @@ export class SupervisorRuntime implements SupervisorBackend {
       else if (!signal.authorized) executionAvailability = "Account authorization unavailable";
       else if (signal.health !== "healthy") executionAvailability = "Account health unavailable";
       else if (signal.quota === "depleted") executionAvailability = "Account quota reported depleted";
-      else if (signal.quota === "unknown" && !this.config.allowUnknownQuota) executionAvailability = "Blocked: quota is unknown and policy disallows unknown quota";
+      else if (signal.quota === "unknown" && !this.config.allowUnknownQuota) executionAvailability = "Blocked: quota was not reported and policy requires a verified balance";
       else if (credit.kind === "disabled") executionAvailability = "Manual credit gate disabled; live session readiness not checked";
-      else if (credit.kind !== "strict") executionAvailability = credit.kind === "unavailable" ? "Unknown: credit admission unavailable" : credit.kind === "malformed" ? "Unknown: credit admission response malformed" : "Unknown: legacy credit admission";
+      else if (credit.kind !== "strict") executionAvailability = credit.kind === "unavailable" ? "Credit admission check unavailable; live session readiness not checked" : credit.kind === "malformed" ? "Credit admission data needs correction; live session readiness not checked" : "Legacy credit policy needs confirmation; live session readiness not checked";
       else {
         const policy = credit.accounts.get(session.accountId);
         if (!policy || !policy.boundVerified || policy.available === null || policy.operationUpperBound === null) executionAvailability = "Blocked: no verified credit policy";
@@ -740,7 +740,7 @@ export class SupervisorRuntime implements SupervisorBackend {
         else executionAvailability = "Credit check passed; live session readiness not checked";
       }
       return { provider: "lightsprint", sessionId: session.sessionId, workspaceId: session.workspaceId, accountId: session.accountId,
-        accountLabel: typeof account?.label === "string" ? account.label : "Unknown", model: session.model,
+        accountLabel: typeof account?.label === "string" ? account.label : "Account label unavailable", model: session.model,
         modelSource: "registered configuration", executionAvailability };
     });
   }
