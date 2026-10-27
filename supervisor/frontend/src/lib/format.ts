@@ -1,6 +1,6 @@
 import type { Slot } from "./types";
 
-export function display(value: string | number | null | undefined, fallback = "Unknown"): string {
+export function display(value: string | number | null | undefined, fallback = "Not reported"): string {
   return value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
@@ -10,7 +10,7 @@ export function formatTimestamp(value: number | null | undefined): string {
 }
 
 export function formatElapsed(startedAt: number | null | undefined, now = Date.now() / 1000): string {
-  if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return "Start unknown";
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return "Start not reported";
   const seconds = Math.max(0, Math.floor(now - startedAt));
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);

@@ -29,10 +29,10 @@
     <label>Operator quota override<input type="number" min="0" step="any" bind:value={quotaValue} aria-label="Operator quota override" placeholder="No override" /></label>
     <label>Override unit<TextInput bind:value={quotaUnit} ariaLabel="Override unit" /></label>
     <label>Override expires<input type="datetime-local" bind:value={quotaExpires} aria-label="Override expires" /></label>
-    <label class="checkbox-field"><input type="checkbox" bind:checked={allowUnknownQuota} />Allow routing with unknown quota</label>
+    <label class="checkbox-field"><input type="checkbox" bind:checked={allowUnknownQuota} />Allow routing when quota is not reported</label>
     <label class="checkbox-field"><input type="checkbox" bind:checked={enabled} />Account enabled</label>
   </div>
-  <p class="form-help">Model and effort values are routing claims, not provider verification. Quota overrides expire at the selected time; no override means quota remains unknown unless the service reports it.</p>
+  <p class="form-help">Model and effort values are routing claims, not provider verification. Quota overrides expire at the selected time; no override means quota is not reported unless the service reports it.</p>
   {#if formError}<p class="field-error" role="alert">{formError}</p>{/if}
   <div class="account-editor-footer"><Button tone="info" surface="solid" onclick={onsave}>Save account</Button></div>
 </div>

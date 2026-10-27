@@ -7,7 +7,7 @@
   const rows = $derived(report.breakdowns[active] as HistoryBreakdownRow[]);
   const maxEvents = $derived(Math.max(1, ...rows.map((row) => row.event_count ?? 0)));
 
-  function name(row: HistoryBreakdownRow): string { return row.project_id ?? row.id ?? "Unknown"; }
+  function name(row: HistoryBreakdownRow): string { return row.project_id ?? row.id ?? "Not reported"; }
   function attributeCount(row: HistoryBreakdownRow): number {
     return active === "tools" ? (row.tool_call_count ?? 0) : row.usage_count;
   }

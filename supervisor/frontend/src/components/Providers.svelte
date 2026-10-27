@@ -87,7 +87,7 @@
 
 <section class="page-view providers-view" data-testid="providers-view" aria-labelledby="providers-title">
   <div class="page-heading">
-    <div><p class="eyebrow">CONNECTED WORKERS / ACCOUNT MAP</p><h1 id="providers-title">Providers<span class="heading-period">.</span></h1><p class="page-subtitle">Configure public routing policy. Identity, credentials and live credits remain unknown unless the provider reports them.</p></div>
+    <div><p class="eyebrow">CONNECTED WORKERS / ACCOUNT MAP</p><h1 id="providers-title">Providers<span class="heading-period">.</span></h1><p class="page-subtitle">Configure public routing policy. Identity, credentials and live credits remain not reported unless the provider reports them.</p></div>
     <div class="provider-summary"><ShieldCheckIcon size={16} aria-hidden="true" /><span>Secrets stay with the local runtime</span></div>
   </div>
   <div class="provider-notice"><CircleHelpIcon size={16} aria-hidden="true" /><p>Never enter API keys, tokens, workspace secrets or backend stack/artifact settings here. Account labels do not prove credential ownership. LightSprint capacity above 12 needs backend verification.</p></div>
@@ -99,7 +99,7 @@
     <div class="provider-list">
       {#each dashboard.accounts as account, index (`${account.id ?? account.server_key}-${index}`)}
         <article class="provider-card">
-          <div class="provider-card-heading"><span class="provider-glyph"><Building2Icon size={18} aria-hidden="true" /></span><div><span class="eyebrow">ACCOUNT {String(index + 1).padStart(2, "0")}</span><h2>{accountTitle(account, index)}</h2><p class="mono">{account.identity ?? "Identity not reported"}</p></div><span class:account-enabled={account.enabled} class:account-disabled={account.enabled === false} class="provider-enabled">{account.enabled === false ? "Disabled" : account.enabled === true ? "Enabled" : "State unknown"}</span></div>
+          <div class="provider-card-heading"><span class="provider-glyph"><Building2Icon size={18} aria-hidden="true" /></span><div><span class="eyebrow">ACCOUNT {String(index + 1).padStart(2, "0")}</span><h2>{accountTitle(account, index)}</h2><p class="mono">{account.identity ?? "Identity not reported"}</p></div><span class:account-enabled={account.enabled} class:account-disabled={account.enabled === false} class="provider-enabled">{account.enabled === false ? "Disabled" : account.enabled === true ? "Enabled" : "State not reported"}</span></div>
           <div class="provider-fields">
             <div class="provider-field"><span class="provider-field-label">Credential status</span><div class="credential-state credential-unknown"><span class="credential-dot credential-dot-unknown"></span>Not reported</div></div>
             <div class="provider-field"><span class="provider-field-label">Configured capacity</span><strong>{account.capacity ?? "Not reported"}{account.capacity === null ? "" : " worker slots"}</strong></div>

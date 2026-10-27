@@ -18,7 +18,7 @@ import type { LifecycleStatus } from "./lifecycle.js";
 function when(ms: number | undefined): string {
   if (!ms) return "never";
   const date = new Date(ms);
-  return Number.isFinite(date.getTime()) ? date.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC") : "unknown";
+  return Number.isFinite(date.getTime()) ? date.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC") : "not reported";
 }
 
 function flash(notice: string | undefined): string {
@@ -60,7 +60,7 @@ export function renderToolsPage({ base, state, catalog, notice }: ToolsPageInput
       ? '<span class="muted">Not inventoried yet</span>'
       : caps.ok
         ? `<span class="pill"><span class="dot"></span>${caps.tools.length} upstream tools</span>`
-        : `<span class="pill"><span class="dot bad"></span>Failed</span> <span class="tiny muted">${esc(caps.error || "unknown error")}</span>`;
+        : `<span class="pill"><span class="dot bad"></span>Failed</span> <span class="tiny muted">${esc(caps.error || "no error detail reported")}</span>`;
     const server = caps?.serverName ? `${esc(caps.serverName)}${caps.serverVersion ? " " + esc(caps.serverVersion) : ""}` : "—";
     return `<tr><td><strong>${esc(account.label)}</strong><div class="tiny muted mono">${esc(account.id)}</div></td><td>${status}</td><td>${server}</td><td class="tiny">${esc(when(caps?.capturedAt))}</td><td class="mono tiny">${esc(caps?.surfaceHash?.slice(0, 12) || "—")}</td><td><form class="inline" method="post" action="${esc(base)}/admin/tools/refresh"><input type="hidden" name="accountId" value="${esc(account.id)}"><button class="secondary" type="submit"${account.enabled ? "" : " disabled"}>Refresh</button></form></td></tr>`;
   }).join("");

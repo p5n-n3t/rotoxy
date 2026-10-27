@@ -71,7 +71,7 @@
       {#if error}<p class="engine-error" role="alert">{error}</p>{/if}
       {#if report}
         {#if report.state === "unavailable"}
-          <div class="engine-unavailable"><strong>External data unavailable</strong><span>{report.error_kind === "not_configured" ? "No provider analytics service is configured." : "This source could not return the selected report."}</span><small>Reason: {report.error_kind ?? "unknown"}. Snooze-native totals above are unchanged.</small></div>
+          <div class="engine-unavailable"><strong>External data unavailable</strong><span>{report.error_kind === "not_configured" ? "No provider analytics service is configured." : "This source could not return the selected report."}</span><small>Reason: {report.error_kind ?? "not reported"}. Snooze-native totals above are unchanged.</small></div>
         {:else}
           <div class="engine-provenance"><span>Source version</span><strong>{report.source_version ?? "Unavailable"}</strong><span>Coverage</span><strong>{previewValue(report.coverage.state)}</strong>{#if report.source_window}<span>Requested window</span><strong>{String(report.source_window.requested_from_utc ?? "default")} → {String(report.source_window.requested_to_utc ?? "current")}</strong>{/if}</div>
           <div class="engine-values">{#each Object.entries(report.payload).slice(0, 12) as [key, value] (key)}<article><span>{key.replaceAll("_", " ")}</span><strong>{previewValue(value)}</strong></article>{/each}</div>

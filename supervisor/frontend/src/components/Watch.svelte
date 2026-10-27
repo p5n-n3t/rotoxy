@@ -42,7 +42,7 @@
     const knownKeys = new Set(dashboard.accounts.map((account) => account.server_key ?? account.label ?? "account"));
     const unknown = Array.from(byAccount.entries())
       .filter(([key]) => !knownKeys.has(key))
-      .map(([key, slots]) => ({ key, label: key === "unassigned" ? "Account unknown" : key, capacity: null, slots }));
+      .map(([key, slots]) => ({ key, label: key === "unassigned" ? "Account not attributed" : key, capacity: null, slots }));
     return [...known, ...unknown].filter((group) => group.slots.length > 0 || (group.capacity ?? 0) > 0);
   });
   const dispatchReason = $derived(dashboard.capabilities.dispatch.reason || "Dispatch is not available from this observation-only service.");
@@ -84,7 +84,7 @@
         {#each dashboard.incidents.slice(0, 8) as incident, index (`${incident.task_id}-${incident.kind}-${index}`)}
           <article class="incident-row">
             <div class="incident-marker"><OctagonAlertIcon size={15} aria-hidden="true" /></div>
-            <div class="incident-copy"><strong>{display(incident.kind, "Worker event")}</strong><span>{display(incident.message, "No event detail was recorded.")}</span><small>{display(incident.task_id, "Task unknown")} · {formatTimestamp(incident.at)}</small></div>
+            <div class="incident-copy"><strong>{display(incident.kind, "Worker event")}</strong><span>{display(incident.message, "No event detail was recorded.")}</span><small>{display(incident.task_id, "Task not reported")} · {formatTimestamp(incident.at)}</small></div>
             <Button size="sm" onclick={() => onack(incident.task_id, incident.kind)}>Acknowledge</Button>
           </article>
         {/each}
@@ -118,12 +118,12 @@
     {:else}
       {#each groups as group (group.key)}
         <section class="account-block" aria-label={`${group.label} occupied slots`}>
-          <header class="account-heading"><span class="account-emblem">{group.label.slice(0, 1).toUpperCase()}</span><div><h3>{group.label}</h3><p>{group.slots.length} occupied <span>·</span> {group.capacity === null ? "capacity unknown" : `${group.capacity} configured slots`}</p></div><span class="account-capacity">{group.slots.length}<i>/</i>{group.capacity ?? "?"}</span></header>
+          <header class="account-heading"><span class="account-emblem">{group.label.slice(0, 1).toUpperCase()}</span><div><h3>{group.label}</h3><p>{group.slots.length} occupied <span>·</span> {group.capacity === null ? "capacity not reported" : `${group.capacity} configured slots`}</p></div><span class="account-capacity">{group.slots.length}<i>/</i>{group.capacity ?? "?"}</span></header>
           <div class="mobile-worker-list">
             {#each group.slots as slot, index (slot.task_id ?? `mobile-${group.key}-${index}`)}
               <article class="mobile-worker-card">
                 <div class="mobile-worker-top"><span class="slot-badge">{slot.logical_slot ?? index + 1}</span><span class="state-label"><StatusDot status={statusTone(slot.provider_state)} label={display(slot.provider_state)} />{display(slot.provider_state, "Unobserved")}</span></div>
-                <strong>{display(slot.task_summary, "Assignment unknown")}</strong><small>{display(slot.workspace_id, "Workspace unknown")}</small>
+                <strong>{display(slot.task_summary, "Assignment not reported")}</strong><small>{display(slot.workspace_id, "Workspace not reported")}</small>
                 <div class="mobile-worker-facts"><span>Model <b>{display(slot.confirmed_model)}</b></span><span>Effort <b>{display(slot.confirmed_effort)}</b></span><span>Requested effort <b>{display(slot.requested_effort)}</b></span><span>Elapsed <b>{formatElapsed(slot.started_at)}</b></span></div>
                 <div class="mobile-worker-bottom"><span>Observed {formatTimestamp(slot.observed_at)}</span><button class="inspect-link kit-control-states" type="button" onclick={() => slot.task_id && oninspect(slot.task_id)} disabled={!slot.task_id}>Inspect <ArrowUpRightIcon size={14} aria-hidden="true" /></button></div>
               </article>
@@ -135,10 +135,10 @@
               {#each group.slots as slot, index (slot.task_id ?? `${group.key}-${index}`)}
                 <tr data-testid="watch-row">
                   <td><span class="slot-badge">{slot.logical_slot ?? index + 1}</span></td>
-                  <td><div class="assignment-cell"><strong title={display(slot.task_summary, "Assignment unknown")}>{display(slot.task_summary, "Assignment unknown")}</strong><small>{display(slot.workspace_id, "Workspace unknown")}</small></div></td>
+                  <td><div class="assignment-cell"><strong title={display(slot.task_summary, "Assignment not reported")}>{display(slot.task_summary, "Assignment not reported")}</strong><small>{display(slot.workspace_id, "Workspace not reported")}</small></div></td>
                   <td><div class="model-cell"><span>{display(slot.confirmed_model)}</span><small><b data-testid="confirmed-effort">{display(slot.confirmed_effort)}</b>{#if slot.requested_effort && slot.requested_effort !== slot.confirmed_effort}<span class="requested-value" data-testid="requested-effort">Requested {slot.requested_effort}</span>{/if}</small></div></td>
                   <td><div class="time-cell"><span>{formatElapsed(slot.started_at)}</span><small>{formatTimestamp(slot.observed_at)}</small></div></td>
-                  <td><span class="state-label"><StatusDot status={statusTone(slot.provider_state)} label={display(slot.provider_state)} />{display(slot.provider_state, "Unobserved")}</span><small class="freshness-label">{display(slot.observation_freshness, "Freshness unknown")}</small></td>
+                  <td><span class="state-label"><StatusDot status={statusTone(slot.provider_state)} label={display(slot.provider_state)} />{display(slot.provider_state, "Unobserved")}</span><small class="freshness-label">{display(slot.observation_freshness, "Freshness not reported")}</small></td>
                   <td><button class="inspect-link kit-control-states" type="button" onclick={() => slot.task_id && oninspect(slot.task_id)} disabled={!slot.task_id} aria-label={`Inspect ${display(slot.task_summary, slot.task_id ?? "worker")}`}>Inspect <ArrowUpRightIcon size={14} aria-hidden="true" /></button></td>
                 </tr>
               {/each}

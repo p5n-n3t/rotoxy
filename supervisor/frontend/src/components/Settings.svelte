@@ -148,7 +148,7 @@
             <label>Model limits (one model: limit per line)<textarea bind:value={modelLimitsText} oninput={markPolicyDirty} placeholder="codex-5: 3"></textarea></label>
           </div>
           <div class="policy-toggles">
-            <label class="checkbox-field"><input type="checkbox" bind:checked={allowUnknownQuota} onchange={markPolicyDirty} />Allow unknown quota</label>
+            <label class="checkbox-field"><input type="checkbox" bind:checked={allowUnknownQuota} onchange={markPolicyDirty} />Allow quota not reported</label>
             <label class="checkbox-field"><input type="checkbox" bind:checked={allowNative} onchange={markPolicyDirty} />Allow native workers</label>
           </div>
           <div class="policy-form-grid native-policy">

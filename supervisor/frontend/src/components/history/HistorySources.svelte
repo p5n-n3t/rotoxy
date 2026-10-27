@@ -8,9 +8,9 @@
 <section class="panel source-panel" aria-labelledby="sources-heading">
   <div class="panel-heading"><div><p class="eyebrow">COVERAGE / PROVENANCE</p><h2 id="sources-heading">What this report can support</h2></div><span class="query-time">Query {queryMs.toFixed(1)} ms</span></div>
   <div class="coverage-grid">
-    <article><span>Native events</span><strong data-state={coverage.native_events.state}>{coverage.native_events.observed?.toLocaleString() ?? "Unavailable"}</strong><small>{coverage.native_events.eligible === null ? "Eligible total unknown" : coverage.native_events.eligible.toLocaleString() + " eligible"}</small></article>
-    <article><span>Imported usage</span><strong data-state={coverage.usage.state}>{coverage.usage.observed?.toLocaleString() ?? "Unavailable"}</strong><small>{coverage.usage.completeness ?? "Eligible source coverage unknown"}</small></article>
-    <article><span>Capacity snapshots</span><strong data-state={coverage.historical_capacity.state}>{coverage.historical_capacity.observed?.toLocaleString() ?? "Unavailable"}</strong><small>{coverage.historical_capacity.completeness ?? "Eligible snapshot coverage unknown"}</small></article>
+    <article><span>Native events</span><strong data-state={coverage.native_events.state}>{coverage.native_events.observed?.toLocaleString() ?? "Unavailable"}</strong><small>{coverage.native_events.eligible === null ? "Eligible total not reported" : coverage.native_events.eligible.toLocaleString() + " eligible"}</small></article>
+    <article><span>Imported usage</span><strong data-state={coverage.usage.state}>{coverage.usage.observed?.toLocaleString() ?? "Unavailable"}</strong><small>{coverage.usage.completeness ?? "Eligible source coverage not reported"}</small></article>
+    <article><span>Capacity snapshots</span><strong data-state={coverage.historical_capacity.state}>{coverage.historical_capacity.observed?.toLocaleString() ?? "Unavailable"}</strong><small>{coverage.historical_capacity.completeness ?? "Eligible snapshot coverage not reported"}</small></article>
   </div>
   {#if coverage.truncated}
     <div class="truncation" role="status"><strong>Report bounded at 10,000 rows.</strong><span>Some source sections are truncated: {Object.entries(coverage.truncation).filter(([, value]) => value).map(([key]) => key).join(", ") || "see source coverage"}.</span></div>
@@ -25,7 +25,7 @@
       {/each}
     {:else}<p class="empty-source">No imported source metadata is available. Local event evidence is listed separately in coverage.</p>{/if}
   </div>
-  <p class="coverage-note">Unknown coverage remains unavailable. An empty source means no imported facts were returned, not proof of zero provider usage.</p>
+  <p class="coverage-note">Coverage not reported remains unavailable. An empty source means no imported facts were returned, not proof of zero provider usage.</p>
 </section>
 
 <style>

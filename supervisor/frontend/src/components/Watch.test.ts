@@ -4,7 +4,7 @@ import Watch from "./Watch.svelte";
 import { makeSlot, makeState } from "../test/fixtures";
 
 describe("Watch", () => {
-  it("does not substitute requested effort for unknown confirmed effort", () => {
+  it("does not substitute requested effort for an unreported confirmed effort", () => {
     render(Watch, {
       props: {
         dashboard: makeState({ slots: [makeSlot({ confirmed_effort: null, requested_effort: "low" })] }),
@@ -16,7 +16,7 @@ describe("Watch", () => {
       },
     });
 
-    expect(screen.getByTestId("confirmed-effort")).toHaveTextContent("Unknown");
+    expect(screen.getByTestId("confirmed-effort")).toHaveTextContent("Not reported");
     expect(screen.getByTestId("requested-effort")).toHaveTextContent("Requested low");
   });
 });

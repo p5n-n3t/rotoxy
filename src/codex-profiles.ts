@@ -540,7 +540,7 @@ export function renderCodexProfilesPage(profiles: CodexProfile[], snapshots: Cod
   const byId = new Map(snapshots.map((s) => [s.profileId, s]));
   const rows = profiles.map((p) => {
     const snapshot = byId.get(p.id);
-    const status = !snapshot ? "Not checked" : snapshot.authMode === "chatgpt" ? `ChatGPT sign-in reported · plan ${snapshot.planType ? htmlEscape(snapshot.planType) : "unknown"}` : snapshot.authMode === "other" ? "Other sign-in mode reported" : "Sign-in mode unknown";
+    const status = !snapshot ? "Not checked" : snapshot.authMode === "chatgpt" ? `ChatGPT sign-in reported · plan ${snapshot.planType ? htmlEscape(snapshot.planType) : "not reported"}` : snapshot.authMode === "other" ? "Other sign-in mode reported" : "Sign-in mode not reported";
     const models = !snapshot ? "Not refreshed" : snapshot.models.map((m) => htmlEscape(m.id)).join(", ") || "No models reported";
     return `<tr><th scope="row">${htmlEscape(p.label)}</th><td>${status}</td><td>${models}</td><td><form method="post" action="${htmlEscape(action)}"><input type="hidden" name="id" value="${htmlEscape(p.id)}"><label>Rename profile<input name="label" value="${htmlEscape(p.label)}" required maxlength="80"></label><button name="action" value="rename">Save name</button> <button class="secondary" name="action" value="remove">Remove profile</button></form></td></tr>`;
   }).join("");
