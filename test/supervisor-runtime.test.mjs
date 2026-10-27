@@ -355,6 +355,32 @@ test("readAdmin projects reported usage and deduplicates account cost by task ge
   assert.equal("quota" in accountA, false);
 });
 
+test("readAdmin keeps configured workers visible when durable ledger reads fail", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-runtime-partial-admin-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "runtime.json");
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), { configPath, configDir: dir,
+    supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"),
+    recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"),
+    oracleDbPath: join(dir, "oracle.sqlite"), store });
+  runtime.bridge.request = async () => { throw new Error("private_ledger_temporarily_unavailable"); };
+  runtime.bridge.status = () => ({ state: "running" });
+  runtime.guidanceCommand = async () => ({ available: false, workers: [], events: [], models: [] });
+  runtime.recoverySnapshot = async () => ({ available: false, decisions: [], pendingHandoffs: [], notifyReceipts: [], oracleAdvice: [] });
+
+  const snapshot = await runtime.readAdmin("project-a");
+  assert.equal(snapshot.state, "partial");
+  assert.equal(snapshot.workers.length, 2, "local registrations survive an unrelated private-ledger failure");
+  assert.equal(snapshot.providers[0].accounts.length, 2);
+  assert.deepEqual(snapshot.jobs, [], "a missing assignment ledger is not represented as completed work");
+  assert.deepEqual(snapshot.tasks, []);
+  assert.equal(snapshot.projectControl, undefined, "unconfirmed controls are omitted rather than fabricated");
+  assert.equal(snapshot.supervisor.status, "degraded");
+  assert.match(snapshot.error, /configured accounts and sessions/i);
+});
+
 test("compact summary derives owners from configured project, validates bounds, and caps the IPC result", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "t2o-runtime-summary-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

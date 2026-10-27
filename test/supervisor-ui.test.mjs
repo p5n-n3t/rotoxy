@@ -140,6 +140,11 @@ test("empty/loading/error states are explicit, records are bounded, and no write
   assert.doesNotMatch(loading, /Pause all|Resume|Retry job|<form[^>]*method="post"/i);
   const errored = renderSupervisorDashboard({ state: "error" });
   assert.match(errored, /role="alert"/);
+  const partial = renderSupervisorDashboard(normalizeSupervisorSnapshot({ state: "partial", error: "Configured accounts and sessions are shown; durable ledger data was not reported.", workers: [{ id: "session-1", status: "unobserved" }] }));
+  assert.match(partial, /Partial operations data/);
+  assert.match(partial, /Configured accounts and sessions are shown/);
+  assert.match(partial, /session-1/);
+  assert.doesNotMatch(partial, /Operations data unavailable/);
 });
 
 test("time series use only supplied points and malformed timestamps degrade safely", () => {

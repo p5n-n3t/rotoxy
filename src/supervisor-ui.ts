@@ -28,7 +28,8 @@ export interface SupervisorSnapshot {
   supervisor?: SupervisorHealth;
   orchestrator?: SupervisorHealth;
   series?: readonly SupervisorSeries[];
-  state?: "ready" | "loading" | "error";
+  /** A partial snapshot still contains authoritative local configuration, while one or more durable projections were not returned. */
+  state?: "ready" | "partial" | "loading" | "error";
   error?: string;
 }
 
@@ -232,7 +233,7 @@ function statusText(status: string): string {
   return status.trim().toLowerCase() === "unknown" ? "Status not reported" : status.replaceAll("_", " ");
 }
 function statePill(status: string): string {
-  const c = /error|failed|offline|stopped|blocked/i.test(status) ? "bad" : /pause|warn|degrad|unknown|idle/i.test(status) ? "warn" : "";
+  const c = /error|failed|offline|stopped|blocked/i.test(status) ? "bad" : /partial|pause|warn|degrad|unknown|idle/i.test(status) ? "warn" : "";
   return `<span class="pill ${c}">${esc(statusText(status))}</span>`;
 }
 function capacity(label: string, value?: SupervisorCapacity): string {
@@ -366,7 +367,7 @@ export function normalizeSupervisorSnapshot(input: unknown): SupervisorSnapshot 
     if (!isRecord(value)) return undefined;
     return { status: text(value, "status", "state") || "unknown", detail: text(value, "detail", "message"), observedAt: timeValue(value.observedAt ?? value.observed_at) };
   };
-  const state = root.state === "ready" || root.state === "loading" || root.state === "error" ? root.state : undefined;
+  const state = root.state === "ready" || root.state === "partial" || root.state === "loading" || root.state === "error" ? root.state : undefined;
   const series = rows(root.series).map(r => ({ label: text(r, "label", "name") || "Measured series", unit: text(r, "unit"), points: rows(r.points).flatMap(p => { const value = number(p, "value"); return value === undefined ? [] : [{ at: timeValue(p.at), value }]; }) }));
   return {
     observedAt: timeValue(root.observedAt ?? root.observed_at),
@@ -521,7 +522,7 @@ export function renderSupervisorDashboard(snapshot: SupervisorSnapshot, options:
   const title = esc(options.title || "Workforce control desk");
   const search = esc(options.search || ""); const severity = (options.severity || "all").toLowerCase(); const pause = options.pause || "all";
   const error = snapshot.state === "error" ? `<div class="panel errorbox" role="alert"><strong>Operations data unavailable</strong><p>${esc(redactString(snapshot.error || "No further details are available.", 1200))}</p></div>` : "";
-  const stateNote = snapshot.state === "loading" ? `<p class="empty" role="status">Loading operations data. Values will appear as they arrive.</p>` : "";
+  const stateNote = snapshot.state === "loading" ? `<p class="empty" role="status">Loading operations data. Values will appear as they arrive.</p>` : snapshot.state === "partial" ? `<div class="panel worker-notice" role="status"><strong>Partial operations data</strong><p>${esc(redactString(snapshot.error || "Configured accounts and sessions are shown. Some durable ledger data was not reported, and no missing record is treated as completed.", 1200))}</p></div>` : "";
   const series = bounded(snapshot.series,max);
   const workers = projectWorkers(snapshot);
   const guidanceBase = supervisorGuidanceBase(options.liveFeedUrl);

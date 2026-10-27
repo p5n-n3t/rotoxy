@@ -886,17 +886,30 @@ export class SupervisorRuntime implements SupervisorBackend {
     const observedAt = new Date().toISOString();
     const state = await this.options.store.load();
     const nativeTarget = nativeLightSprintTarget(state.config.upstreamUrl);
+    // Configuration, registrations, and monitor observations are useful even if
+    // a transient private-ledger read fails. Keep those facts visible, label the
+    // resulting snapshot partial, and never turn a missing record into a task
+    // result or worker state.
+    const projectionGaps = new Set<string>();
+    const projectionTimeoutMs = 2_000;
+    const projectionRead = async <T>(section: string, fallback: T, read: () => Promise<T>): Promise<T> => {
+      try { return await read(); }
+      catch { projectionGaps.add(section); return fallback; }
+    };
     const summaries = new Map<string, { owner: { ownerPrincipalId: string; clientId: string } }>();
-    for (const clientId of project.clientIds) {
-      if (summaries.size >= 50) break;
+    const listings = await Promise.all(project.clientIds.slice(0, 50).map(async (clientId) => {
       const owner = this.owner({ clientId, projectId: project.projectId });
-      const listing = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments?projectId=${encodeURIComponent(project.projectId)}&limit=50`, undefined, owner));
+      const listing = parseJson(await projectionRead("assignment listings", {}, () => this.bridge.request("GET", `/admin/api/v1/assignments?projectId=${encodeURIComponent(project.projectId)}&limit=50`, undefined, { ...owner, timeoutMs: projectionTimeoutMs })));
+      return { owner, listing };
+    }));
+    for (const { owner, listing } of listings) {
+      if (summaries.size >= 50) break;
       for (const summary of Array.isArray(listing.assignments) ? listing.assignments.filter(object) : []) {
         if (safeId(summary.assignmentId) && !summaries.has(summary.assignmentId)) summaries.set(summary.assignmentId, { owner });
       }
     }
     const assignments = (await Promise.all([...summaries].map(async ([id, context]) => {
-      const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${id}`, undefined, context.owner));
+      const row = parseJson(await projectionRead("assignment details", {}, () => this.bridge.request("GET", `/admin/api/v1/assignments/${id}`, undefined, { ...context.owner, timeoutMs: projectionTimeoutMs })));
       return row.projectId === project.projectId ? row : undefined;
     }))).filter((row): row is Record<string, unknown> => !!row);
     const sessionById = new Map(project.registeredSessions.map((session) => [session.sessionId, session]));
@@ -983,7 +996,12 @@ export class SupervisorRuntime implements SupervisorBackend {
       return { id: accountId, label: account?.label || accountId, status, workspaces, ...(usage ? { usage } : {}) };
     }) }];
     const assignmentIds = new Set(assignments.map((assignment) => String(assignment.assignmentId)));
-    const eventPage = parseJson(await this.bridge.request("GET", "/admin/api/v1/events?after=0&limit=50"));
+    const [eventPayload, creditPayload, controlPayload] = await Promise.all([
+      projectionRead("event ledger", {}, () => this.bridge.request("GET", "/admin/api/v1/events?after=0&limit=50", undefined, { timeoutMs: projectionTimeoutMs })),
+      projectionRead("credit admission", {}, () => this.bridge.request("GET", "/admin/api/v1/credit-admission", undefined, { timeoutMs: projectionTimeoutMs })),
+      projectionRead("dispatch controls", {}, () => this.bridge.request("GET", `/admin/api/v1/projects/${encodeURIComponent(project.projectId)}/control`, undefined, { timeoutMs: projectionTimeoutMs })),
+    ]);
+    const eventPage = parseJson(eventPayload);
     const events: SupervisorEvent[] = (Array.isArray(eventPage.events) ? eventPage.events.filter(object) : [])
       .filter((event) => event.projectId === project.projectId || (typeof event.assignmentId === "string" && assignmentIds.has(event.assignmentId)))
       .map((event) => ({ id: String(event.id ?? ""), at: typeof event.at === "string" || typeof event.at === "number" ? event.at : undefined,
@@ -995,27 +1013,30 @@ export class SupervisorRuntime implements SupervisorBackend {
     catch { recovery = { available: false, project: project.projectId, state: "unavailable", cursor: 0, decisions: [], pendingHandoffs: [], notifyReceipts: [], oracleAdvice: [] }; }
     if (object(supervision)) supervision = { ...supervision, recovery };
     if (object(supervision)) supervision = { ...supervision, monitorRegistration: { ...(this.monitorRegistrationByProject.get(project.projectId) ?? { expected: project.registeredSessions.length, sessions: project.registeredSessions.length, authorizedViewers: project.clientIds.length, remoteReads: project.registeredSessions.length, registered: 0, failed: 0 }) } };
-    const rawCredit = parseJson(await this.bridge.request("GET", "/admin/api/v1/credit-admission"));
+    const rawCredit = parseJson(creditPayload);
     const creditAdmission = { mode: rawCredit.mode === "strict" || rawCredit.mode === "disabled" ? rawCredit.mode : "legacy", accounts: (Array.isArray(rawCredit.accounts) ? rawCredit.accounts.filter(object) : [])
       .filter(account => accountIds.includes(String(account.accountId)))
       .map(account => ({ accountId: account.accountId, unit: typeof account.unit === "string" ? redactString(account.unit, 64) : "unknown",
         available: typeof account.available === "number" && Number.isSafeInteger(account.available) && account.available >= 0 ? account.available : null,
         operationUpperBound: typeof account.operationUpperBound === "number" && Number.isSafeInteger(account.operationUpperBound) && account.operationUpperBound > 0 ? account.operationUpperBound : null,
         boundVerified: account.boundVerified === true })) };
-    const rawControl = parseJson(await this.bridge.request("GET", `/admin/api/v1/projects/${encodeURIComponent(project.projectId)}/control`));
-    if (rawControl.projectId !== project.projectId || !Number.isSafeInteger(rawControl.revision) || Number(rawControl.revision) < 1 ||
-        !Number.isInteger(rawControl.maxConcurrency) || Number(rawControl.maxConcurrency) < 1 || Number(rawControl.maxConcurrency) > 32 ||
-        !Number.isSafeInteger(rawControl.activeTaskCount) || Number(rawControl.activeTaskCount) < 0 ||
-        typeof rawControl.paused !== "boolean" || typeof rawControl.emergencyStop !== "boolean" ||
-        !["running", "paused", "emergency_stopped"].includes(String(rawControl.state))) throw new Error("project controls unavailable");
-    const projectControl = { projectId: project.projectId, state: rawControl.state, paused: rawControl.paused,
+    const rawControl = parseJson(controlPayload);
+    const hasProjectControl = rawControl.projectId === project.projectId && Number.isSafeInteger(rawControl.revision) && Number(rawControl.revision) >= 1 &&
+      Number.isInteger(rawControl.maxConcurrency) && Number(rawControl.maxConcurrency) >= 1 && Number(rawControl.maxConcurrency) <= 32 &&
+      Number.isSafeInteger(rawControl.activeTaskCount) && Number(rawControl.activeTaskCount) >= 0 &&
+      typeof rawControl.paused === "boolean" && typeof rawControl.emergencyStop === "boolean" &&
+      ["running", "paused", "emergency_stopped"].includes(String(rawControl.state));
+    if (!hasProjectControl) projectionGaps.add("dispatch controls");
+    const projectControl = hasProjectControl ? { projectId: project.projectId, state: rawControl.state, paused: rawControl.paused,
       emergencyStop: rawControl.emergencyStop, maxConcurrency: rawControl.maxConcurrency,
       activeTaskCount: rawControl.activeTaskCount, revision: rawControl.revision,
-      ...(typeof rawControl.updatedAt === "number" && Number.isFinite(rawControl.updatedAt) ? { updatedAt: rawControl.updatedAt } : {}) };
-    const snapshot: SupervisorSnapshot = { observedAt, state: "ready", providers, jobs, tasks, workers, events,
-      supervisor: { status: this.bridge.status().state, observedAt },
+      ...(typeof rawControl.updatedAt === "number" && Number.isFinite(rawControl.updatedAt) ? { updatedAt: rawControl.updatedAt } : {}) } : undefined;
+    const partial = projectionGaps.size > 0;
+    const partialDetail = partial ? "Configured accounts and sessions are shown; some durable ledger data was not reported." : undefined;
+    const snapshot: SupervisorSnapshot = { observedAt, state: partial ? "partial" : "ready", providers, jobs, tasks, workers, events,
+      supervisor: { status: partial ? "degraded" : this.bridge.status().state, ...(partialDetail ? { detail: partialDetail } : {}), observedAt },
       orchestrator: { status: "unknown", detail: "Originating client heartbeat is not registered.", observedAt },
-      supervision, creditAdmission, projectControl } as SupervisorSnapshot & { supervision: unknown; creditAdmission: unknown; projectControl: typeof projectControl };
+      ...(partialDetail ? { error: partialDetail } : {}), supervision, creditAdmission, ...(projectControl ? { projectControl } : {}) } as SupervisorSnapshot & { supervision: unknown; creditAdmission: unknown; projectControl?: typeof projectControl };
     return boundedJson(snapshot);
   }
   listProjects(): string[] { return this.config.projects.map(project => project.projectId); }
