@@ -116,6 +116,11 @@ Use live discovery tools for current account states. Do not use cached or assume
 ## Model and effort pins
 When the provider supports explicit model or effort selection, use only values permitted by the advertised schema and authorized routing policy. Record the requested value and provider-reported value separately. Do not assume the provider honored a request or that a listed model is entitled.
 
+## Provider-pinned inference paths
+Use the authenticated provider directory at GET /providers to discover currently exposed provider paths. OpenAI-compatible providers use /providers/<provider>/v1/models and /providers/<provider>/v1/chat/completions; model IDs must remain under that provider's listed prefix and selected allowlist. A model listing is metadata, not entitlement or execution proof.
+
+LightSprint is a workspace-job provider, not an OpenAI-compatible inference endpoint. Use its authorized workspace/job tools rather than inventing /providers/lightsprint inference calls. The separate /providers/claude/v1/messages route exists only when its Bedrock Messages adapter and scoped credentials are configured; Claude Code is a CLI agent, not that HTTP endpoint.
+
 ## Backend controls are authoritative
 Gateway enforcement (tool policy, account status, quota, scope) overrides any in-task assumptions. If the gateway rejects a submission or marks an account unavailable, accept that state and route accordingly. Do not bypass gateway decisions based on out-of-band information.`,
 

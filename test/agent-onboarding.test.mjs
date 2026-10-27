@@ -117,6 +117,15 @@ test("collaboration guide explains opt-in shared execution without promising pro
   assert.match(guide, /provider account\/session/);
 });
 
+test("provider guide distinguishes pinned inference paths from workspace-job providers", () => {
+  const guide = callOnboardingTool({ topic: "providers" });
+  assert.match(guide, /GET \/providers/);
+  assert.match(guide, /\/providers\/<provider>\/v1\/models/);
+  assert.match(guide, /LightSprint is a workspace-job provider/);
+  assert.match(guide, /not an OpenAI-compatible inference endpoint/);
+  assert.match(guide, /Claude Code is a CLI agent/);
+});
+
 test("rotoxy_guide rejects invalid topic", async () => {
   await withGateway(async (base) => {
     const { token } = await oauthToken(base, "mcp");
