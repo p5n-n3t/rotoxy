@@ -9,8 +9,10 @@ available merely because a client connects.
 
 Clients with the `mcp` scope discover the read-only `rotoxy_guide` tool. It has
 five short, versioned topics: `start`, `dispatch`, `recovery`, `providers`, and
-`collaboration`. Local-only ROTOXY discovery also returns a compact equivalent
-instruction during MCP initialization. The guide intentionally avoids account
+`collaboration`. The collaboration topic explains the opt-in `shareMode: "fleet"`
+and returned `shareHandle` workflow for one execution across authorized clients.
+Local-only ROTOXY discovery also returns a compact equivalent instruction during
+MCP initialization. The guide intentionally avoids account
 identifiers, credentials, static balances and unsupported model claims.
 
 The repository also distributes the optional `rotoxy-orchestrate` skill. Clients
@@ -32,6 +34,20 @@ budgets, affinity, retries and policy remain enforced by the backend.
 An empty authorized-project list means the client needs membership from a ROTOXY
 administrator. Project membership is explicit; it is not inferred from a local
 folder, GitHub repository, email address or another client's authorization.
+
+## Sharing one execution across agents
+
+`workspace_dispatch` is private by default. The initiating agent can set
+`shareMode` to `fleet` to create a bounded collaboration handle for that specific
+job. It records the returned `shareHandle` in a durable workspace handoff; an
+authorized Fleet client can pass that handle to `workspace_sync` to inspect its
+status and bounded results without re-submitting work.
+
+The share handle is not an invitation to a provider account. It does not change
+the initiator's account/session affinity, reveal private instructions, grant
+review approval, or allow a collaborator to issue a native provider message.
+Keep it out of public commits, issues, and prompts. Fleet membership is checked
+before any provider read, so a revoked client loses access immediately.
 
 ## Operational boundaries
 

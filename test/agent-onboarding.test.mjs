@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pkceS256 } from "../dist/crypto.js";
+import { callOnboardingTool } from "../dist/agent-onboarding.js";
 import { StateStore } from "../dist/store.js";
 import { buildApp } from "../dist/server.js";
 
@@ -106,6 +107,14 @@ test("rotoxy_guide returns deterministic text per topic", async () => {
       assert.ok(t1.length <= 8192, `topic=${topic} text must fit within 8 KiB`);
     }
   });
+});
+
+test("collaboration guide explains opt-in shared execution without promising provider control", () => {
+  const guide = callOnboardingTool({ topic: "collaboration" });
+  assert.match(guide, /shareMode="fleet"/);
+  assert.match(guide, /shareHandle/);
+  assert.match(guide, /cannot resubmit the job/);
+  assert.match(guide, /provider account\/session/);
 });
 
 test("rotoxy_guide rejects invalid topic", async () => {

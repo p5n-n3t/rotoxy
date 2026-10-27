@@ -31,10 +31,10 @@ export const ONBOARDING_TOOL_DEFINITION = {
   },
 } as const;
 
-// Guide version: v1. Content refers only to gateway behaviour and invariants.
+// Guide version: v2. Content refers only to gateway behaviour and invariants.
 // No runtime account identifiers, credentials, balances, model names, or slot claims.
 const GUIDE: Record<OnboardingTopic, string> = {
-  start: `ROTOXY gateway guide v1 — start
+  start: `ROTOXY gateway guide v2 — start
 
 ## Overview
 ROTOXY is an MCP gateway that pools upstream credentials, enforces tool policy, and provides durable agent-coordination tools when a supervisor is configured. One gateway instance can be shared across multiple client folders and machines.
@@ -56,7 +56,7 @@ ROTOXY has one provider Fleet that can serve authorized clients from different f
 - Discover before acting. Do not infer quota, capacity, or project access from static assumptions.
 - Call rotoxy_guide with topic=dispatch, recovery, providers, or collaboration for detailed guidance.`,
 
-  dispatch: `ROTOXY gateway guide v1 — dispatch
+  dispatch: `ROTOXY gateway guide v2 — dispatch
 
 ## Submitting jobs
 Use workspace_dispatch for a bounded job DAG connected to the collaboration ledger. Use job_submit when collaboration overhead is unnecessary. Both require an authorized projectId from workspace_projects.
@@ -68,7 +68,7 @@ Assign one stable idempotency key per intended submission. Reusing the same key 
 Use model or effort fields only when the advertised tool schema supports them and the job's authorized routing policy permits them. Record requested and provider-reported values separately. Do not assume the provider honored a request or that a listed model is entitled for the account.
 
 ## Quota states
-quota_unknown — the gateway has not yet observed this account's quota state. It is not depletion, but the configured budget policy may still exclude or limit it.
+Not reported — the gateway has not yet observed this account's quota state. It is not depletion or zero, but the configured budget policy may still exclude or limit it.
 quota_depleted — the account is confirmed exhausted for the billing period. Exclude it from new submissions until quota resets.
 Discover current account states via live discovery tools. Never rely on previously cached or assumed values.
 
@@ -78,7 +78,7 @@ Do not automatically replay a tools/call whose outcome is ambiguous (network res
 ## Scope ownership and budgets
 Assign explicit path: or record: scope keys to every task before submission. Distribute comparable work fairly across eligible accounts subject to affinity, capacity, and budget. Reserve high-capability capacity for decisions that require it; do not fill slots with trivial work.`,
 
-  recovery: `ROTOXY gateway guide v1 — recovery
+  recovery: `ROTOXY gateway guide v2 — recovery
 
 ## Idle ≠ completed
 A session state of idle does not confirm task completion. Inspect provider errors and retrieve the requested output artifact before marking a task complete. Idle is an intermediate state, not a success state.
@@ -100,7 +100,7 @@ Desktop notifications do not wake a dormant chat session. A workspace message re
 ## Operator handoff
 When automatic recovery is not configured and verified, preserve an actionable handoff: objective, all job/task IDs, validated artifacts, outstanding incidents with evidence, and the exact next action for the resuming agent.`,
 
-  providers: `ROTOXY gateway guide v1 — providers
+  providers: `ROTOXY gateway guide v2 — providers
 
 ## Ledger messages ≠ native provider delivery
 workspace_update messages and job_inbox entries are durable collaboration records inside ROTOXY. They do not themselves deliver instructions to a native provider or launch agents. A provider executes only when a job is submitted with an active session or provider connection.
@@ -109,7 +109,7 @@ workspace_update messages and job_inbox entries are durable collaboration record
 Recording a message to a participant's inbox does not wake a dormant provider chat. Wakeup requires the provider's own notification mechanism and a live session.
 
 ## Quota states
-quota_unknown — the gateway has not observed this account's quota state yet. It is not depletion, but the configured budget policy may still exclude or limit it.
+Not reported — the gateway has not observed this account's quota state yet. It is not depletion or zero, but the configured budget policy may still exclude or limit it.
 quota_depleted — the account is confirmed exhausted for the billing period. Exclude it from new submissions.
 Use live discovery tools for current account states. Do not use cached or assumed quota values.
 
@@ -119,7 +119,12 @@ When the provider supports explicit model or effort selection, use only values p
 ## Backend controls are authoritative
 Gateway enforcement (tool policy, account status, quota, scope) overrides any in-task assumptions. If the gateway rejects a submission or marks an account unavailable, accept that state and route accordingly. Do not bypass gateway decisions based on out-of-band information.`,
 
-  collaboration: `ROTOXY gateway guide v1 — collaboration
+  collaboration: `ROTOXY gateway guide v2 — collaboration
+
+## Share an execution deliberately
+workspace_dispatch is private by default. To let other currently authorized ROTOXY Fleet clients observe one execution, submit it with shareMode="fleet". Store the returned shareHandle in the durable job handoff or workspace record; do not put it in a public issue, commit, or provider prompt.
+
+An authorized collaborator uses workspace_sync with the same projectId and shareHandle. That grants bounded status and result observation only. It cannot resubmit the job, transfer the initiating provider account/session, change the job's private instructions, or approve artifacts for the owner. Revoked Fleet membership blocks the handle before upstream status is read.
 
 ## Scope ownership
 Assign explicit path: or record: scope keys to every task before submission. Concurrent tasks must not share write scope over the same files or records without explicit coordination. Use isolated branches or sandboxes for parallel edits across accounts.
