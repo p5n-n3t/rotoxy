@@ -178,6 +178,19 @@ class TestClientIdValidator(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(result["error"], "idempotency_conflict")
 
+    def test_reconciliation_claim_prefers_latest_unobserved_binding_when_timestamps_collide(self):
+        # A burst can legitimately receive the same millisecond timestamp. The
+        # newest handoff still needs its first observation before old backlog.
+        for job_id in ("burst-a", "burst-b", "burst-c", "burst-latest"):
+            code, result = reserve(self.db, job_id)
+            self.assertEqual(code, 0, result)
+        import sqlite3
+        with sqlite3.connect(self.db) as db:
+            db.execute("UPDATE workspace_execution_bindings SET created_at=1000, last_polled_at=NULL, lease_until=0, settled=0")
+        code, result = ledger(self.db, {"command": "claim_reconciliation", "limit": 1})
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["bindings"], [{"projectId": "project-a", "jobId": "burst-latest", "clientId": "client-a"}])
+
 
 if __name__ == "__main__":
     unittest.main()

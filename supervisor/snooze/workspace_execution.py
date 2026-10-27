@@ -219,6 +219,13 @@ def handle(path, request):
                     AND (last_polled_at IS NULL OR last_polled_at<=?)
                     ORDER BY CASE WHEN last_polled_at IS NULL THEN 0 ELSE 1 END ASC,
                     CASE WHEN last_polled_at IS NULL THEN created_at END DESC,
+                    -- Millisecond clocks legitimately collide when a client
+                    -- publishes several bindings in one event-loop turn.  In
+                    -- that case, use SQLite insertion order as the final
+                    -- "newest first" tiebreaker.  Lexical project/job order
+                    -- would otherwise let unrelated backlog delay the most
+                    -- recent handoff by several reconciliation intervals.
+                    CASE WHEN last_polled_at IS NULL THEN rowid END DESC,
                     last_polled_at ASC,project_id ASC,job_id ASC,client_id ASC LIMIT ?""",
                     (now, now - 30_000, limit)).fetchall()
                 claimed = []
