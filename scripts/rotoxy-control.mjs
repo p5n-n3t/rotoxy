@@ -99,7 +99,10 @@ export class RotoxyController {
     this.healthUrl = options.healthUrl || LOCAL_HEALTH;
     this.lockPath = options.lockPath || resolve(homedir(), '.local/state/rotoxy/control.lock');
     this.sleep = options.sleep || (ms => new Promise(r => setTimeout(r, ms)));
-    this.healthAttempts = options.healthAttempts || 20;
+    // The gateway starts the private supervisor and Oracle-pool adapters before
+    // binding port 2030. Leave a bounded margin for a normal cold start instead
+    // of declaring a healthy release failed at the ten-second edge.
+    this.healthAttempts = options.healthAttempts || 30;
   }
   async command(file, args) {
     const result = await this.run(file, args);

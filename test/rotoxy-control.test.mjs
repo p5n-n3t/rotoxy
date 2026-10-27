@@ -65,6 +65,11 @@ function fixture({ health = true, initial = {} } = {}) {
   return { controller, active, events, get config() { return config; } };
 }
 
+test('default health window leaves a bounded margin for normal gateway startup', () => {
+  const controller = new RotoxyController(async () => ({ code: 0, stdout: '' }), { lockPath: join(isolatedHome, 'default-window.lock') });
+  assert.equal(controller.healthAttempts, 30);
+});
+
 test('manual up health-checks before foreground Funnel and down withdraws only that unit', async () => {
   const initial = { Web: { 'rotoxy.tailnet.ts.net:443': { Handlers: { '/token2oauth': { Proxy: 'http://127.0.0.1:2030' } } } } };
   const f = fixture({ initial });
