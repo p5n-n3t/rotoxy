@@ -589,13 +589,13 @@ export class McpProxy {
     }
     if (isWorkspaceExecutionToolName(name)) {
       const allowed = name === "workspace_dispatch"
-        ? ["schemaVersion", "jobId", "idempotencyKey", "projectId", "eligibleAccountIds", "scheduling", "tasks"]
-        : ["projectId", "jobId"];
+        ? ["schemaVersion", "jobId", "idempotencyKey", "projectId", "eligibleAccountIds", "scheduling", "tasks", "shareMode"]
+        : ["projectId", "jobId", "shareHandle"];
       if (Object.keys(args).some(key => !allowed.includes(key)) || typeof args.projectId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(args.projectId)) throw new JobInputError("invalid workspace execution arguments");
       await this.workspace.backend.authorizeWorkspace(args.projectId, clientId);
       return name === "workspace_dispatch"
         ? this.workspace.service.dispatch(args, clientId)
-        : this.workspace.service.sync(args.projectId, String(args.jobId ?? ""), clientId);
+        : this.workspace.service.sync(args, clientId);
     }
     const allowed = name === "workspace_snapshot" ? ["projectId", "after"] : ["projectId", "input"];
     if (Object.keys(args).some(key => !allowed.includes(key)) || typeof args.projectId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(args.projectId)) throw new JobInputError("invalid workspace arguments");
