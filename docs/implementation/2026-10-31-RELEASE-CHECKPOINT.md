@@ -1,6 +1,52 @@
 # ROTOXY Oct31 release and Oracle checkpoint
 
-## Current continuation — 16:10 UTC
+## Current release — final verification
+
+This section supersedes the earlier snapshots. Gateway, Oracle pool and monitor
+all run immutable `e85b562f556906c6537b83fecb7503dbe6dbd38f`. CI `41223139348`
+passed Node 22/24, including 646 Node tests and 527 Python tests. Build, focused
+doctor/bridge tests, local/public health, authenticated MCP Fleet discovery, and
+public OAuth metadata passed. Rollback drop-ins:
+`/home/jq/.local/state/rotoxy/backups/release-20261031-e85b562/`.
+
+Oracle direct inference is live at the public `/providers/oracle/v1` path. A
+temporary scoped model token returned exact `ROTOXY_PUBLIC_OK`, reported model
+`oracle/qwen3.5:2b`, and verified VM header `ora3`; the token was revoked.
+The private origin's five-host inference smoke passed. Authenticated search and
+extraction are live at `https://search.ziopsyop.tech`: real search results,
+extraction, missing/invalid-token rejection, and private-address rejection all
+passed. Cloudflare Tunnel version 2 preserves the existing Shodan route. See
+the connection-readiness and Oracle reports for API limits and credential types.
+
+LightSprint is externally blocked. Monitor observations were healthy early in
+the run, began failing during the 16:37 UTC cycle, and all nine reported HTTP
+401 by 16:43 UTC. Six other enabled positive-snapshot accounts also failed
+read-only MCP initialization. No official published auth migration/incident was
+found. Do not infer quota exhaustion, disable accounts automatically, change
+authentication schemes, or launch replacement jobs from this evidence.
+
+The fixed review job's supported reconciliation now queues the exact task-bound
+GET. It completed as blocked/auth, assignment revision 4, with no session yet.
+Original assignment: `ws-bc95744eebb98cba5590c72eff1ee1fa092d32eef32af348`;
+provider task: `QjOCtgdP6tLpcNjhNwi9r`; owner account: maryjoebake. Its reservation
+remains retained because the launch was ambiguous. Next action after the user
+repairs that account's official upstream authentication: read current revision,
+invoke revision-fenced `reconcile_task` for `renewal-review` once, and observe
+the original task. Never resubmit or relaunch it. Auth-only inspection retries
+are capped at three, with a 60-second cooldown.
+
+Doctor no longer reports stale cached successes as current health. Cached probe
+and tool evidence expires after five minutes; disabled accounts cannot supply
+success evidence. Live public OAuth/Funnel checks pass; upstream/tool stages are
+unverified when current evidence is missing. Browser QA remains unavailable
+because local browser use is disabled in Work settings. No stale Claude process
+was running, and no replacement was launched with the known network-blocked preset.
+
+The user has a pending request to reconnect one LightSprint account through its
+official flow. No secrets were requested in chat. The three untracked Oct22
+handoff files remain untouched. Product-wide completion is not claimed.
+
+## Earlier continuation — 16:10 UTC
 
 This update supersedes the historical snapshot below. All three runtime consumers
 (gateway, Oracle pool, workforce monitor) now use immutable release
