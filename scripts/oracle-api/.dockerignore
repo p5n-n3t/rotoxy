@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.py[cod]
+.git/
+smoke-test-ora3.py
+deploy-ora3.sh
