@@ -38,3 +38,7 @@ The request must omit `maxConcurrency` when using the `economy` profile (or use 
 ## Evidence boundary
 
 This proves the configured account was discoverable and advertised as fresh-ready, the malformed request was refused by validation, and the corrected single-job dispatch was accepted into durable supervision. It also isolates and fixes the local false-negative task identity check. It does **not** prove provider start, successful admission, task completion, actual provider model, slot capacity, or readiness across other accounts/projects.
+
+## Node 22 background reconciliation test follow-up
+
+CI on Node 22 exposed a lost-observer race in `test/agent-workspace-execution.test.mjs`, not a reconciler runtime failure. `buildApp` starts an automatic 30-second reconciler; the test had installed its completion observer only after awaiting `workspace_dispatch`. If the automatic reconciler settled the new binding during that gap, the test then started a second reconciler and waited for a completion event that could no longer recur. The test now installs the observer before dispatch, retains the 200 ms reconciler as a bounded fallback, and restores the observer even if dispatch fails. No timeout was raised, no runtime scheduling behavior was changed, and the focused integration test passed on Node v22.22.1 (`31.6s`, one test, zero failures) using the existing `dist` build.
