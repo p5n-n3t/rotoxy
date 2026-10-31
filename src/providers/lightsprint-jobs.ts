@@ -736,12 +736,6 @@ export class LightSprintJobsAdapter {
     return this.clientPromise;
   }
 
-  private async workspaceBindingMatches(workspaceId: string): Promise<boolean> {
-    const discovery = await this.discoverProvisioningContract();
-    return discovery.status === "documented" && discovery.family === "workspace-task" &&
-      discovery.workspaceId === workspaceId;
-  }
-
   private async api<T = unknown>(method: string, path: string, body?: Record<string, unknown>, transcript = false,
     trustedChatMutation = false, trustedWorkspaceId?: string, trustedFreshMutation = false): Promise<JobResult<T>> {
     let raw: unknown;
@@ -749,8 +743,17 @@ export class LightSprintJobsAdapter {
       const state = await this.store.load();
       const policyResult = evaluateToolCall(state.config?.toolPolicy, { name: "lightsprint_api", arguments: { method, path, ...(body === undefined ? {} : { body }) } });
       const allowed = policyResult.allowed;
-      if (trustedWorkspaceId !== undefined && !await this.workspaceBindingMatches(trustedWorkspaceId)) {
-        return rejected<T>(this.accountId, "identity_mismatch");
+      if (trustedWorkspaceId !== undefined) {
+        const discovery = await this.discoverProvisioningContract();
+        if (discovery.status !== "documented") {
+          // Preserve an explicit upstream auth failure so durable read-only
+          // reconciliation can distinguish credential repair from a binding
+          // mismatch. Other unknown discovery states remain fail-closed.
+          return rejected<T>(this.accountId, discovery.reason === "auth_failed" ? "auth" : "identity_mismatch");
+        }
+        if (discovery.family !== "workspace-task" || discovery.workspaceId !== trustedWorkspaceId) {
+          return rejected<T>(this.accountId, "identity_mismatch");
+        }
       }
       const accountBoundWorkspace = !allowed && policyResult.code === "endpoint-not-allowed" && trustedWorkspaceId !== undefined &&
         this.options.trustedWorkspacePermit?.(Object.freeze({ accountId: this.accountId, workspaceId: trustedWorkspaceId,

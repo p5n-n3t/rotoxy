@@ -81,6 +81,31 @@ test("pinned task session inspection uses only the documented taskRef-scoped GET
   assert.deepEqual(h.calls, [{ method: "GET", path: "/api/workspaces/ws-a/agent-sessions?taskRef=LW-1" }]);
 });
 
+test("upstream 401 during workspace MCP discovery remains an auth failure for inspection", async () => {
+  const requests = [];
+  const store = {
+    load: async () => ({ config: { toolPolicy: {} }, accounts: [{ id: "acct-a", provider: "lightsprint", enabled: true }] }),
+    revealToken: async () => "synthetic-token",
+  };
+  const adapter = new LightSprintJobsAdapter(store, "acct-a", {
+    trustedWorkspacePermit: () => true,
+    fetch: async (_url, init) => {
+      const message = JSON.parse(init.body);
+      requests.push(message.method);
+      if (message.method === "initialize") return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+        result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "test", version: "1" } } }),
+        { status: 200, headers: { "content-type": "application/json", "mcp-session-id": "test-session" } });
+      if (message.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (message.method === "tools/list") return new Response("unauthorized", { status: 401 });
+      assert.fail(`unexpected MCP method ${message.method}`);
+    },
+  });
+  const result = await adapter.listWorkspaceSessions("ws-a", "LW-1");
+  assert.equal(result.classification, "rejected");
+  assert.equal(result.reason, "auth");
+  assert.deepEqual(requests, ["initialize", "notifications/initialized", "tools/list"]);
+});
+
 test("scoped task instructions read back by canonical id beside a human ref", async () => {
   const permits = [];
   const h = harness({ permit: request => { permits.push(request); return true; } });
