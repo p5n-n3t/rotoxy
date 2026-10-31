@@ -35,7 +35,8 @@ test("integrated shell carries workspace context, skip target, accessible mobile
   assert.match(html, /ROTOXY Fleet/);
   assert.match(html, /Current page<\/span><strong class="rx-current-page">Overview/);
   assert.match(html, /<details class="rx-nav-details"><summary class="rx-mobile-menu">Menu/);
-  assert.match(html, /matchMedia\("\(min-width:721px\)"\)/, "desktop shells open the native details navigation");
+  assert.doesNotMatch(html, /<script\b/i, "shared navigation works under a strict script CSP");
+  assert.match(html, /\.rx-nav-details::details-content\{content-visibility:visible;display:contents\}/, "desktop shows the disclosure contents without JavaScript");
   assert.match(html, /<nav class="rx-nav-groups" aria-label="ROTOXY navigation">/);
   assert.match(html, /href="#rx-main-content">Skip to content/);
   assert.match(html, /<main id="rx-main-content" tabindex="-1"/);

@@ -52,10 +52,14 @@ export function adminNav(base: string, active: string, groups: readonly NavGroup
     return `<section class="nav-group" aria-labelledby="nav-${esc(g.label.toLowerCase())}"><h2 class="nav-label" id="nav-${esc(g.label.toLowerCase())}">${esc(g.label)}</h2>${links}</section>`;
   }).join("");
   const actions = `<div class="rx-sidebar-end"><a class="btn secondary" href="${b}/">Gateway</a><form class="inline" method="post" action="${b}/admin/logout"><button class="secondary">Sign out</button></form></div>`;
+  // Desktop visibility is CSS-driven, while mobile uses native <details>.
+  // This intentionally emits no inline script: a page-level CSP nonce must
+  // never be bypassed merely to make navigation responsive.
+  const mobileMenu = `<details class="rx-nav-details"><summary class="rx-mobile-menu">Menu <span aria-hidden="true">⌄</span></summary><div class="rx-nav-content"><nav class="rx-nav-groups" aria-label="ROTOXY navigation">${nav}</nav>${actions}</div></details>`;
   // One navigation tree serves both layouts. Rendering desktop and mobile
   // copies made duplicate links appear in assistive technology and complicated
   // narrow-screen navigation when responsive styles were delayed or overridden.
-  return `<a class="rx-skip-link" href="#rx-main-content">Skip to content</a><aside class="rx-sidebar" aria-label="ROTOXY navigation"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><span class="logo">${ROTOXY_MARK_SVG}</span><span><strong>ROTOXY</strong><span class="eyebrow">AI workforce control</span></span></a><div class="rx-workspace-id"><span class="eyebrow">Control plane</span><strong>ROTOXY Fleet</strong></div><details class="rx-nav-details"><summary class="rx-mobile-menu">Menu <span aria-hidden="true">⌄</span></summary><div class="rx-nav-content"><nav class="rx-nav-groups" aria-label="ROTOXY navigation">${nav}</nav>${actions}</div></details><script>(function(){const n=document.currentScript&&document.currentScript.previousElementSibling;if(!(n instanceof HTMLDetailsElement))return;const q=window.matchMedia("(min-width:721px)");const s=()=>{n.open=q.matches};s();q.addEventListener&&q.addEventListener("change",s)})()</script></aside><header class="rx-page-context"><div><span class="eyebrow">Current page</span><strong class="rx-current-page">${esc(current)}</strong></div></header>`;
+  return `<a class="rx-skip-link" href="#rx-main-content">Skip to content</a><aside class="rx-sidebar" aria-label="ROTOXY navigation"><a class="brand" href="${b}/admin" aria-label="ROTOXY admin home"><span class="logo">${ROTOXY_MARK_SVG}</span><span><strong>ROTOXY</strong><span class="eyebrow">AI workforce control</span></span></a><div class="rx-workspace-id"><span class="eyebrow">Control plane</span><strong>ROTOXY Fleet</strong></div>${mobileMenu}</aside><header class="rx-page-context"><div><span class="eyebrow">Current page</span><strong class="rx-current-page">${esc(current)}</strong></div></header>`;
 }
 
 /** Inject the session CSRF token into every POST form of an admin page. */
