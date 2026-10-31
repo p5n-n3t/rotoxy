@@ -272,7 +272,7 @@ async def chat(body: ChatRequest, _token: str = Depends(_require_auth)) -> JSONR
             "object": "chat.completion",
             "created": int(time.time()),
             "model": body.model,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "length" if data.get("done_reason") == "length" else "stop"}],
             "usage": {"prompt_tokens": data.get("prompt_eval_count", 0), "completion_tokens": data.get("eval_count", 0), "total_tokens": int(data.get("prompt_eval_count", 0) or 0) + int(data.get("eval_count", 0) or 0)},
         }
         return JSONResponse(result, headers={"x-oracle-host": node["id"], "cache-control": "no-store"})
