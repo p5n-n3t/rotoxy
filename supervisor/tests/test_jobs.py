@@ -223,6 +223,28 @@ class JobRegistryTests(unittest.TestCase):
             row = db.execute("SELECT state,released_at FROM job_tasks WHERE assignment='job-1'").fetchone()
         self.assertEqual((row["state"], row["released_at"]), ("ambiguous", None))
 
+    def test_cancel_after_fresh_launch_claim_retains_slot_and_marks_launch_ambiguous(self):
+        self.register("account-b", sessions=[])
+        self.registry.submit(assignment("job-b", "key-b", [fresh_task("fresh-b", account="account-b")], accounts=["account-b"]), now=1)
+        create = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(create["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-dispatched"}}, now=3)
+        patch = self.registry.claim_operation("worker", now=4)
+        self.registry.record_result(patch["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-dispatched"}}, now=5)
+        verify = self.registry.claim_operation("worker", now=6)
+        self.registry.record_result(verify["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-dispatched"}}, now=7)
+        launch = self.registry.claim_operation("worker", now=8)
+        self.assertEqual(launch["kind"], "launch_task")
+        held = self.registry.get_assignment("job-b")
+        self.registry.cancel_assignment("job-b", expected_revision=held["revision"], now=9)
+        with self.registry.connection() as db:
+            row = db.execute("SELECT state,released_at FROM job_tasks WHERE assignment='job-b'").fetchone()
+            op_state = db.execute("SELECT state,error_class FROM operations WHERE id=?", (launch["operationId"],)).fetchone()
+        self.assertEqual((row["state"], row["released_at"]), ("cancel_pending", None))
+        self.assertEqual((op_state["state"], op_state["error_class"]), ("ambiguous", "CancelledAfterDispatch"))
+
     def test_expired_fresh_launch_lease_is_ambiguous_and_never_claimed_again(self):
         self.register("account-a", sessions=[])
         self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)

@@ -237,10 +237,19 @@ test("workspace execution persists before submit, replays once, reconciles owner
     // Install before dispatch: buildApp also runs an automatic reconciler, which
     // could otherwise settle this binding before the event observer exists.
     const originalSync = restartedApp.agentWorkspace.sync;
+    const execution = restartedApp.agentWorkspace.execution;
+    const originalClaim = execution.claimReconciliation.bind(execution);
+    const backgroundTrace = { claims: [], syncs: [] };
+    execution.claimReconciliation = async (...args) => {
+      const bindings = await originalClaim(...args);
+      backgroundTrace.claims.push(bindings.map(binding => binding.jobId));
+      return bindings;
+    };
     let signalBackground;
     const synchronized = new Promise(resolve => { signalBackground = resolve; });
     restartedApp.agentWorkspace.sync = async (...args) => {
       const result = await originalSync.apply(restartedApp.agentWorkspace, args);
+      if (args[1] === background.jobId) backgroundTrace.syncs.push({ state: result.status?.state, projectionPending: result.projectionPending, resultsUnavailable: result.resultsUnavailable });
       if (args[1] === background.jobId && result.projectionPending === false) signalBackground();
       return result;
     };
@@ -251,9 +260,16 @@ test("workspace execution persists before submit, replays once, reconciles owner
       const submitCount=calls.filter(c=>c.name==="job_submit").length;
       reconciler.start();
       reconcilerStarted = true;
-      await Promise.race([synchronized, new Promise((_, reject) => {
-        timeout=setTimeout(()=>reject(new Error("background reconciliation did not publish before deadline")), BACKGROUND_RECONCILIATION_TIMEOUT_MS);
-      })]);
+      try {
+        await Promise.race([synchronized, new Promise((_, reject) => {
+          timeout=setTimeout(()=>reject(new Error("background reconciliation did not publish before deadline")), BACKGROUND_RECONCILIATION_TIMEOUT_MS);
+        })]);
+      } catch (error) {
+        if (error?.message === "background reconciliation did not publish before deadline") {
+          throw new Error(`${error.message}; trace=${JSON.stringify(backgroundTrace)}`);
+        }
+        throw error;
+      }
       const observed=(await mcp(collaborator,"workspace_snapshot",{projectId:backgroundProject})).value;
       const backgroundTask=observed.tasks.find(t=>t.jobId===background.jobId);
       assert.ok(observed.artifacts.some(a=>a.taskId===backgroundTask?.id),"background reconciliation publishes results after the initiating HTTP request ended");
@@ -262,6 +278,7 @@ test("workspace execution persists before submit, replays once, reconciles owner
       clearTimeout(timeout);
       if (reconcilerStarted) reconciler.stop();
       restartedApp.agentWorkspace.sync = originalSync;
+      execution.claimReconciliation = originalClaim;
     }
 
   } finally {
