@@ -18,6 +18,12 @@ import type { TelemetryRecorder } from "./telemetry.js";
 
 /** ChatGPT's connector OAuth callback; its registration is real evidence. */
 export const CHATGPT_CALLBACK_URI = "https://chatgpt.com/connector_platform_oauth_redirect";
+const MAX_CACHED_EVIDENCE_AGE_MS = 5 * 60 * 1000;
+
+function isFreshEvidence(timestamp: unknown, now: number): timestamp is number {
+  return typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp > 0 &&
+    timestamp <= now && now - timestamp <= MAX_CACHED_EVIDENCE_AGE_MS;
+}
 
 export interface DoctorCollectOptions {
   /** URL of this gateway's /healthz, when checking from outside the process. */
@@ -96,13 +102,14 @@ export async function collectDoctorSnapshot(
   }
   snapshot.credentials = { checked: true, observedAt: Date.now(), accounts };
 
-  // Upstream evidence is a real initialize probe: the most recent successful
-  // one on an enabled account (the upstream is reachable), else the most
-  // recent failure. Per-credential problems are reported under credentials.
+  // Cached observations are proof only briefly. Among fresh enabled-account
+  // probes, use the newest result regardless of success so an old success
+  // cannot hide a later authentication or availability failure.
+  const observedAt = Date.now();
   const probes = state.accounts
-    .filter((a) => a.enabled && a.stats.lastProbeAt)
-    .sort((a, b) => (b.stats.lastProbeAt || 0) - (a.stats.lastProbeAt || 0));
-  const probed = probes.find((a) => a.stats.lastProbeOk) || probes[0];
+    .filter((a) => isFreshEvidence(a.stats.lastProbeAt, observedAt))
+    .sort((a, b) => b.stats.lastProbeAt! - a.stats.lastProbeAt!);
+  const probed = probes.find((a) => a.enabled);
   if (probed) {
     const error = probed.stats.lastProbeError;
     snapshot.upstream = {
@@ -113,18 +120,25 @@ export async function collectDoctorSnapshot(
       initializeOk: probed.stats.lastProbeOk === true,
       error: probed.stats.lastProbeOk ? undefined : error,
     };
+  } else if (state.accounts.some((a) => a.stats.lastProbeAt !== undefined)) {
+    snapshot.upstream = { checked: false };
   }
 
-  const inventories = Object.entries(state.capabilities || {}).filter(([id]) => state.accounts.some((a) => a.id === id));
-  if (inventories.length) {
-    const ok = inventories.filter(([, caps]) => caps.ok);
-    const latest = (ok.length ? ok : inventories).sort((a, b) => b[1].capturedAt - a[1].capturedAt)[0][1];
+  const knownAccounts = new Map(state.accounts.map((account) => [account.id, account]));
+  const inventories = Object.entries(state.capabilities || {}).filter(([id]) => knownAccounts.has(id));
+  const enabledInventories = inventories
+    .filter(([id]) => knownAccounts.get(id)?.enabled === true && isFreshEvidence(state.capabilities?.[id]?.capturedAt, observedAt))
+    .sort((a, b) => b[1].capturedAt - a[1].capturedAt);
+  if (enabledInventories.length) {
+    const latest = enabledInventories[0][1];
     snapshot.tools = {
       checked: true,
       toolsListOk: latest.ok,
       toolCount: latest.tools.length,
       error: latest.ok ? undefined : latest.error,
     };
+  } else if (inventories.length) {
+    snapshot.tools = { checked: false };
   }
 
   if (options.publicMetadata) {
