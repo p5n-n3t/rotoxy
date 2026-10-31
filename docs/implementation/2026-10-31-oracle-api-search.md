@@ -2,11 +2,12 @@
 
 ## API capability
 
-The ora3 service at `http://100.114.191.111:8877` is being upgraded from the Crawl4AI proxy to an authenticated, bounded Oracle API. Its implemented routes are:
+The ora3 service at `http://100.114.191.111:8877` now runs an authenticated, bounded Oracle API. Its implemented routes are:
 
 - `GET /health`: liveness only.
 - `GET /v1/models`: OpenAI-compatible catalog for the fixed five-node model allowlist; requires Bearer authentication.
 - `POST /v1/chat/completions`: OpenAI-compatible non-streaming chat completion; requires Bearer authentication.
+- `POST /search`: authenticated SearXNG JSON search with a two-request fail-fast concurrency bound, 20-second timeout, 512 KB upstream body cap, and 10-result maximum.
 - `POST /extract` (and compatibility alias `POST /scrape`): bounded single-document text extraction; requires Bearer authentication.
 
 The local ROTOXY adapter reads the existing API credential from the owner-only local file `/home/jq/.config/rotoxy/oracle-api-token`; the value is not committed or printed. ora3 has the same unrotated credential in `/etc/oracle-api/api-token` (root-owned, mode `0600`) in addition to the existing service env file.
@@ -19,7 +20,7 @@ Extraction is a plain HTTP fetch and HTML text parser. It permits HTTP/HTTPS on 
 
 ## Search limitation
 
-No SearXNG, Firecrawl, or other search-index service is installed on ora3. A direct read-only probe of DuckDuckGo's HTML search endpoint returned HTTP 202 with an anomaly/challenge page and no result links. No `/search` route is implemented or advertised. URL extraction is document retrieval and is not represented as web search. Public search publication remains blocked until an existing/approved search source is available.
+The direct DuckDuckGo HTML endpoint returned HTTP 202 with an anomaly/challenge page and no result links. A pinned official SearXNG container is now deployed privately on `oracle-api_default` with no host port, 512 MiB memory cap, 1 CPU, and JSON format explicitly enabled. The API accepts a bounded query string and returns title, URL, excerpt, and engine fields only. One authenticated live query for `python official documentation` returned HTTP 200 and five results; the first was Python.org's `Our Documentation` at `https://www.python.org/doc/`. SearXNG aggregated 40 results in the direct container probe; DuckDuckGo showed a CAPTCHA warning, while aggregation still returned the Python.org result. The SearXNG instance is not exposed through the tunnel or public DNS. This deployment follows the [official container installation guidance](https://docs.searxng.org/admin/installation-docker) and [search API format guidance](https://docs.searxng.org/dev/search_api.html).
 
 ## Host/model inventory
 
@@ -27,8 +28,8 @@ At the pre-deploy read-only inventory, ora3/5/6/7/8 each had no active Ollama pr
 
 ## Deployment and rollback
 
-`deploy-ora3.sh` backs up `/opt/jq-worker/oracle-api/app.py` and `docker-compose.yaml` to a private timestamped directory under `/opt/jq-worker/backups/`, installs these repository files, rebuilds only the `oracle-api` image, restarts only that container, and restores the two backed-up files automatically if health fails. The compose file binds port 8877 only to loopback and ora3's Tailnet address and configures one Uvicorn worker. It does not edit the existing cloudflared tunnel or publish DNS. Manual rollback is to copy the two files from the printed backup directory and run `docker compose up -d --no-deps oracle-api` from `/opt/jq-worker/oracle-api`.
+`deploy-ora3.sh` backs up the app, compose file, Dockerfile, requirements, dockerignore, SearXNG settings, private `.env`, and prior Oracle image ID/tag under `/opt/jq-worker/oracle-api/backups/`. It rebuilds only the `oracle-api` image, starts the SearXNG service and Oracle API, checks both health states, and restores backed-up Oracle configuration/image if health fails. The compose file binds Oracle port 8877 only to loopback and ora3's Tailnet address and configures one Uvicorn worker; SearXNG has no published port. It does not edit the existing cloudflared tunnel or publish DNS. Latest deployment backup: `/opt/jq-worker/oracle-api/backups/oracle-api-20261031T164650Z`.
 
 ## Verification
 
-Local source syntax checks passed with `python3 -m py_compile` and `bash -n`. Container-to-node Ollama `/api/version` checks returned 200 for all five configured hosts. Authenticated model catalog, missing/invalid-token rejection, public extraction, private-URL rejection, and one harmless inference to each host are exercised by `smoke-test-ora3.py`; final results and the actual backup path are recorded after deployment.
+Local source syntax checks passed with `python3 -m py_compile`, `bash -n`, and `git diff --check`. Final live smoke after the SearXNG deployment on 2026-10-31: missing and invalid auth both 401; model catalog 200 with five models and no `gpt-oss:20b`; private URL rejected with 422; Example Domain extraction 200 with title and expected text; authenticated search 200 with five Python documentation results; one harmless `ORACLE_API_OK` inference succeeded on each of ora3, ora5, ora6, ora7, and ora8 (5.82–6.60 seconds). Host attribution was distinct across all five. Both containers reported healthy; sampled SearXNG use was 117.8 MiB / 512 MiB. The parent bridge catalog was verified 200 before this deployment; bridge chat should be retested now against the updated origin.

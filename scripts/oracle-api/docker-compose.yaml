@@ -1,4 +1,22 @@
 services:
+  searxng:
+    image: ghcr.io/searxng/searxng:2026.10.30-ffa88e3ba
+    container_name: oracle-searxng
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET must be provisioned by deploy-ora3.sh}
+      SEARXNG_BIND_ADDRESS: 0.0.0.0
+      SEARXNG_PORT: 8080
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   oracle-api:
     build:
       context: .

@@ -57,6 +57,13 @@ def main() -> int:
     if status != 200 or "Example Domain" not in text:
         raise SystemExit("public URL extraction failed")
 
+    status, search_result, _ = request("/search", token=token, body={"query": "python official documentation", "limit": 5})
+    results = search_result.get("results", [])
+    first = results[0] if results else {}
+    print(f"search_status={status} result_count={len(results)} first_url={first.get('url', '')[:180]}")
+    if status != 200 or not results or "python.org" not in first.get("url", ""):
+        raise SystemExit("search query failed to return the expected Python documentation result")
+
     hosts = []
     for index in range(5):
         started = time.monotonic()

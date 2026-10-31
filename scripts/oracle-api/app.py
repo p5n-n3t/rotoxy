@@ -42,6 +42,9 @@ MAX_CONTEXT = 4096
 MAX_PREDICT = 512
 UPSTREAM_TIMEOUT = 120.0
 FETCH_TIMEOUT = 24.0
+SEARCH_TIMEOUT = 20.0
+SEARCH_MAX_RESPONSE_BYTES = 512_000
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080").rstrip("/")
 _rate: dict[str, list[float]] = defaultdict(list)
 _PRIVATE_NETWORKS = tuple(map(ipaddress.ip_network, (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
@@ -86,6 +89,7 @@ def _load_nodes() -> list[dict[str, Any]]:
 NODES = _load_nodes()
 _node_locks = {node["id"]: asyncio.Semaphore(1) for node in NODES}
 _extract_slots = asyncio.Semaphore(2)
+_search_slots = asyncio.Semaphore(2)
 _round_robin = 0
 _round_robin_lock = asyncio.Lock()
 
@@ -419,6 +423,59 @@ def _safe_fetch(url: str) -> tuple[str, str, str]:
 class ExtractRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str = Field(min_length=8, max_length=2048)
+
+
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(min_length=2, max_length=200)
+    limit: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        if any(ord(char) < 32 for char in value):
+            raise ValueError("invalid query")
+        return value.strip()
+
+
+@app.post("/search")
+async def search(body: SearchRequest, _token: str = Depends(_require_auth)) -> JSONResponse:
+    if _search_slots.locked():
+        raise HTTPException(status_code=503, detail="search_at_capacity")
+    await _search_slots.acquire()
+    try:
+        async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT, follow_redirects=False) as client:
+            async with client.stream("GET", f"{SEARXNG_URL}/search", params={"q": body.query, "format": "json", "language": "en"}) as response:
+                if response.status_code != 200:
+                    raise HTTPException(status_code=502, detail="search_upstream_unavailable")
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > SEARCH_MAX_RESPONSE_BYTES:
+                        raise HTTPException(status_code=502, detail="search_response_too_large")
+        payload = json.loads(data)
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            raise HTTPException(status_code=502, detail="search_upstream_invalid")
+        bounded = []
+        for item in results[:body.limit]:
+            if not isinstance(item, dict):
+                continue
+            bounded.append({
+                "title": str(item.get("title") or "")[:300],
+                "url": str(item.get("url") or "")[:2048],
+                "content": str(item.get("content") or "")[:1200],
+                "engine": str(item.get("engine") or "")[:80],
+            })
+        return JSONResponse({"query": body.query, "results": bounded}, headers={"cache-control": "no-store", "x-search-provider": "searxng"})
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="search_timeout") from None
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail="search_unavailable") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=502, detail="search_upstream_invalid") from None
+    finally:
+        _search_slots.release()
 
 
 @app.post("/extract")
