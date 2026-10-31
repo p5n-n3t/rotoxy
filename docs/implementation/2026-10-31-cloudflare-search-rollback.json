@@ -1,0 +1,17 @@
+{
+  "accountId": "0228e3fe174bbc185f30b1d4eaf5f166",
+  "zoneId": "f5e90699d3add60ffec98b3c7ada87c5",
+  "tunnelId": "a71d202a-2d51-405a-9d26-0d3096464688",
+  "observedVersion": 1,
+  "observedOn": "2026-10-31",
+  "hostname": "search.ziopsyop.tech",
+  "hostnamePreviouslyPresent": false,
+  "configBeforePublication": {
+    "ingress": [
+      { "service": "http://gateway:8765", "hostname": "shodan.ziopsyop.tech" },
+      { "service": "http_status:404" }
+    ],
+    "warp-routing": { "enabled": false }
+  },
+  "rollback": "If this new hostname is published, remove only its newly created DNS record and ingress rule; re-read configuration first and preserve concurrent changes. Do not overwrite the whole tunnel with this snapshot if other routes were added subsequently. This file is a pre-publication snapshot, not publication evidence."
+}

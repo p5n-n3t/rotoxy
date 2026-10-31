@@ -26,7 +26,7 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   app.use(createOracleModelApi(store,{tokenFile,fetch:async(url,init)=>{
     calls.push({url,init});
     if(reject) throw Error('synthetic-private-oracle-key must not leak');
-    return Response.json(init.method==='GET'?{object:'list',data:[{id:'qwen3.5:2b'}]}:{model:'qwen3.5:2b',choices:[{message:{content:'OK'}}]});
+    return Response.json(init.method==='GET'?{object:'list',data:[{id:'qwen3.5:2b'}]}:{model:'qwen3.5:2b',choices:[{message:{content:'OK'}}]},{headers:{'x-oracle-host':'ora8'}});
   }}));
   const server=createServer(app);
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -39,7 +39,10 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   assert.equal(calls.length,0);
   const catalog=await(await fetch(base+'/models',{headers})).json();
   assert.equal(catalog.data[0].id,'oracle/qwen3.5:2b');
-  const answer=await(await fetch(base+'/chat/completions',{method:'POST',headers,body:JSON.stringify(body)})).json();
+  const completion=await fetch(base+'/chat/completions',{method:'POST',headers,body:JSON.stringify(body)});
+  assert.equal(completion.headers.get('x-oracle-host'),'ora8');
+  assert.equal(completion.headers.get('x-rotoxy-provider-path'),'oracle');
+  const answer=await completion.json();
   assert.equal(answer.model,'oracle/qwen3.5:2b');
   assert.equal(calls[1].url,'http://100.114.191.111:8877/v1/chat/completions');
   assert.equal(JSON.parse(calls[1].init.body).model,'qwen3.5:2b');
