@@ -8,4 +8,4 @@ No production files changed. `test_oracle_pool.py` was not modified.
 
 ## Validation
 
-`PYTHONPATH=supervisor python3 -m unittest supervisor.tests.test_oracle_apply supervisor.tests.test_oracle_model_admin supervisor.tests.test_oracle_ops` passed 33 tests. Full supervisor Python suite result is pending.
+`PYTHONPATH=supervisor python3 -m unittest supervisor.tests.test_oracle_apply supervisor.tests.test_oracle_model_admin supervisor.tests.test_oracle_ops` passed 33 tests. `PYTHONPATH=supervisor python3 -m unittest discover -s supervisor/tests` passed all 520 tests in 152.6 seconds.
