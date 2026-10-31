@@ -6,6 +6,9 @@
   "observedOn": "2026-10-31",
   "hostname": "search.ziopsyop.tech",
   "hostnamePreviouslyPresent": false,
+  "publishedTunnelVersion": 2,
+  "createdDnsRecordId": "6320cd896b0f996be621249372b4c615",
+  "publishedOrigin": "http://100.114.191.111:8877",
   "configBeforePublication": {
     "ingress": [
       { "service": "http://gateway:8765", "hostname": "shodan.ziopsyop.tech" },

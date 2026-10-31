@@ -24,6 +24,10 @@ ora3, ora5, ora6, ora7, and ora8, plus missing/invalid-token rejection, private-
 rejection, and public example-page extraction. See the private API implementation
 report for exact deployment and rollback details. ora1 remains unreachable.
 
-This initial bridge execution was local through the running gateway. Public
-Funnel inference and propagated VM attribution require their own recorded checks.
+After promoting immutable release `dc4cb3b`, the public Funnel path was tested:
+`https://jq-xubuntu1.bigeye-escalator.ts.net/providers/oracle/v1`. Catalog returned
+HTTP 200 with the five models above. Chat completion returned HTTP 200 and exact
+content `ROTOXY_PUBLIC_OK`, model `oracle/qwen3.5:2b`, `X-Oracle-Host: ora3`, and
+`X-Rotoxy-Provider-Path: oracle`. Reported usage was again 20 prompt and 5
+completion tokens. The second temporary scoped gateway token was revoked too.
 Model discovery alone is not evidence that every listed model was executed.
