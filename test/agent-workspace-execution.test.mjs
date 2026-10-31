@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { pkceS256 } from "../dist/crypto.js";
 import { StateStore } from "../dist/store.js";
 import { buildApp } from "../dist/server.js";
+import { WorkspaceExecutionService } from "../dist/workspace-execution.js";
 
 const ADMIN = "workspace-execution-test-password";
 const listen = server => new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => resolve(server.address())); });
@@ -26,6 +27,26 @@ async function oauthToken(base, scope = "mcp jobs:read jobs:write") {
 const submission = (jobId, instructions = "Published instruction") => ({ schemaVersion: 1, jobId, idempotencyKey: "idem-" + jobId, projectId: "project-a", eligibleAccountIds: ["acct-a"], tasks: [{ taskId: "task-a", dependsOn: [], scopeKeys: ["path:src"], instructions, execution: { mode: "existing-session" }, output: { kind: "text", maxBytes: 2048, format: "text", expectedMarker: "DONE" } }] });
 
 const BACKGROUND_RECONCILIATION_TIMEOUT_MS = 120_000;
+
+test("workspace sync preserves the safe fresh-task roundtrip failure class", async () => {
+  const summary = { projectId: "project-a", jobId: "job-roundtrip", state: "accepted", provider: "lightsprint", taskCount: 1, createdAt: 1, updatedAt: 1 };
+  const runner = async (_executable, _args, stdin) => {
+    const request = JSON.parse(stdin);
+    if (request.command === "get") return JSON.stringify({ dispatch: summary, submission: { tasks: [{ taskId: "task-a" }] }, remoteJobId: "remote-job", actor: "client:owner" });
+    if (request.command === "set_state") return JSON.stringify({ dispatch: { ...summary, state: request.state, updatedAt: 2 } });
+    throw new Error("unexpected ledger command");
+  };
+  const backend = {
+    authorizeWorkspace: async () => {},
+    callTool: async (name) => name === "job_status"
+      ? { state: "held", tasks: [{ taskId: "task-a", state: "blocked", error: "instruction_roundtrip_unverified" }] }
+      : { results: [] },
+  };
+  const service = new WorkspaceExecutionService({ dir: "/tmp" }, backend, { runner });
+  const result = await service.sync({ projectId: "project-a", jobId: "job-roundtrip" }, { projectId: "project-a", clientId: "client-owner" });
+  assert.equal(result.status.state, "held");
+  assert.equal(result.status.tasks[0].error, "instruction_roundtrip_unverified");
+});
 
 test("workspace execution persists before submit, replays once, reconciles owner-scoped results and publishes only bounded projections", { timeout: BACKGROUND_RECONCILIATION_TIMEOUT_MS + 10_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "rotoxy-aw-execution-"));

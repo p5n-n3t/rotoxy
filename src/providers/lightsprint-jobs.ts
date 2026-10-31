@@ -308,6 +308,26 @@ function findField(value: unknown, names: string[], depth = 0): unknown {
   }
   return undefined;
 }
+function taskIdentityMatches(value: unknown, expected: string): boolean {
+  const root = record(value);
+  const task = record(root?.task) ?? root;
+  if (!task) return false;
+  const canonicalKeys = ["id", "taskId", "providerTaskId"].filter(key => Object.hasOwn(task, key));
+  if (canonicalKeys.length) return canonicalKeys.every(key => typeof task[key] === "string" && task[key] === expected);
+  return ["taskRef", "ref"].some(key => task[key] === expected);
+}
+function taskIdentity(value: unknown): string | undefined {
+  const root = record(value);
+  const task = record(root?.task) ?? root;
+  if (!task) return undefined;
+  const canonicalKeys = ["id", "taskId", "providerTaskId"].filter(key => Object.hasOwn(task, key));
+  if (canonicalKeys.length) {
+    const values = canonicalKeys.map(key => task[key]);
+    return values.every(item => typeof item === "string" && item === values[0]) ? values[0] as string : undefined;
+  }
+  const reference = ["taskRef", "ref"].find(key => typeof task[key] === "string");
+  return reference ? task[reference] as string : undefined;
+}
 function boundedPreview(value: unknown): string {
   const chunks: string[] = [];
   const seen = new WeakSet<object>();
@@ -816,26 +836,28 @@ export class LightSprintJobsAdapter {
     const readback = await this.readWorkspaceTask(workspaceId, taskRef);
     if (readback.classification !== "accepted") return readback;
     const task = record(record(readback.value)?.task) ?? record(readback.value);
-    if (!task || (task.ref !== taskRef && task.id !== taskRef) || task.description !== description) return rejected(this.accountId, "instructions_mismatch");
+    if (!task || taskIdentity(readback.value) !== taskRef || !taskIdentityMatches(readback.value, taskRef) || task.description !== description) return rejected(this.accountId, "instructions_mismatch");
     this.verifiedInstructions.set(key, description);
     return { ...accepted(this.accountId, readback.value), instructionsVerified: true };
   }
 
   async launchWorkspaceSession(workspaceId: string, taskRef: string, provider: JobProvider,
-    branchName: string): Promise<JobResult> {
+    branchName: string, expectedDescription?: string): Promise<JobResult> {
     validateId(taskRef, "taskRef");
     validateId(branchName, "branchName");
     if (!PROVIDERS.has(provider)) throw new TypeError("provider is invalid");
     const key = `${workspaceId}\0${taskRef}`;
-    const expected = this.verifiedInstructions.get(key);
+    const expected = expectedDescription === undefined ? this.verifiedInstructions.get(key) : expectedDescription;
     if (expected === undefined) return rejected(this.accountId, "instructions_mismatch");
-    // Consume synchronously before the readback await so concurrent callers
-    // cannot both retain authorization for the same launch.
+    validateText(expected, "description", MAX_INSTRUCTIONS_LENGTH);
+    // Adapter-direct callers consume the one-shot in-memory proof. Durable
+    // worker operations pass their persisted instruction packet instead; their
+    // operation claim is the single-use boundary across adapter instances.
     this.verifiedInstructions.delete(key);
     const before = await this.readWorkspaceTask(workspaceId, taskRef);
     if (before.classification !== "accepted") return before;
     const task = record(record(before.value)?.task) ?? record(before.value);
-    if (!task || (task.ref !== taskRef && task.id !== taskRef) || task.description !== expected) {
+    if (!task || !taskIdentityMatches(before.value, taskRef) || task.description !== expected) {
       this.verifiedInstructions.delete(key);
       return rejected(this.accountId, "instructions_mismatch");
     }

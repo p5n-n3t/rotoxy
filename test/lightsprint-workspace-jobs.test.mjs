@@ -11,7 +11,7 @@ function harness({ permit, policy = { endpoints: [{ rules: [] }] }, workspace = 
     load: async () => ({ config: { toolPolicy: policy }, accounts: [{ id: "acct-a", provider: "lightsprint", enabled: true }] }),
     revealToken: async () => "synthetic-token",
   };
-  const adapter = new LightSprintJobsAdapter(store, "acct-a", {
+  const options = {
     trustedWorkspacePermit: permit,
     clientFactory: () => ({ request: async (method, params) => {
       if (method === "tools/list") return { tools: [{ name: "lightsprint_api", description: description.replace("workspaceId = ws-a", `workspaceId = ${workspace}`) }] };
@@ -22,11 +22,12 @@ function harness({ permit, policy = { endpoints: [{ rules: [] }] }, workspace = 
         if (lostLaunch) throw new Error("lost response");
         return { structuredContent: { session: { id: "session-a", model: "reported-model" } } };
       }
-      return { structuredContent: { task: { id: "internal-a", ref: wrongTask ? "OTHER-1" : "LW-1", description: instructions,
+      return { structuredContent: { task: { id: wrongTask ? "internal-a" : "LW-1", ref: wrongTask ? "LW-1" : "MARYSW-2", description: instructions,
         ...(wrongTask ? { parent: { id: "LW-1", description: instructions } } : {}) } } };
     } }),
-  });
-  return { adapter, calls, changeInstructions: value => { instructions = value; } };
+  };
+  const adapter = new LightSprintJobsAdapter(store, "acct-a", options);
+  return { adapter, calls, newAdapter: () => new LightSprintJobsAdapter(store, "acct-a", options), changeInstructions: value => { instructions = value; } };
 }
 
 test("catalog discovery never overrides denied policy without an explicit internal permit", async () => {
@@ -68,11 +69,11 @@ test("workspace stack discovery stays account bound", async () => {
   assert.deepEqual(h.calls, [{ method: "GET", path: "/api/workspaces/ws-a/stacks" }]);
 });
 
-test("scoped task instructions read back by display reference before launching with no auto merge", async () => {
+test("scoped task instructions read back by canonical id beside a human ref", async () => {
   const permits = [];
   const h = harness({ permit: request => { permits.push(request); return true; } });
   assert.equal((await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions")).instructionsVerified, true);
-  const result = await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "rotoxy-proof-1");
+  const result = await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "rotoxy-proof-1", "Reviewed instructions");
   assert.equal(result.classification, "accepted");
   assert.equal(result.reportedModel, "reported-model");
   assert.deepEqual(h.calls.at(-1), { method: "POST", path: "/api/workspaces/ws-a/agent-sessions", body: {
@@ -93,7 +94,8 @@ test("changed upstream instructions block launch before POST", async () => {
   const h = harness({ permit: () => true });
   await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions");
   h.changeInstructions("Unreviewed edit");
-  assert.equal((await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "claude", "proof-1")).reason, "instructions_mismatch");
+  const freshOperationAdapter = new LightSprintWorkspacePinnedJobsAdapter(h.newAdapter(), "ws-a");
+  assert.equal((await freshOperationAdapter.launchTask("LW-1", "claude", "Reviewed instructions")).reason, "instructions_mismatch");
   assert.equal(h.calls.filter(c => c.method === "POST").length, 0);
 });
 
@@ -107,6 +109,13 @@ test("a nested related task cannot satisfy task identity readback", async () => 
   const h = harness({ permit: () => true, wrongTask: true });
   assert.equal((await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions")).reason, "instructions_mismatch");
   assert.equal((await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "proof-1")).reason, "instructions_mismatch");
+  assert.equal(h.calls.filter(c => c.method === "POST").length, 0);
+});
+
+test("canonical task id mismatch cannot be rescued by a matching human ref", async () => {
+  const h = harness({ permit: () => true, wrongTask: true });
+  assert.equal((await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions")).reason, "instructions_mismatch");
+  assert.equal((await h.adapter.launchWorkspaceSession("ws-a", "LW-1", "codex", "proof-1", "Reviewed instructions")).reason, "instructions_mismatch");
   assert.equal(h.calls.filter(c => c.method === "POST").length, 0);
 });
 
@@ -126,7 +135,8 @@ test("pinned worker adapter cannot substitute its verified workspace and derives
   const adapter = new LightSprintWorkspacePinnedJobsAdapter(h.adapter, "ws-a");
   assert.equal(await adapter.createTask("Bound task", "stack-a").then(row => row.classification), "accepted");
   assert.equal((await adapter.patchTaskInstructions("LW-1", "Reviewed instructions")).instructionsVerified, true);
-  const launched = await adapter.launchTask("LW-1", "codex");
+  const stateless = new LightSprintWorkspacePinnedJobsAdapter(h.newAdapter(), "ws-a");
+  const launched = await stateless.launchTask("LW-1", "codex", "Reviewed instructions");
   assert.equal(launched.classification, "accepted");
   assert.deepEqual(h.calls.at(-1), { method: "POST", path: "/api/workspaces/ws-a/agent-sessions", body: {
     taskRef: "LW-1", branchName: workspaceBranchName("LW-1"), provider: "codex", autoMerge: false,

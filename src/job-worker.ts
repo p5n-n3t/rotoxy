@@ -27,7 +27,7 @@ export interface PinnedJobsAdapter {
    * stock LightSprint API does not expose an exact model or effort selector;
    * any returned model is therefore recorded as reported metadata only.
    */
-  launchTask?(taskId: string, provider: string): Promise<JobResult>;
+  launchTask?(taskId: string, provider: string, expectedInstructions: string): Promise<JobResult>;
 }
 
 export interface JobBridge {
@@ -102,6 +102,25 @@ function resultRecord(value: unknown): Record<string, unknown> {
 function taskRecord(value: unknown): Record<string, unknown> {
   const root = resultRecord(value);
   return object(field(root, "task")) ?? root;
+}
+function taskIdentityMatches(task: unknown, taskId: string): boolean {
+  const row = object(task);
+  if (!row) return false;
+  const canonical = ["id", "taskId", "providerTaskId"].filter(key => Object.hasOwn(row, key));
+  if (canonical.length) return canonical.every(key => typeof row[key] === "string" && row[key] === taskId);
+  return ["taskRef", "ref"].some(key => field(row, key) === taskId);
+}
+function taskIdentity(value: unknown): string | undefined {
+  const row = object(value);
+  if (!row) return undefined;
+  const canonical = ["id", "taskId", "providerTaskId"].filter(key => Object.hasOwn(row, key));
+  if (canonical.length) {
+    const values = canonical.map(key => row[key]);
+    if (values.every(item => typeof item === "string" && item === values[0])) return values[0] as string;
+    return undefined;
+  }
+  const reference = ["taskRef", "ref"].find(key => typeof row[key] === "string");
+  return reference ? row[reference] as string : undefined;
 }
 function boundedLabel(value: unknown, max: number): string | undefined {
   return typeof value === "string" && value.length > 0 && value.length <= max && value.trim() === value
@@ -376,7 +395,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           mutationStarted = true;
           const created = await adapter.createTask(String(input.title), String(input.stackId));
           if (created.classification !== "accepted") { outcome = created.classification; errorClass = text(created.reason, 80) ?? "create_task_failed"; return await submit(op, outcome, {}, errorClass); }
-          const id = field(taskRecord(created.value), "ref", "taskRef", "id", "taskId", "providerTaskId");
+          const id = taskIdentity(taskRecord(created.value));
           if (typeof id !== "string" || !ID.test(id)) { outcome = "ambiguous"; errorClass = "created_task_identity_unverified"; return await submit(op, outcome, {}, errorClass); }
           outcome = "accepted"; result = { providerTaskId: id }; return await submit(op, outcome, result);
         }
@@ -395,7 +414,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           const readback = await adapter.readTask(taskId!);
           const row = taskRecord(readback.value);
           outcome = readback.classification === "ambiguous" ? "ambiguous" : readback.classification === "accepted" &&
-            field(row, "ref", "taskRef", "id", "taskId") === taskId && field(row, "description") === instructions ? "accepted" : "rejected";
+            taskIdentityMatches(row, taskId!) && field(row, "description") === instructions ? "accepted" : "rejected";
           errorClass = outcome === "accepted" ? undefined : "instruction_roundtrip_unverified";
           result = outcome === "accepted" ? { providerTaskId: taskId!, status: "instructions_verified" } : {};
           return await submit(op, outcome, result, errorClass);
@@ -405,13 +424,13 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
             await options.isAccountEligible(op.selectedAccountId)) {
           const readback = await adapter.readTask(taskId!);
           const task = taskRecord(readback.value);
-          if (readback.classification !== "accepted" || field(task, "ref", "taskRef", "id", "taskId") !== taskId || field(task, "description") !== instructions) {
+          if (readback.classification !== "accepted" || !taskIdentityMatches(task, taskId!) || field(task, "description") !== instructions) {
             outcome = readback.classification === "ambiguous" ? "ambiguous" : "rejected";
             errorClass = "instruction_roundtrip_unverified";
             return await submit(op, outcome, {}, errorClass);
           }
           mutationStarted = true;
-          const launched = await adapter.launchTask(taskId!, String(input.provider));
+          const launched = await adapter.launchTask(taskId!, String(input.provider), instructions);
           const launchedValue = resultRecord(launched.value);
           const launchedSession = object(field(launchedValue, "session"));
           const launchedSessionId = text(field(launchedValue, "sessionId", "agentSessionId") ??

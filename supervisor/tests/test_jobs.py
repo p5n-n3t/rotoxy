@@ -176,6 +176,27 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(observe["input"]["sessionId"], "fresh-session-1")
         self.assertEqual(observe["input"]["expectedMarker"], "DONE")
 
+    def test_expired_fresh_launch_lease_is_ambiguous_and_never_claimed_again(self):
+        self.register("account-a", sessions=[])
+        self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
+        create = self.registry.claim_operation("worker-a", now=2)
+        self.registry.record_result(create["operationId"], {"workerId": "worker-a", "outcome": "accepted",
+                                   "result": {"providerTaskId": "ls-task-1"}}, now=3)
+        patch = self.registry.claim_operation("worker-a", now=4)
+        self.registry.record_result(patch["operationId"], {"workerId": "worker-a", "outcome": "accepted",
+                                   "result": {"providerTaskId": "ls-task-1"}}, now=5)
+        verify = self.registry.claim_operation("worker-a", now=6)
+        self.registry.record_result(verify["operationId"], {"workerId": "worker-a", "outcome": "accepted",
+                                   "result": {"providerTaskId": "ls-task-1"}}, now=7)
+        launch = self.registry.claim_operation("worker-a", lease_seconds=5, now=8)
+        self.assertEqual((launch["kind"], launch["input"]["providerTaskId"]), ("launch_task", "ls-task-1"))
+        self.assertIsNone(self.registry.claim_operation("worker-b", now=9), "a live launch lease cannot be claimed twice")
+        self.assertIsNone(self.registry.claim_operation("worker-restart", now=14), "an expired launch remains ambiguous, never reissued")
+        with self.registry.connection() as db:
+            launch_rows = db.execute("SELECT state FROM operations WHERE assignment='job-1' AND kind='launch_task'").fetchall()
+        self.assertEqual([row["state"] for row in launch_rows], ["ambiguous"])
+        self.assertEqual(self.registry.get_assignment("job-1")["tasks"][0]["state"], "ambiguous")
+
     def test_fresh_launch_result_without_session_does_not_advance(self):
         self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
         create = self.registry.claim_operation("worker", now=2)

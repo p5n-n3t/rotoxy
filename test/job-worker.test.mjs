@@ -293,6 +293,22 @@ test("fresh create_task remains disabled unless explicitly enabled", async () =>
   assert.equal(posted.errorClass, "fresh_operations_disabled");
 });
 
+test("fresh task creation chooses canonical id ahead of the human task ref", async () => {
+  const fresh = { ...op("fresh-create-id", "account-a"), kind: "create_task",
+    input: { title: "Task", stackId: "stack-1", instructions: "bounded task" } };
+  let posted;
+  const bridge = { async request(_method, route, body) {
+    if (route.endsWith("/claim")) return fresh;
+    posted = body; return {};
+  } };
+  const worker = createJobWorker({ bridge, adapterFactory: (id) => adapter(id, {
+    createTask: async () => ok(id, { task: { id: "internal-task-id", ref: "MARYSW-2" } }),
+  }), isAccountEligible: () => true, workerId: "worker-test", allowedModels: [], allowFreshOperations: true, maxConcurrent: 1 });
+  worker.start(); await until(() => posted); await worker.stop();
+  assert.equal(posted.outcome, "accepted");
+  assert.equal(posted.result.providerTaskId, "internal-task-id");
+});
+
 test("fresh launch accepts a provider-reported session without inventing an exact model pin", async () => {
   const fresh = { ...op("fresh-launch", "account-a"), kind: "launch_task", providerTaskId: "provider-task-1",
     input: { stackId: "stack-1", provider: "claude", instructions: "bounded task", providerTaskId: "provider-task-1" } };
@@ -314,7 +330,7 @@ test("fresh launch accepts a provider-reported session without inventing an exac
 test("fresh workspace launch accepts a validated nested provider session identity", async () => {
   const fresh = { ...op("fresh-workspace-launch", "account-a"), kind: "launch_task", providerTaskId: "LW-1",
     input: { workspaceId: "workspace-a", stackId: "stack-1", provider: "claude", instructions: "bounded task", providerTaskId: "LW-1" } };
-  let posted;
+  let posted; let launchInstructions;
   const bridge = { async request(_method, route, body) {
     if (route.endsWith("/claim")) return fresh;
     if (route.endsWith("/result")) { posted = body; return { state: body.outcome }; }
@@ -325,15 +341,42 @@ test("fresh workspace launch accepts a validated nested provider session identit
     isAccountEligible: () => true,
     adapterFactory: () => { throw new Error("fallback must not be used"); },
     operationAdapterFactory: () => adapter("account-a", {
-      readTask: async () => ok("account-a", { task: { ref: "LW-1", description: "bounded task" } }),
-      launchTask: async () => ({ ...ok("account-a", { session: { id: "_workspace-session" } }), reportedModel: "claude-opus-5-5" }),
+      // LightSprint may return a human-facing ref beside the internal id used
+      // for the task API route. Accept the exact internal id match while still
+      // verifying the full instruction round trip.
+      readTask: async () => ok("account-a", { task: { ref: "MARYSW-2", id: "LW-1", description: "bounded task" } }),
+      launchTask: async (_taskId, _provider, instructions) => { launchInstructions = instructions; return { ...ok("account-a", { session: { id: "_workspace-session" } }), reportedModel: "claude-opus-5-5" }; },
     }),
   });
   worker.start();
   await until(() => posted !== undefined);
   await worker.stop();
   assert.equal(posted.outcome, "accepted");
+  assert.equal(launchInstructions, "bounded task", "launch receives the durable instruction packet for its fresh adapter instance");
   assert.deepEqual(posted.result, { providerTaskId: "LW-1", sessionId: "_workspace-session", reportedModel: "claude-opus-5-5" });
+});
+
+test("fresh task packet verification uses the canonical id and preserves exact description checks", async () => {
+  for (const [identity, description, expected] of [
+    [{ ref: "MARYSW-2", id: "provider-internal-id" }, "bounded task", "accepted"],
+    [{ ref: "MARYSW-2", id: "different-internal-id" }, "bounded task", "rejected"],
+    [{ ref: "provider-internal-id", id: "different-internal-id" }, "bounded task", "rejected"],
+    [{ ref: "provider-internal-id" }, "changed instructions", "rejected"],
+  ]) {
+    const fresh = { ...op("verify-packet", "account-a"), kind: "verify_task_packet", providerTaskId: "provider-internal-id",
+      input: { stackId: "stack-1", provider: "claude", instructions: "bounded task", providerTaskId: "provider-internal-id" } };
+    let posted;
+    const bridge = { async request(_method, route, body) {
+      if (route.endsWith("/claim")) return fresh;
+      posted = body; return {};
+    } };
+    const worker = createJobWorker({ bridge, adapterFactory: (id) => adapter(id, {
+      readTask: async () => ok(id, { task: { ...identity, description } }),
+    }), isAccountEligible: () => true, workerId: "worker-test", allowedModels: [], allowFreshOperations: true, maxConcurrent: 1 });
+    worker.start(); await until(() => posted); await worker.stop();
+    assert.equal(posted.outcome, expected);
+    if (expected === "rejected") assert.equal(posted.errorClass, "instruction_roundtrip_unverified");
+  }
 });
 
 test("fresh launch with no verifiable provider session is held as ambiguous and never retried", async () => {

@@ -49,7 +49,7 @@ function workspaceId(kind: string, projectId: string, clientId: string, sourceId
   return "ws-" + createHash("sha256").update(`rotoxy:workspace:${kind}:v1\0${projectId}\0${clientId}\0${sourceId}`).digest("hex").slice(0, 48);
 }
 function safeProviderError(error: unknown): string {
-  const known = new Set(["ACP_RELAY_DIED", "QUOTA_EXHAUSTED", "RATE_LIMITED", "CREDENTIAL_EXPIRED", "WORKSPACE_INACCESSIBLE", "session_not_sendable", "session_preflight_ambiguous", "account_unavailable_or_stopping"]);
+  const known = new Set(["ACP_RELAY_DIED", "QUOTA_EXHAUSTED", "RATE_LIMITED", "CREDENTIAL_EXPIRED", "WORKSPACE_INACCESSIBLE", "session_not_sendable", "session_preflight_ambiguous", "account_unavailable_or_stopping", "instruction_roundtrip_unverified"]);
   return error instanceof Error && known.has(error.message) ? error.message : "provider_operation_unavailable";
 }
 function remoteState(value: unknown): string {
