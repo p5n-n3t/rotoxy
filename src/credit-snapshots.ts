@@ -65,6 +65,17 @@ export interface RenewalEntry {
   evidence: string;
 }
 
+export interface ScheduledRenewalEntry {
+  provider: "lightsprint";
+  accountId: string;
+  dueDate: string;
+  scheduledAt: number;
+  auditId: string;
+  source: "user-scheduled-estimate";
+  status: "scheduled" | "due-pending-verification" | "verified";
+  checkedAt?: number;
+}
+
 export interface SessionCostReading {
   provider: "lightsprint"; accountId: string; sessionId: string; totalUsd: number;
   observedAt: number; model?: string; deltaUsd: number;
@@ -76,6 +87,7 @@ export interface CreditSnapshotState {
   usage: UsageEntry[];
   reservations: ReservationEntry[];
   renewals: RenewalEntry[];
+  scheduledRenewals?: ScheduledRenewalEntry[];
   sessionCosts?: SessionCostReading[];
 }
 
@@ -116,6 +128,16 @@ export interface AccountCreditView {
   availableAfterHolds: number | null;
   observedSessionSpendUsd: number;
   modelSlotUsage: Array<{ model: string; slot: string; observedUsage: number; unit: string; debit: null; debitReason: string }>;
+  scheduledRenewal?: { dueDate: string; source: "user-scheduled-estimate"; status: ScheduledRenewalEntry["status"] };
+}
+
+export function remainingAfterUsage(used: number, allowance = LIGHTSPRINT_MONTHLY_ALLOWANCE): number {
+  validNumber(used, "used"); validNumber(allowance, "allowance");
+  return Math.max(0, allowance - used);
+}
+
+export function shouldRestoreQuotaDisabledAccount(input: { enabled: boolean; quotaDisabledBy?: string }): boolean {
+  return input.enabled === false && input.quotaDisabledBy === "quota-policy";
 }
 
 function expectedUnit(provider: CreditProvider): CreditUnit { return provider === "lightsprint" ? "credits" : "USD"; }
@@ -160,7 +182,7 @@ export function listCreditAccounts(config: { accounts: readonly { id: string; la
   });
 }
 
-function emptyState(): CreditSnapshotState { return { version: 1, snapshots: [], usage: [], reservations: [], renewals: [] }; }
+function emptyState(): CreditSnapshotState { return { version: 1, snapshots: [], usage: [], reservations: [], renewals: [], scheduledRenewals: [] }; }
 
 /** Private, append-only financial evidence store. File replacement is atomic and serialized across processes. */
 export class CreditSnapshotStore {
@@ -221,6 +243,7 @@ export class CreditSnapshotStore {
       const parsed = JSON.parse(await fs.readFile(this.file, "utf8")) as CreditSnapshotState;
       if (parsed.version !== 1 || !Array.isArray(parsed.snapshots) || !Array.isArray(parsed.usage) || !Array.isArray(parsed.reservations) || !Array.isArray(parsed.renewals)) throw new Error("invalid credit snapshot ledger shape");
       if (parsed.sessionCosts !== undefined && !Array.isArray(parsed.sessionCosts)) throw new Error("invalid session cost ledger shape");
+      if (parsed.scheduledRenewals !== undefined && !Array.isArray(parsed.scheduledRenewals)) throw new Error("invalid scheduled renewal ledger shape");
       return parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyState();
@@ -229,7 +252,7 @@ export class CreditSnapshotStore {
   }
 
   private async writeUnlocked(state: CreditSnapshotState): Promise<void> {
-    const total = state.snapshots.length + state.usage.length + state.reservations.length + state.renewals.length + (state.sessionCosts?.length ?? 0);
+    const total = state.snapshots.length + state.usage.length + state.reservations.length + state.renewals.length + (state.scheduledRenewals?.length ?? 0) + (state.sessionCosts?.length ?? 0);
     if (total > MAX_LEDGER_ROWS) throw new RangeError(`credit ledger retention limit ${MAX_LEDGER_ROWS} reached`);
     const temp = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     const handle = await fs.open(temp, "wx", 0o600);
@@ -251,6 +274,11 @@ export class CreditSnapshotStore {
     const auditId = validId(input.auditId, "auditId");
     return this.withLock(async () => {
       const state = await this.readUnlocked();
+      const duplicate = state.snapshots.find((row) => row.auditId === auditId);
+      if (duplicate) {
+        if (duplicate.provider !== input.provider || duplicate.accountId !== input.accountId || duplicate.remaining !== input.remaining || duplicate.source !== input.source || duplicate.refreshDate !== refreshDate || duplicate.observedAt !== input.observedAt) throw new TypeError("auditId already records a different balance snapshot");
+        return duplicate;
+      }
       const previous = [...state.snapshots].reverse().find((row) => row.provider === input.provider && row.accountId === input.accountId);
       const row: BalanceSnapshot = { ...input, auditId, refreshDate,
         ...(previous ? { previousRemaining: previous.remaining, previousSource: previous.source } : {}) };
@@ -296,7 +324,65 @@ export class CreditSnapshotStore {
   async recordVerifiedRenewal(input: RenewalEntry): Promise<void> {
     this.account(input.provider, input.accountId, "credits");
     validTimestamp(input.verifiedAt, "verifiedAt"); validId(input.auditId, "auditId"); validId(input.evidence, "renewal evidence");
-    await this.withLock(async () => { const state = await this.readUnlocked(); state.renewals.push(input); await this.writeUnlocked(state); });
+    await this.withLock(async () => {
+      const state = await this.readUnlocked();
+      const prior = state.renewals.find(row => row.auditId === input.auditId);
+      if (prior) {
+        if (prior.accountId !== input.accountId || prior.verifiedAt !== input.verifiedAt || prior.evidence !== input.evidence) throw new TypeError("auditId already records a different verified renewal");
+        return;
+      }
+      state.renewals.push(input); await this.writeUnlocked(state);
+    });
+  }
+
+  /** Store an operator-supplied expected date. This never creates a balance or a verified renewal. */
+  async scheduleRenewal(input: Omit<ScheduledRenewalEntry, "status">): Promise<ScheduledRenewalEntry> {
+    this.account(input.provider, input.accountId, "credits");
+    validTimestamp(input.scheduledAt, "scheduledAt"); validId(input.auditId, "auditId");
+    validateRefreshDate(input.dueDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.dueDate)) throw new TypeError("scheduled renewal dueDate must include a year");
+    if (input.source !== "user-scheduled-estimate") throw new TypeError("scheduled renewal source must be user-scheduled-estimate");
+    return this.withLock(async () => {
+      const state = await this.readUnlocked();
+      state.scheduledRenewals ??= [];
+      const existing = state.scheduledRenewals.find(row => row.provider === input.provider && row.accountId === input.accountId && row.dueDate === input.dueDate);
+      if (existing) return existing;
+      const row: ScheduledRenewalEntry = { ...input, status: "scheduled" };
+      state.scheduledRenewals.push(row); await this.writeUnlocked(state); return row;
+    });
+  }
+
+  /** Effective-dated timer check. Due estimates wait for explicit verification; they never mint credits. */
+  async checkScheduledRenewals(now = Date.now()): Promise<ScheduledRenewalEntry[]> {
+    validTimestamp(now, "now");
+    const today = new Date(now).toISOString().slice(0, 10);
+    return this.withLock(async () => {
+      const state = await this.readUnlocked();
+      state.scheduledRenewals ??= [];
+      let changed = false;
+      for (const row of state.scheduledRenewals) {
+        if (row.status === "scheduled" && row.dueDate <= today) {
+          row.status = "due-pending-verification"; row.checkedAt = now; changed = true;
+        }
+      }
+      if (changed) await this.writeUnlocked(state);
+      return state.scheduledRenewals.map(row => ({ ...row }));
+    });
+  }
+
+  async verifyScheduledRenewal(input: { accountId: string; dueDate: string; verifiedAt: number; auditId: string; evidence: string }): Promise<ScheduledRenewalEntry> {
+    this.account("lightsprint", input.accountId, "credits"); validTimestamp(input.verifiedAt, "verifiedAt");
+    validId(input.auditId, "auditId"); validId(input.evidence, "renewal evidence");
+    return this.withLock(async () => {
+      const state = await this.readUnlocked();
+      const row = (state.scheduledRenewals ?? []).find(item => item.accountId === input.accountId && item.dueDate === input.dueDate);
+      const prior = state.renewals.find(item => item.auditId === input.auditId);
+      if (prior && (prior.accountId !== input.accountId || prior.verifiedAt !== input.verifiedAt || prior.evidence !== input.evidence)) throw new TypeError("auditId already records a different verified renewal");
+      if (row?.status === "verified" && prior) return { ...row };
+      if (!row || row.status !== "due-pending-verification") throw new TypeError("renewal is not due and pending verification");
+      if (!prior) state.renewals.push({ provider: "lightsprint", accountId: input.accountId, verifiedAt: input.verifiedAt, auditId: input.auditId, evidence: input.evidence });
+      row.status = "verified"; row.checkedAt = input.verifiedAt; await this.writeUnlocked(state); return { ...row };
+    });
   }
 }
 
@@ -343,9 +429,11 @@ export function summarizeCredits(accounts: readonly CreditAccount[], state: Cred
     const modelSlotUsage = (options.modelSlotUsage ?? []).filter((row) => row.provider === account.provider && row.accountId === account.accountId && Number.isFinite(row.observedUsage) && row.observedUsage >= 0)
       .map((row) => ({ model: row.model, slot: row.slot, observedUsage: row.observedUsage, unit: row.unit, debit: null,
         debitReason: "Provider does not report a per-model/per-slot debit breakdown; usage is not converted to credits." }));
+    const scheduledRenewal = account.provider === "lightsprint" ? latest(state.scheduledRenewals ?? [], row => row.accountId === account.accountId && row.status !== "verified") : undefined;
     return { account, balanceSnapshot: snapshotView, monthlyAllowance: account.provider === "lightsprint" ? LIGHTSPRINT_MONTHLY_ALLOWANCE : null,
       estimatedRemaining, estimateProvenance, ...(estimateReason ? { estimateReason } : {}), debitsBySource, reserved, inflight,
       availableAfterHolds: estimatedRemaining === null || held > estimatedRemaining ? null : estimatedRemaining - held,
+      ...(scheduledRenewal ? { scheduledRenewal: { dueDate: scheduledRenewal.dueDate, source: scheduledRenewal.source, status: scheduledRenewal.status } } : {}),
       observedSessionSpendUsd: Number(sessionSpendUsd.toFixed(9)), modelSlotUsage };
   });
 }
@@ -357,7 +445,7 @@ const amountText = (amount: number | null, unit: string) => amount === null ? "N
 export function renderCreditSnapshots(views: readonly AccountCreditView[]): string {
   const rows = views.map((view) => {
     const snapshot = view.balanceSnapshot ? `<p><strong>${escapeHtml(amountText(view.balanceSnapshot.remaining, view.account.unit))}</strong> · ${escapeHtml(view.balanceSnapshot.source)} snapshot · ${view.balanceSnapshot.stale ? "stale" : "fresh"}${view.balanceSnapshot.refreshDate ? ` · refresh date ${escapeHtml(view.balanceSnapshot.refreshDate)} (date only)` : " · refresh date not reported"}</p>` : `<p>No reported balance snapshot.</p>`;
-    const estimates = `<p>Estimated remaining: <strong>${escapeHtml(amountText(view.estimatedRemaining, view.account.unit))}</strong> · ${escapeHtml(view.estimateProvenance)}${view.estimateReason ? ` · ${escapeHtml(view.estimateReason)}` : ""}</p><p>Holds: reserved ${escapeHtml(amountText(view.reserved, view.account.unit))}; in flight ${escapeHtml(amountText(view.inflight, view.account.unit))}; after holds ${escapeHtml(amountText(view.availableAfterHolds, view.account.unit))}.</p>`;
+    const estimates = `<p>Estimated remaining: <strong>${escapeHtml(amountText(view.estimatedRemaining, view.account.unit))}</strong> · ${escapeHtml(view.estimateProvenance)}${view.estimateReason ? ` · ${escapeHtml(view.estimateReason)}` : ""}</p>${view.scheduledRenewal ? `<p>Renewal ${escapeHtml(view.scheduledRenewal.status.replaceAll("-", " "))}: ${escapeHtml(view.scheduledRenewal.dueDate)} · user-scheduled estimate; provider renewal is unverified.</p>` : ""}<p>Holds: reserved ${escapeHtml(amountText(view.reserved, view.account.unit))}; in flight ${escapeHtml(amountText(view.inflight, view.account.unit))}; after holds ${escapeHtml(amountText(view.availableAfterHolds, view.account.unit))}.</p>`;
     const debits = Object.entries(view.debitsBySource).map(([source, amount]) => `${escapeHtml(source)}: ${escapeHtml(amountText(amount, view.account.unit))}`).join(" · ");
     const usage = view.modelSlotUsage.length ? `<ul>${view.modelSlotUsage.map((row) => `<li>${escapeHtml(row.model)} / ${escapeHtml(row.slot)}: ${escapeHtml(amountText(row.observedUsage, row.unit))}; debit not reported</li>`).join("")}</ul>` : "<p>No model/slot usage observations.</p>";
     return `<article class="credit-account"><h3>${escapeHtml(view.account.label)} <small>${escapeHtml(view.account.provider)} · ${escapeHtml(view.account.accountId)}</small></h3>${snapshot}${estimates}<p>Usage sources: ${debits || "none reported"}.</p><p>Observed session spend: ${escapeHtml(amountText(view.observedSessionSpendUsd, "USD"))} (kept separate from provider credits).</p><h4>Model and slot usage</h4>${usage}</article>`;

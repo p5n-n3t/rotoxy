@@ -10,7 +10,7 @@ import type { StateStore } from "./store.js";
 import type { ModelCredentialStore, ModelScope } from "./model-credentials.js";
 import { loadOracleOpsSnapshot, renderOracleOpsPage } from "./oracle-ops.js";
 import { runtimeStatePath } from "./supervisor-runtime.js";
-import { CreditSnapshotStore, listCreditAccounts, summarizeCredits, type CreditAccount } from "./credit-snapshots.js";
+import { CreditSnapshotStore, listCreditAccounts, shouldRestoreQuotaDisabledAccount, summarizeCredits, type CreditAccount } from "./credit-snapshots.js";
 
 export function createControlPlaneAdminRouter(store: StateStore, sessions: AdminSessions, models: ModelCredentialStore, supervisorCwd: string, codex?: CodexProfiles, modelSnapshot?: () => { accounts: Array<{ accountId: string; requests: number; successes: number; failures: number; inflight: number }>; recent: Array<{ accountId: string; path: string; model?: string; durationMs: number; status: number }> }) {
   const router = express.Router();
@@ -66,8 +66,23 @@ export function createControlPlaneAdminRouter(store: StateStore, sessions: Admin
     } catch (e: any) { if (e?.code !== "ENOENT") throw Error("credit_registry_unavailable"); }
     return { accounts, ledger: new CreditSnapshotStore(accounts, { directory: store.dir }), reporting: new Map(state.accounts.map(a => [a.id, a.metadata])) };
   };
+  // Reconcile dated operator estimates at initialization and while the service
+  // runs. A due date moves to pending verification only; it never resets
+  // credits or enables an account. Guard against overlapping slow ticks.
+  let renewalCheckInFlight = false;
+  const checkDueRenewals = async () => {
+    if (renewalCheckInFlight) return;
+    renewalCheckInFlight = true;
+    try { const { ledger } = await creditStore(); await ledger.checkScheduledRenewals(); }
+    catch { /* a later tick or admin read retries */ }
+    finally { renewalCheckInFlight = false; }
+  };
+  const renewalCheckTimer = setInterval(checkDueRenewals, 60_000);
+  renewalCheckTimer.unref();
+  void checkDueRenewals();
   router.get("/admin/credits", async (_req, res) => {
     const { accounts, ledger, reporting } = await creditStore();
+    await ledger.checkScheduledRenewals();
     const creditState = await ledger.load();
     const views = summarizeCredits(accounts, creditState);
     const groups = (["lightsprint", "exa"] as const).map(provider => {
@@ -76,11 +91,14 @@ export function createControlPlaneAdminRouter(store: StateStore, sessions: Admin
         const report = reporting.get(v.account.accountId);
         const pending = report?.quotaReadingMeaning === "pending-confirmation";
         const percent = !pending && v.estimatedRemaining !== null && v.monthlyAllowance ? Math.min(100, v.estimatedRemaining / v.monthlyAllowance * 100) : undefined;
-        return `<tr><td>${esc(v.account.label)}<br><small>${esc(v.account.accountId)}</small></td><td>${amount(v.balanceSnapshot?.remaining ?? null)}<br><small>${v.balanceSnapshot ? esc(new Date(v.balanceSnapshot.observedAt).toISOString()) + " · user/provider snapshot" : "No snapshot"}</small></td><td>${pending ? "New reading needs used/remaining confirmation" : amount(v.estimatedRemaining)}${percent === undefined ? "" : `<progress max="100" value="${percent}"></progress><small>${percent.toFixed(1)}% of configured 10M allowance</small>`}<details><summary>Evidence</summary><p>${esc(v.estimateProvenance)}</p><p>Usage since that reading may be missing. This is not a live balance.</p></details></td><td>${amount(v.reserved + v.inflight)}<br><small>Tracked session increase: $${v.observedSessionSpendUsd.toFixed(4)} USD</small><details><summary>Model cost observations</summary>${(creditState.sessionCosts ?? []).filter(row => row.accountId === v.account.accountId).slice(-20).map(row=>`<p>${esc(row.model ?? "Model unreported")} · $${row.deltaUsd.toFixed(4)} increase · ${esc(new Date(row.observedAt).toISOString())}</p>`).join("") || "No monitored cost readings yet."}<p>First observation is a baseline; later increases are counted once. USD is not converted without a verified rate. Model is reported at observation; attribution may be provisional.</p></details></td><td>${esc(report?.quotaRefreshDate || v.balanceSnapshot?.refreshDate || "Not reported")}<br><small>No automatic refill</small></td></tr>`;
+        const schedule = (creditState.scheduledRenewals ?? []).find(row => row.accountId === v.account.accountId && row.status !== "verified");
+        const renewalAction = schedule?.status === "due-pending-verification" ? `<form method="post" action="${esc(res.locals.base)}/admin/credits/renewal/verify"><input type="hidden" name="account" value="${esc(v.account.accountId)}"><input type="hidden" name="dueDate" value="${esc(schedule.dueDate)}"><label>Verification evidence<input name="evidence" maxlength="500" required placeholder="Provider notice or verified operator record"></label><button>Confirm renewal and restore quota routing</button></form>` : "";
+        const refreshEvidence = schedule ? `User-scheduled estimate · ${esc(schedule.dueDate)} · ${esc(schedule.status.replaceAll("-", " "))}; provider renewal not verified.` : "No automatic refill";
+        return `<tr><td>${esc(v.account.label)}<br><small>${esc(v.account.accountId)}</small></td><td>${amount(v.balanceSnapshot?.remaining ?? null)}<br><small>${v.balanceSnapshot ? esc(new Date(v.balanceSnapshot.observedAt).toISOString()) + " · user/provider snapshot" : "No snapshot"}</small></td><td>${pending ? "New reading needs used/remaining confirmation" : amount(v.estimatedRemaining)}${percent === undefined ? "" : `<progress max="100" value="${percent}"></progress><small>${percent.toFixed(1)}% of configured 10M allowance</small>`}<details><summary>Evidence</summary><p>${esc(v.estimateProvenance)}</p><p>Usage since that reading may be missing. This is not a live balance.</p></details></td><td>${amount(v.reserved + v.inflight)}<br><small>Tracked session increase: $${v.observedSessionSpendUsd.toFixed(4)} USD</small><details><summary>Model cost observations</summary>${(creditState.sessionCosts ?? []).filter(row => row.accountId === v.account.accountId).slice(-20).map(row=>`<p>${esc(row.model ?? "Model unreported")} · $${row.deltaUsd.toFixed(4)} increase · ${esc(new Date(row.observedAt).toISOString())}</p>`).join("") || "No monitored cost readings yet."}<p>First observation is a baseline; later increases are counted once. USD is not converted without a verified rate. Model is reported at observation; attribution may be provisional.</p></details></td><td>${esc(report?.quotaRefreshDate || v.balanceSnapshot?.refreshDate || "Not reported")}<br><small>${refreshEvidence}</small>${renewalAction}</td></tr>`;
       }).join("");
       return `<details class="card full"${provider === "lightsprint" ? " open" : ""}><summary>${provider === "lightsprint" ? "LightSprint" : "Exa Search"} · ${views.filter(v => v.account.provider === provider).length} accounts</summary><div class="table-scroll"><table><thead><tr><th>Account</th><th>Last reading</th><th>Snapshot estimate</th><th>Reserved / in flight</th><th>Refresh date</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
     }).join("");
-    const content = `<main class="wrap">${adminNav(res.locals.base, "credits")}<h1>Credits &amp; quota</h1><p class="muted">Historical readings remain visible with their source and date. Provider balances, native credits, model usage and occupied slots are separate. Exa team records do not imply an API key is connected. LightSprint percentages use a 10M-credit monthly allowance. Fresh user readings replace older baselines; renewal dates alone never reset balances.</p><div class="grid">${groups}<section class="card full"><h2>Record a new reading</h2><form method="post" action="${esc(res.locals.base)}/admin/credits/snapshot"><label>Account<select name="account">${accounts.map((a, i) => `<option value="${esc(a.provider + ":" + a.accountId)}">${esc(a.label)} · ${esc(a.unit)}</option>`).join("")}</select></label><div class="row"><label>Remaining balance<input type="number" min="0" step="any" name="remaining" required></label><label>Refresh date (MM-DD, optional)<input name="refreshDate" placeholder="11-06"></label></div><button>Save user-reported reading</button></form></section></div></main>`;
+    const content = `<main class="wrap">${adminNav(res.locals.base, "credits")}<h1>Credits &amp; quota</h1><p class="muted">Historical readings remain visible with their source and date. Provider balances, native credits, model usage and occupied slots are separate. Exa team records do not imply an API key is connected. LightSprint percentages use a 10M-credit monthly allowance. Fresh user readings replace older baselines; user-scheduled renewal dates enter pending verification when due and do not reset balances or re-enable an account by themselves.</p><div class="grid">${groups}<section class="card full"><h2>Record a new reading</h2><form method="post" action="${esc(res.locals.base)}/admin/credits/snapshot"><label>Account<select name="account">${accounts.map((a, i) => `<option value="${esc(a.provider + ":" + a.accountId)}">${esc(a.label)} · ${esc(a.unit)}</option>`).join("")}</select></label><div class="row"><label>Remaining balance<input type="number" min="0" step="any" name="remaining" required></label><label>Refresh date (MM-DD, optional)<input name="refreshDate" placeholder="11-06"></label></div><button>Save user-reported reading</button></form></section></div></main>`;
     return res.type("html").send(page("Credits & quota", withCsrf(content, res.locals.csrf || "")));
   });
   router.post("/admin/credits/snapshot", express.urlencoded({ extended: false, limit: "8kb" }), async (req, res) => {
@@ -91,6 +109,26 @@ export function createControlPlaneAdminRouter(store: StateStore, sessions: Admin
        await ledger.recordBalanceSnapshot({ auditId: randomUUID(), provider: a.provider, accountId: a.accountId, unit: a.unit, remaining: Number(req.body.remaining), observedAt: Date.now(), source: "user-reported", ...(req.body.refreshDate ? { refreshDate: req.body.refreshDate } : {}) });
       return res.redirect(303, res.locals.base + "/admin/credits");
     } catch { return res.status(400).json({ error: "credit_reading_rejected" }); }
+  });
+  router.post("/admin/credits/renewal/verify", express.urlencoded({ extended: false, limit: "8kb" }), async (req, res) => {
+    if (!sessions.verifyCsrf(res.locals.token, req.body?._csrf)) return res.status(403).json({ error: "csrf_invalid" });
+    try {
+      const accountId = String(req.body.account ?? ""), dueDate = String(req.body.dueDate ?? ""), evidence = String(req.body.evidence ?? "").trim();
+      const { accounts, ledger } = await creditStore();
+      const account = accounts.find(row => row.provider === "lightsprint" && row.accountId === accountId);
+      if (!account || !evidence || evidence.length > 500) throw Error();
+      await ledger.checkScheduledRenewals();
+      const verifiedAt = Date.now(), auditId = `scheduled-renewal-${accountId}-${dueDate}`;
+      await ledger.verifyScheduledRenewal({ accountId, dueDate, verifiedAt, auditId, evidence });
+      await store.update(state => {
+        const target = state.accounts.find(row => row.id === accountId);
+        if (target?.metadata && shouldRestoreQuotaDisabledAccount({ enabled: target.enabled, quotaDisabledBy: target.metadata.quotaDisabledBy })) {
+          target.enabled = true; target.stats.state = "unknown"; target.stats.cooldownUntil = undefined; target.stats.consecutiveFailures = 0;
+          target.metadata.quotaRenewalStatus = "verified"; delete target.metadata.quotaDisabledBy; delete target.metadata.disabledReason;
+        }
+      });
+      return res.redirect(303, res.locals.base + "/admin/credits");
+    } catch { return res.status(400).json({ error: "credit_renewal_verification_rejected" }); }
   });
   for (const action of ["add", "rotate", "toggle", "rename", "remove", "revoke", "token"]) router.post("/admin/models/" + action, async (req, res) => {
     try {
