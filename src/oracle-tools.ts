@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 import { runtimeStatePath } from "./supervisor-runtime.js";
 
-export const ORACLE_MODELS = ["deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b", "tev1:0.8b", "gemma4:e2b"] as const;
+export const ORACLE_MODELS = ["qwen3.5:2b", "qwen2.5-coder:3b", "deepseek-r1:1.5b", "tev1:0.8b", "gemma4:e2b"] as const;
 // Existing durable tasks retain their original model identity after a fleet
 // migration. This read-only set must never be used to admit a new submission.
 const HISTORICAL_ORACLE_MODELS = new Set<string>([...ORACLE_MODELS, "qwen3.5:9b", "gpt-oss:20b"]);
