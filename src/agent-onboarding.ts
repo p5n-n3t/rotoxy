@@ -61,6 +61,8 @@ ROTOXY has one provider Fleet that can serve authorized clients from different f
 ## Submitting jobs
 Use workspace_dispatch for a bounded job DAG connected to the collaboration ledger. Use job_submit when collaboration overhead is unnecessary. Both require an authorized projectId from workspace_projects.
 
+For workspace_dispatch jobs, track the original jobId with workspace_sync. Direct job_status and job_results address IDs returned by job_submit; workspace dispatch uses a separate private assignment ID internally. Do not pass a workspace job's original ID to those raw-job tools or treat a resulting not-found error as provider failure.
+
 Scheduling profiles economy, balanced, and throughput choose their own concurrency. To set a worker ceiling explicitly, use scheduling={"profile":"custom","maxConcurrency":1}. Do not attach maxConcurrency to any other profile; validation rejects that combination before execution.
 
 ## Idempotency
