@@ -14,7 +14,7 @@ Implemented inference surfaces use `/providers/<provider>/v1`. Supported OpenAI-
 
 The Bedrock Claude adapter uses `/providers/claude/v1/messages` with the Anthropic Messages request/response protocol. Its downstream key is a scoped ROTOXY model key, not an AWS key or the administrative password. AWS credentials remain server-side and are resolved through the configured AWS credential mechanism. This inference route does not launch Claude Code, execute its local tools, or inherit its MCP configuration. Claude Code worker execution belongs to workspace mode.
 
-Codex, LightSprint and Oracle must not appear as working HTTP inference routes merely because they have saved profiles, registered accounts or worker tools. Their individual paths need adapters matching their actual capabilities and end-to-end acceptance evidence. A workspace-only provider can eventually expose a provider-scoped MCP surface without promising an OpenAI or Anthropic inference API.
+Codex and LightSprint are workspace/CLI capabilities, not HTTP inference routes. The opt-in Oracle adapter exposes `/providers/oracle/v1/models` and non-streaming `/providers/oracle/v1/chat/completions` through the fixed private Oracle gateway. It uses scoped ROTOXY model tokens and `oracle/` model IDs. The host must configure `ROTOXY_ORACLE_API_TOKEN_FILE` as an absolute owner-only file containing the separately authorized private gateway token. Missing configuration returns 503; unauthorized calls return 401. It does not grant shell execution, share MCP OAuth credentials or retry ambiguous inference failures. Private and public gateway acceptance evidence must be recorded separately.
 
 ## External client setup
 

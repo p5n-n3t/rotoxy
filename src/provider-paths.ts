@@ -12,7 +12,7 @@ const PENDING = Object.freeze([
   { id: "claude", protocol: "Anthropic Messages", availability: "separate-opt-in-adapter", path: "/providers/claude/v1/messages", reason: "Requires the Bedrock Messages adapter and its operator-configured credentials. Claude Code itself is a CLI agent, not an inference HTTP endpoint." },
   { id: "anthropic", protocol: "Anthropic Messages", availability: "unavailable", reason: "No direct Anthropic API adapter is configured here." },
   { id: "codex", protocol: "Codex App Server", availability: "unavailable", reason: "Saved Codex profiles do not yet have direct provider-path dispatch." },
-  { id: "oracle", protocol: "Ollama / OpenAI-compatible (per-node routing pending)", availability: "unavailable", reason: "Oracle worker pool inference is not exposed through the unified model API." },
+  { id: "oracle", protocol: "OpenAI-compatible", availability: "separate-opt-in-adapter", path: "/providers/oracle/v1", reason: "Requires a configured private Oracle API token file. Uses scoped ROTOXY model tokens; does not run workspace agents." },
   { id: "lightsprint", protocol: "Workspace jobs", availability: "unavailable", reason: "LightSprint is a workspace provider, not a model-inference adapter." },
 ]);
 

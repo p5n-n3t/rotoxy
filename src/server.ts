@@ -1,4 +1,5 @@
 import { createRunnerAdminRouter } from "./runner-admin.js";
+import { createOracleModelApi } from "./oracle-model-api.js";
 import { createOracleModelAdminRouter } from "./oracle-model-admin.js";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -79,6 +80,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const cloudflare = createCloudflareRouter(store, sessions, modelGateway.credentials);
   const unifiedModelApi = createUnifiedModelApi(store, { cloudflareAdapter: cloudflare.adapter });
   router.use(createBedrockMessagesRouter(store));
+  router.use(createOracleModelApi(store));
   router.use(createProviderPathApi(unifiedModelApi.router));
   router.use(unifiedModelApi.router);
   router.use(modelGateway.router);
