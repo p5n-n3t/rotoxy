@@ -24,7 +24,7 @@ dockerignore_stage="$5"
 root=/opt/jq-worker/oracle-api
 cd "$root"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-backup="/opt/jq-worker/backups/oracle-api-$stamp"
+backup="$root/backups/oracle-api-$stamp"
 install -d -m 700 "$backup"
 cp -p app.py "$backup/app.py"
 cp -p docker-compose.yaml "$backup/docker-compose.yaml"

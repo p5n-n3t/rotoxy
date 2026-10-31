@@ -119,33 +119,49 @@ async def safe_validation_error(_request: Request, _exc: RequestValidationError)
     return JSONResponse({"detail": "invalid_request"}, status_code=422)
 
 
-@app.middleware("http")
-async def bound_request_body(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > MAX_REQUEST_BYTES:
-                return JSONResponse({"detail": "request_too_large"}, status_code=413)
-        except ValueError:
-            return JSONResponse({"detail": "invalid_content_length"}, status_code=400)
-    chunks, total = [], 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > MAX_REQUEST_BYTES:
-            return JSONResponse({"detail": "request_too_large"}, status_code=413)
-        chunks.append(chunk)
-    body = b"".join(chunks)
-    sent = False
+class BodySizeLimitMiddleware:
+    def __init__(self, app):
+        self.app = app
 
-    async def receive():
-        nonlocal sent
-        if sent:
-            return {"type": "http.disconnect"}
-        sent = True
-        return {"type": "http.request", "body": body, "more_body": False}
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        raw_length = headers.get(b"content-length")
+        if raw_length:
+            try:
+                if int(raw_length) > MAX_REQUEST_BYTES:
+                    await JSONResponse({"detail": "request_too_large"}, status_code=413)(scope, receive, send)
+                    return
+            except ValueError:
+                await JSONResponse({"detail": "invalid_content_length"}, status_code=400)(scope, receive, send)
+                return
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body.extend(message.get("body", b""))
+            if len(body) > MAX_REQUEST_BYTES:
+                await JSONResponse({"detail": "request_too_large"}, status_code=413)(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+        buffered = bytes(body)
+        first = True
 
-    request._receive = receive
-    return await call_next(request)
+        async def bounded_receive():
+            nonlocal first
+            if first:
+                first = False
+                return {"type": "http.request", "body": buffered, "more_body": False}
+            return await receive()
+
+        await self.app(scope, bounded_receive, send)
+
+
+app.add_middleware(BodySizeLimitMiddleware)
 
 
 @app.get("/health")
