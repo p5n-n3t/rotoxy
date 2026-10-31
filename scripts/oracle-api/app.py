@@ -251,6 +251,7 @@ async def chat(body: ChatRequest, _token: str = Depends(_require_auth)) -> JSONR
             async with client.stream("POST", f"http://{node['ip']}:11434/api/chat", json={
                 "model": body.model,
                 "messages": [message.model_dump() for message in body.messages],
+                "think": False,
                 "stream": False,
                 "options": {"num_ctx": MAX_CONTEXT, "num_predict": body.max_tokens, "temperature": body.temperature},
             }) as response:
