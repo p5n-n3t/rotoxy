@@ -435,7 +435,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
             errorClass = "worker_stopping_or_lease_insufficient"; return await submit(op, "rejected", {}, errorClass);
           }
           mutationStarted = true;
-          const patched = await adapter.patchTaskInstructions(taskId!, instructions);
+          const patched = await adapter.patchTaskInstructions(taskId!, instructions!);
           outcome = patched.instructionsVerified === true && patched.classification === "accepted" ? "accepted" : patched.classification === "ambiguous" ? "ambiguous" : "rejected";
           errorClass = outcome === "accepted" ? undefined : text(patched.reason, 80) ?? "instruction_roundtrip_unverified";
           result = outcome === "accepted" ? { providerTaskId: taskId!, status: "instructions_verified" } : {};
@@ -462,7 +462,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           }
           mutationStarted = true;
           const launched = adapter.launchVerifiedTask
-            ? await adapter.launchVerifiedTask(taskId!, String(input.provider), instructions)
+            ? await adapter.launchVerifiedTask(taskId!, String(input.provider), instructions!)
             : await adapter.launchTask!(taskId!, String(input.provider));
           const launchedValue = resultRecord(launched.value);
           const launchedSession = object(field(launchedValue, "session"));
