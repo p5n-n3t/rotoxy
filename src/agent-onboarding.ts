@@ -48,7 +48,7 @@ ROTOXY has one provider Fleet that can serve authorized clients from different f
 3. Discover current account health and capacity via live discovery tools. Idle sessions and registered accounts do not prove quota or usable capacity.
 4. Split the objective into independent bounded tasks; assign explicit file or record scope keys, inputs, acceptance criteria, and an artifact destination to each task.
 5. Submit with workspace_dispatch (DAG + ledger) or job_submit (simple jobs). Always use a stable idempotency key.
-6. Read job_status, job_results, and job_inbox. Validate all artifacts before reporting completion.
+6. For workspace_dispatch use workspace_sync with its original jobId; for job_submit use job_status and job_results. Read job_inbox for incidents. Validate all artifacts before reporting completion.
 7. Leave an actionable checkpoint in the project ledger before yielding.
 
 ## Key invariants

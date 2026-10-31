@@ -20,8 +20,28 @@ authoritative only when the connected gateway advertises them.
    expected artifacts, dependencies and one stable idempotency key per operation.
 3. Use `workspace_dispatch` only if the connected gateway advertises it. Give the
    authorized project ID and routing constraints supported by its schema.
-4. Read durable status, results and inbox events. Verify each artifact before
-   reporting success. A recorded review approval never merges code.
+4. For `workspace_dispatch`, call `workspace_sync` with the original job ID.
+   For `job_submit`, call `job_status` and `job_results` with the returned ID.
+   The workspace owns a separate private assignment ID internally; do not use
+   its original job ID in the raw-job tools. Read the durable inbox for incidents.
+5. Verify each artifact before reporting success. A recorded review approval
+   never merges code. `accepted` and `queued` do not mean a provider started.
+
+Use `{"profile":"economy"}` for conservative automatic concurrency. If you need
+an explicit limit, use `{"profile":"custom","maxConcurrency":1}`. Other
+profiles reject `maxConcurrency` before execution.
+
+## A small private Oracle task
+
+1. Read `oracle_catalog`; inspect the models actually advertised by this gateway.
+2. Submit one complete, bounded prompt with `oracle_submit` and a stable job ID.
+   Omitting a model uses the configured default; do not guess a model from an
+   old transcript. These CPU workers suit extraction, classification and small
+   code transformations, not large architecture prompts or arbitrary shell work.
+3. Read `oracle_status` until terminal, then `oracle_result`. Record the actual
+   host/model and validate the output. A queued task is durable but not executing.
+4. A transport timeout may leave a running inference ambiguous. Do not submit a
+   replacement under another ID merely because a response was delayed.
 
 ## A worker that looks idle
 
