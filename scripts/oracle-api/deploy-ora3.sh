@@ -9,12 +9,12 @@ dockerfile_stage="/tmp/oracle-api-Dockerfile.$$"
 requirements_stage="/tmp/oracle-api-requirements.txt.$$"
 dockerignore_stage="/tmp/oracle-api-dockerignore.$$"
 
-scp -q "$root/app.py" "$remote:$app_stage"
-scp -q "$root/docker-compose.yaml" "$remote:$compose_stage"
-scp -q "$root/Dockerfile" "$remote:$dockerfile_stage"
-scp -q "$root/requirements.txt" "$remote:$requirements_stage"
-scp -q "$root/.dockerignore" "$remote:$dockerignore_stage"
-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$remote" bash -s -- "$app_stage" "$compose_stage" "$dockerfile_stage" "$requirements_stage" "$dockerignore_stage" <<'REMOTE'
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "$remote" "cat > '$app_stage'" < "$root/app.py"
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "$remote" "cat > '$compose_stage'" < "$root/docker-compose.yaml"
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "$remote" "cat > '$dockerfile_stage'" < "$root/Dockerfile"
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "$remote" "cat > '$requirements_stage'" < "$root/requirements.txt"
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "$remote" "cat > '$dockerignore_stage'" < "$root/.dockerignore"
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "$remote" bash -s -- "$app_stage" "$compose_stage" "$dockerfile_stage" "$requirements_stage" "$dockerignore_stage" <<'REMOTE'
 set -euo pipefail
 app_stage="$1"
 compose_stage="$2"
