@@ -22,6 +22,9 @@ function harness({ permit, policy = { endpoints: [{ rules: [] }] }, workspace = 
         if (lostLaunch) throw new Error("lost response");
         return { structuredContent: { session: { id: "session-a", model: "reported-model" } } };
       }
+      if (args.method === "GET" && args.path.startsWith("/api/workspaces/") && args.path.includes("/agent-sessions?taskRef=")) {
+        return { structuredContent: { activeAgent: { id: "_session-a", taskRef: "LW-1", model: "reported-model" }, recentAgents: [] } };
+      }
       return { structuredContent: { task: { id: wrongTask ? "internal-a" : "LW-1", ref: wrongTask ? "LW-1" : "MARYSW-2", description: instructions,
         ...(wrongTask ? { parent: { id: "LW-1", description: instructions } } : {}) } } };
     } }),
@@ -67,6 +70,15 @@ test("workspace stack discovery stays account bound", async () => {
   const h = harness({ permit: request => request.method === "GET" });
   await h.adapter.listWorkspaceStacks("ws-a");
   assert.deepEqual(h.calls, [{ method: "GET", path: "/api/workspaces/ws-a/stacks" }]);
+});
+
+test("pinned task session inspection uses only the documented taskRef-scoped GET", async () => {
+  const h = harness({ permit: request => request.method === "GET" });
+  const pinned = new LightSprintWorkspacePinnedJobsAdapter(h.adapter, "ws-a");
+  const result = await pinned.listTaskAgents("LW-1");
+  assert.equal(result.classification, "accepted");
+  assert.deepEqual(result.value.activeAgent, { id: "_session-a", taskRef: "LW-1", model: "reported-model" });
+  assert.deepEqual(h.calls, [{ method: "GET", path: "/api/workspaces/ws-a/agent-sessions?taskRef=LW-1" }]);
 });
 
 test("scoped task instructions read back by canonical id beside a human ref", async () => {

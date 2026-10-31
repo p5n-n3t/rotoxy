@@ -397,6 +397,39 @@ test("fresh launch with no verifiable provider session is held as ambiguous and 
   assert.equal(posted.errorClass, "launch_session_identity_unverified");
 });
 
+test("fresh launch reconciliation accepts one exact task-scoped session and never launches", async () => {
+  for (const [value, expected, expectedSession] of [
+    [{ activeAgent: { id: "_session-1", model: "claude-opus-5-5", taskRef: "provider-task-1" }, recentAgents: [] }, "accepted", "_session-1"],
+    [{ activeAgent: null, recentAgents: [{ id: "_session-1", taskRef: "provider-task-1" }] }, "accepted", "_session-1"],
+    [{ activeAgent: null, recentAgents: [] }, "ambiguous", undefined],
+    [{ activeAgent: null, recentAgents: [{ id: "_session-1" }, { id: "_session-2" }] }, "ambiguous", undefined],
+    [{ activeAgent: { id: "_session-1", taskRef: "other-task" }, recentAgents: [] }, "ambiguous", undefined],
+    [{ activeAgent: { id: "_session-1", sessionId: "_session-2" }, recentAgents: [] }, "ambiguous", undefined],
+  ]) {
+    const inspect = { ...op("inspect-existing-task", "account-a"), kind: "inspect_task_agents", providerTaskId: "provider-task-1",
+      input: { providerTaskId: "provider-task-1", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" } };
+    let posted, listCalls = 0, launches = 0;
+    const bridge = { async request(_method, route, body) {
+      if (route.endsWith("/claim")) return posted ? undefined : inspect;
+      posted = body; return {};
+    } };
+    const worker = createJobWorker({ bridge, adapterFactory: id => adapter(id, {
+      listTaskAgents: async taskId => { listCalls++; assert.equal(taskId, "provider-task-1"); return ok(id, value); },
+      launchTask: async () => { launches++; throw new Error("inspection must never relaunch"); },
+      launchVerifiedTask: async () => { launches++; throw new Error("inspection must never relaunch"); },
+    }), isAccountEligible: () => true, isAccountObservable: () => true,
+    workerId: "worker-test", allowedModels: [], allowFreshOperations: true, maxConcurrent: 1 });
+    worker.start(); await until(() => posted); await worker.stop();
+    assert.equal(posted.outcome, expected);
+    assert.equal(listCalls, 1);
+    assert.equal(launches, 0);
+    if (expectedSession) {
+      assert.equal(posted.result.sessionId, expectedSession);
+      assert.equal(posted.result.providerTaskId, "provider-task-1");
+    } else assert.equal(posted.errorClass, "task_session_identity_unverified");
+  }
+});
+
 test("current account ineligibility prevents chat send", async () => {
   let checks = 0; let sends = 0; let posted;
   const bridge = { async request(_method, route, body) {

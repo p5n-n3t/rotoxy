@@ -23,7 +23,7 @@ MAX_JOB_BYTES = 1024 * 1024
 MAX_DEPENDENCIES = 8
 MAX_PAGE = 200
 MUTATING_KINDS = {"create_task", "patch_task", "launch_task", "chat_session", "cancel_session"}
-OPERATION_KINDS = {"observe_session", "chat_session", "cancel_session", "create_task", "patch_task", "verify_task_packet", "launch_task"}
+OPERATION_KINDS = {"observe_session", "inspect_task_agents", "chat_session", "cancel_session", "create_task", "patch_task", "verify_task_packet", "launch_task"}
 USAGE_KEYS = {"reportedSessionCostUsd", "promptCount", "budgetUsed", "maxBudget", "fundingSource", "sandboxTier"}
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # Node job-worker.ts returns these only on the chat_session path before
@@ -991,10 +991,10 @@ class JobRegistry:
             task_spec = json.loads(task_row["body"])
             execution = task_spec["execution"]
             session_id = task_row["session_id"]
-            # observe_session is a read-only poll; it must remain claimable even when retained
-            # uncertain executions fill or exceed a lowered capacity limit, otherwise explicit
-            # reconciliation deadlocks.  Mutation dispatch caps stay enforced for all other kinds.
-            if op["kind"] != "observe_session":
+            # Observation and task-session inspection are read-only; they must
+            # remain claimable for the retained task even when other retained
+            # work fills capacity. Mutating dispatch caps stay enforced.
+            if op["kind"] not in {"observe_session", "inspect_task_agents"}:
                 active_in_project = db.execute("SELECT COUNT(*) FROM job_tasks t JOIN assignments a ON a.id=t.assignment "
                                                "WHERE a.project=? AND (" + _SLOT_SQL_T + ") "
                                                "AND NOT (t.assignment=? AND t.task_id=?)",
@@ -1002,7 +1002,8 @@ class JobRegistry:
                 if active_in_project >= project_control["max_workers"]:
                     return None
                 registered_session = execution.get("sessionId") if execution["mode"] == "existing-session" else None
-                account_data, _ = self._account(db, op["account"], registered_session)
+                account_data, _ = self._account(db, op["account"], registered_session,
+                                                observation=op["kind"] == "inspect_task_agents")
                 occupied = db.execute(
                     "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) "
                     "AND (" + _SLOT_SQL + ")",
@@ -1035,7 +1036,8 @@ class JobRegistry:
                     external += 1
                 if external:
                     return None
-            if self._has_scope_conflict(db, assignment["project"], task_spec["scopeKeys"], op["assignment"], op["task_id"]):
+            if (op["kind"] != "inspect_task_agents" and
+                    self._has_scope_conflict(db, assignment["project"], task_spec["scopeKeys"], op["assignment"], op["task_id"])):
                 return None
             # A session message can spend provider quota. Reserve against its
             # durable operation ID before a worker can receive the mutation.
@@ -1147,6 +1149,10 @@ class JobRegistry:
                 fresh_session_id = result.get("sessionId")
                 if not isinstance(fresh_session_id, str) or not SESSION_ID_RE.fullmatch(fresh_session_id):
                     raise ValueError("Accepted fresh launch requires a valid sessionId")
+            if outcome == "accepted" and op["kind"] == "inspect_task_agents":
+                inspected_session_id = result.get("sessionId")
+                if not isinstance(inspected_session_id, str) or not SESSION_ID_RE.fullmatch(inspected_session_id):
+                    raise ValueError("Accepted task inspection requires a valid bound sessionId")
             debit = result.get("creditDebit")
             if debit is not None:
                 if self.credit_admission is None or op["kind"] != "chat_session" or outcome != "accepted":
@@ -1164,6 +1170,23 @@ class JobRegistry:
                 state = "ambiguous"
             elif outcome == "rejected":
                 state = "blocked"
+            elif op["kind"] == "inspect_task_agents":
+                spec = json.loads(task["body"])
+                inspected_task_id = result.get("providerTaskId")
+                session_id = result["sessionId"]
+                if inspected_task_id != task["provider_task_id"] or spec.get("dispatchPhase") != "verified":
+                    raise RuntimeError("Inspected session does not match the verified fresh task")
+                spec["dispatchPhase"] = "launched"
+                db.execute("UPDATE job_tasks SET body=?,session_id=?,reported_model=? WHERE assignment=? AND task_id=? AND generation=?",
+                           (json.dumps(spec), session_id, result.get("reportedModel"), op["assignment"], op["task_id"], op["generation"]))
+                if self.repository is not None:
+                    db.execute("UPDATE attempts SET session=? WHERE id=? AND released_at IS NULL", (session_id, op["attempt_id"]))
+                observe_payload = {"sessionId": session_id, "dispatchAt": task["dispatch_at"],
+                                   "expectedMarker": spec["output"]["expectedMarker"],
+                                   "instructions": spec["instructions"], "workspaceId": spec["execution"]["workspaceId"],
+                                   "stackId": spec["execution"]["stackId"], "provider": spec["execution"]["provider"]}
+                self._queue_observation(db, op, observe_payload, when, delay=0)
+                state = "awaiting_output"
             elif op["kind"] == "chat_session":
                 state = "awaiting_output"
                 payload = json.loads(op["input"])
@@ -1315,12 +1338,10 @@ class JobRegistry:
                        owner_principal_id=None, client_id=None, now=None):
         """Explicit operator reconciliation for an ambiguous or blocked task.
 
-        Queues exactly one fresh ``observe_session`` reusing the original dispatch
-        timestamp and instructions hash.  Never re-dispatches ``chat_session`` or
-        any launch operation; never increments generation, account, attempt, or
-        session reservations.  Transitions the affected task to ``awaiting_output``
-        and returns the assignment to ``queued`` when it was ``held`` — both in one
-        atomic transaction.  Emits a ``reconciliation_queued`` audit event.
+        Queues one fresh ``observe_session`` for a known session, or one read-only
+        ``inspect_task_agents`` for the exact fresh task whose launch response did
+        not verify its session identity. Never re-dispatches chat or launch work.
+        The latter is allowed only once for the matching ambiguous launch receipt.
 
         Rejects:
           - cancelled or complete assignments
@@ -1355,6 +1376,53 @@ class JobRegistry:
             ).fetchone()
             if not task_row:
                 raise KeyError("Task not found in assignment")
+            if not task_row["session_id"] and task_row["attempt_id"] and task_row["selected_account"]:
+                spec = json.loads(task_row["body"])
+                execution = spec.get("execution", {})
+                launch = db.execute("""SELECT state,error_class FROM operations
+                    WHERE assignment=? AND task_id=? AND attempt_id=? AND generation=? AND kind='launch_task'
+                    ORDER BY created_at DESC,rowid DESC LIMIT 1""",
+                    (assignment_id, task_id, task_row["attempt_id"], task_row["generation"])).fetchone()
+                prior_inspections = db.execute("""SELECT state,error_class,created_at FROM operations WHERE assignment=? AND task_id=?
+                    AND attempt_id=? AND generation=? AND kind='inspect_task_agents' ORDER BY created_at,rowid""",
+                    (assignment_id, task_id, task_row["attempt_id"], task_row["generation"])).fetchall()
+                # Inspection is a read-only GET. Permit a small number of explicit,
+                # revision-fenced retries after a definitive auth rejection so an
+                # operator can repair credentials. Ambiguous and other failures do
+                # not authorize another probe; the cooldown prevents rapid polling.
+                retryable_auth = (bool(prior_inspections) and len(prior_inspections) < 3 and
+                                  prior_inspections[-1]["state"] == "rejected" and
+                                  prior_inspections[-1]["error_class"] == "auth" and
+                                  when >= prior_inspections[-1]["created_at"] + 60)
+                inspection_available = not prior_inspections or retryable_auth
+                if (task_row["state"] in ("ambiguous", "blocked") and execution.get("mode") == "fresh" and
+                        spec.get("dispatchPhase") == "verified" and task_row["provider_task_id"] and
+                        launch and launch["state"] == "ambiguous" and launch["error_class"] == "launch_session_identity_unverified" and
+                        inspection_available and task_row["released_at"] is None and task_row["dispatch_at"] is not None):
+                    operation_id = uuid.uuid4().hex
+                    inspect_input = {
+                        "providerTaskId": task_row["provider_task_id"],
+                        "workspaceId": execution["workspaceId"], "stackId": execution["stackId"],
+                        "provider": execution["provider"], "dispatchAt": task_row["dispatch_at"],
+                    }
+                    db.execute("INSERT INTO operations(id,assignment,task_id,attempt_id,generation,account,kind,input,state,created_at,due_at) "
+                               "VALUES(?,?,?,?,?,?,'inspect_task_agents',?,'queued',?,?)",
+                               (operation_id, assignment_id, task_id, task_row["attempt_id"], task_row["generation"],
+                                task_row["selected_account"], json.dumps(inspect_input), when, when))
+                    db.execute("UPDATE job_tasks SET state='starting' WHERE assignment=? AND task_id=? AND generation=?",
+                               (assignment_id, task_id, task_row["generation"]))
+                    db.execute("UPDATE assignments SET state='queued',revision=revision+1 WHERE id=?",
+                               (assignment_id,))
+                    self._event(db, assignment_id, "execution_inspection_queued", {
+                        "taskId": task_id, "generation": task_row["generation"], "operationId": operation_id,
+                        "reason": "launch_session_identity_unverified",
+                    }, when)
+                    updated = db.execute("SELECT * FROM assignments WHERE id=?", (assignment_id,)).fetchone()
+                    return {"assignmentId": assignment_id, "taskId": task_id, "state": "starting",
+                            "assignmentState": updated["state"], "revision": updated["revision"],
+                            "generation": task_row["generation"], "attempt": task_row["attempt_id"],
+                            "providerTaskId": task_row["provider_task_id"], "inspectionOperationId": operation_id}
+                raise RuntimeError("Task has no verified session; read-only inspection is unavailable for this execution")
             if not task_row["attempt_id"] or not task_row["session_id"] or not task_row["selected_account"]:
                 raise RuntimeError(
                     "Task has no recorded attempt or session; "

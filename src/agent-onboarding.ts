@@ -90,13 +90,13 @@ A session state of idle does not confirm task completion. Inspect provider error
 ## ACP_RELAY_DIED overrides idle
 If job_status or job_inbox contains ACP_RELAY_DIED for a session, treat the execution as failed regardless of the session state field. The relay failure is a definitive error and takes precedence over the session's idle label.
 
-## Original-session observation (reconcile_task)
-If the discovered job_control schema advertises the reconcile_task action, an authorized task owner may request observation against the original session using the task's jobId, taskId, and current expectedRevision. This does NOT:
+## Execution inspection (reconcile_task)
+If the discovered job_control schema advertises the reconcile_task action, an authorized task owner may request observation against the original session using the task's jobId, taskId, and current expectedRevision. For the exact ambiguous error `launch_session_identity_unverified` on a fresh task with a verified provider task ID but no session ID, the same action performs one read-only task-scoped session lookup. It never repeats task launch or sends task instructions. This does NOT:
   - Resend task instructions to the worker
   - Release or transfer task ownership
   - Change or restart the session
   - Reset the monitoring deadline
-Re-read job_status and job_results after queuing the observation; a queued reconcile_task is not a completion signal. Do not use reconcile_task when the gateway does not advertise it — older deployments lack this action. Do not retry automatically on a stale expectedRevision or missing evidence; read the latest status and preserve a handoff for human review.
+Re-read job_status and job_results after reconciliation; a queued read or observation is not a completion signal. Do not use reconcile_task when the gateway does not advertise it — older deployments lack this action. Do not retry automatically on a stale expectedRevision or missing evidence; read the latest status and preserve a handoff for human review.
 
 ## Dormant chat
 Desktop notifications do not wake a dormant chat session. A workspace message recorded to a dormant participant is a ledger entry, not a wakeup. Do not assume notification delivery equals participant activation.

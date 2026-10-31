@@ -123,6 +123,36 @@ function taskIdentity(value: unknown): string | undefined {
   const reference = ["taskRef", "ref"].find(key => typeof row[key] === "string");
   return reference ? row[reference] as string : undefined;
 }
+function taskAgentSession(value: unknown, expectedTaskId: string): { sessionId: string; reportedModel?: string } | undefined {
+  const root = resultRecord(value);
+  const active = field(root, "activeAgent");
+  const recent = field(root, "recentAgents");
+  const candidateRows: Record<string, unknown>[] = [];
+  if (active !== undefined && active !== null) {
+    const row = object(active);
+    if (!row) return undefined;
+    candidateRows.push(row);
+  } else if (Array.isArray(recent)) {
+    for (const candidate of recent.slice(0, 20)) {
+      const row = object(candidate);
+      if (row) candidateRows.push(row);
+    }
+  }
+  const identities = new Map<string, Record<string, unknown>>();
+  for (const row of candidateRows) {
+    const taskRef = field(row, "taskRef", "taskId", "task_id");
+    if (taskRef !== undefined && taskRef !== expectedTaskId) continue;
+    const keys = ["id", "sessionId", "agentSessionId"].filter(key => Object.hasOwn(row, key));
+    if (!keys.length) continue;
+    const values = keys.map(key => row[key]);
+    if (!values.every(item => typeof item === "string" && SESSION_ID.test(item) && item === values[0])) continue;
+    identities.set(values[0] as string, row);
+  }
+  if (identities.size !== 1) return undefined;
+  const [sessionId, row] = [...identities.entries()][0]!;
+  const reportedModel = text(field(row, "model", "reportedModel"), 128);
+  return { sessionId, ...(reportedModel ? { reportedModel } : {}) };
+}
 function boundedLabel(value: unknown, max: number): string | undefined {
   return typeof value === "string" && value.length > 0 && value.length <= max && value.trim() === value
     ? value : undefined;
@@ -274,7 +304,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
     let mutationStarted = false;
     const input = op.input;
     try {
-      const checkEligible = op.kind === "observe_session" && options.isAccountObservable !== undefined
+      const checkEligible = (op.kind === "observe_session" || op.kind === "inspect_task_agents") && options.isAccountObservable !== undefined
         ? options.isAccountObservable : options.isAccountEligible;
       if (!await checkEligible(op.selectedAccountId)) { errorClass = "account_unavailable"; return await submit(op, outcome, result, errorClass); }
       const sessionId = text(op.sessionId ?? input.sessionId, 128);
@@ -285,7 +315,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           !message || !clientMessageId || !MESSAGE_ID.test(clientMessageId))) {
         errorClass = "invalid_operation_input"; return await submit(op, outcome, result, errorClass);
       }
-      const freshOperation = ["create_task", "patch_task", "verify_task_packet", "launch_task"].includes(op.kind);
+      const freshOperation = ["create_task", "patch_task", "verify_task_packet", "launch_task", "inspect_task_agents"].includes(op.kind);
       const adapter = (op.kind === "chat_session" || freshOperation) && options.operationAdapterFactory
         ? await options.operationAdapterFactory(op, { timeoutMs: adapterTimeoutMs })
         : await options.adapterFactory(op.selectedAccountId, { timeoutMs: adapterTimeoutMs });
@@ -380,12 +410,12 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
         } else { outcome = "ambiguous"; errorClass = "cancellation_unconfirmed"; }
         return await submit(op, outcome, result, errorClass);
       }
-      if (["create_task", "patch_task", "verify_task_packet", "launch_task"].includes(op.kind)) {
+      if (["create_task", "patch_task", "verify_task_packet", "launch_task", "inspect_task_agents"].includes(op.kind)) {
         if (!options.allowFreshOperations) { errorClass = "fresh_operations_disabled"; return await submit(op, "rejected", {}, errorClass); }
-        if (!await options.isAccountEligible(op.selectedAccountId)) { errorClass = "account_unavailable"; return await submit(op, "rejected", {}, errorClass); }
+        if (op.kind !== "inspect_task_agents" && !await options.isAccountEligible(op.selectedAccountId)) { errorClass = "account_unavailable"; return await submit(op, "rejected", {}, errorClass); }
         const instructions = text(input.instructions, 16_384);
         const taskId = text(op.providerTaskId ?? input.providerTaskId, 128);
-        if (!instructions || (op.kind === "create_task" && !text(input.stackId, 128)) ||
+        if ((op.kind !== "inspect_task_agents" && !instructions) || (op.kind === "create_task" && !text(input.stackId, 128)) ||
             (op.kind !== "create_task" && !taskId)) {
           errorClass = "fresh_operation_inputs_incomplete"; return await submit(op, "rejected", {}, errorClass);
         }
@@ -448,17 +478,17 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           }
           return await submit(op, outcome, result, errorClass);
         }
+        if (op.kind === "inspect_task_agents" && adapter.listTaskAgents) {
+          const listed = await adapter.listTaskAgents(taskId!);
+          const verified = listed.classification === "accepted" ? taskAgentSession(listed.value, taskId!) : undefined;
+          outcome = verified ? "accepted" : listed.classification === "accepted" ? "ambiguous" : listed.classification;
+          if (verified) result = { providerTaskId: taskId!, sessionId: verified.sessionId,
+            ...(verified.reportedModel ? { reportedModel: verified.reportedModel } : {}), status: "session_identity_verified" };
+          else errorClass = listed.classification === "accepted" ? "task_session_identity_unverified" : text(listed.reason, 80) ?? "agents_unavailable";
+          return await submit(op, outcome, result, errorClass);
+        }
         errorClass = "operation_not_supported_by_adapter";
         return await submit(op, "rejected", {}, errorClass);
-      }
-      if (op.kind === "inspect_task_agents" && adapter.listTaskAgents) {
-        const taskId = text(op.providerTaskId ?? input.providerTaskId, 128);
-        if (!taskId) { errorClass = "invalid_operation_input"; return await submit(op, "rejected", {}, errorClass); }
-        const listed = await adapter.listTaskAgents(taskId);
-        outcome = listed.classification;
-        if (outcome === "accepted") result = { providerTaskId: taskId, status: "agents_observed" };
-        else errorClass = text(listed.reason, 80) ?? "agents_unavailable";
-        return await submit(op, outcome, result, errorClass);
       }
       errorClass = "unsupported_operation_kind";
       return await submit(op, "rejected", {}, errorClass);

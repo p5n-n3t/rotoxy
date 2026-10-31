@@ -45,6 +45,11 @@ export class LightSprintWorkspacePinnedJobsAdapter {
     return this.upstream.readWorkspaceTask(this.workspaceId, taskId);
   }
 
+  /** Read the documented taskRef-scoped session list; this path never starts a provider session. */
+  listTaskAgents(taskId: string): Promise<JobResult> {
+    return this.upstream.listWorkspaceSessions(this.workspaceId, taskId);
+  }
+
   launchTask(taskId: string, provider: string): Promise<JobResult> {
     if (provider !== "claude" && provider !== "codex" && provider !== "auto" && provider !== "pi") throw new TypeError("provider is invalid");
     // LightSprint's documented workspace launch requires a branch label, but

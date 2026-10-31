@@ -411,7 +411,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       // This factory is reached only after the bridge has durably claimed the operation.
       // Bind its single chat mutation to one private runtime registration; never infer
       // authority from the operation's project/client fields or caller-supplied headers.
-      const freshKinds = new Set(["create_task", "patch_task", "verify_task_packet", "launch_task"]);
+      const freshKinds = new Set(["create_task", "patch_task", "verify_task_packet", "launch_task", "inspect_task_agents"]);
       const workspaceId = op.input.workspaceId;
       const workspaceOperation = freshKinds.has(op.kind) || (op.kind === "observe_session" && typeof workspaceId === "string" &&
         this.config.projects.flatMap((project) => project.freshProvisioningBindings ?? []).some((candidate) =>
@@ -428,7 +428,7 @@ export class SupervisorRuntime implements SupervisorBackend {
         if (!safeId(op.operationId) || !safeId(op.attemptId) || !Number.isSafeInteger(op.generation) || op.generation < 1 ||
             !safeAccountId(op.selectedAccountId) || binding.length !== 1 || !safeId(workspaceId) || typeof stackId !== "string" || !STACK_ID.test(stackId) ||
             typeof provider !== "string" || !(FRESH_PROVIDERS as readonly string[]).includes(provider) ||
-            (op.kind !== "observe_session" && (typeof instructions !== "string" || instructions.trim().length === 0 || instructions.length > 16_384)) ||
+            (op.kind !== "observe_session" && op.kind !== "inspect_task_agents" && (typeof instructions !== "string" || instructions.trim().length === 0 || instructions.length > 16_384)) ||
             (op.kind === "create_task" && (typeof title !== "string" || title.trim().length === 0 || title.length > 500)) ||
             (freshKinds.has(op.kind) && op.kind !== "create_task" && (typeof taskId !== "string" || !safeId(taskId))) ||
             (op.kind === "observe_session" && (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)))) return undefined;
@@ -441,10 +441,12 @@ export class SupervisorRuntime implements SupervisorBackend {
               Object.freeze({ method: "GET", path: `${base}/tasks/${taskId}` })]
             : op.kind === "verify_task_packet"
               ? [Object.freeze({ method: "GET", path: `${base}/tasks/${taskId}` })]
-            : op.kind === "launch_task"
+              : op.kind === "launch_task"
               ? [Object.freeze({ method: "GET", path: `${base}/tasks/${taskId}` }),
                 Object.freeze({ method: "GET", path: `${base}/tasks/${taskId}` }),
                 Object.freeze({ method: "POST", path: `${base}/agent-sessions`, body: Object.freeze({ taskRef: taskId, branchName: workspaceBranchName(taskId as string), provider, autoMerge: false }) })]
+              : op.kind === "inspect_task_agents"
+                ? [Object.freeze({ method: "GET", path: `${base}/agent-sessions?taskRef=${encodeURIComponent(taskId as string)}` })]
               : [Object.freeze({ method: "GET", path: `${base}/agent-sessions/${sessionId}/status` }),
                 Object.freeze({ method: "GET", path: `${base}/agent-sessions/${sessionId}/transcript?limit=100&include=text&maxBytes=131072` })];
         let cursor = 0;

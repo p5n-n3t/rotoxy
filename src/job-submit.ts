@@ -196,7 +196,7 @@ export const JOB_TOOL_DEFINITIONS = [
   tool("job_status", "Read one job's state for an authorized project.", { projectId: jobKey, jobId: jobKey }, ["projectId", "jobId"]),
   tool("job_workers", "Read bounded worker/account observations for an authorized project.", { projectId: jobKey }, ["projectId"]),
   tool("job_results", "Read bounded results for an authorized job/task.", { projectId: jobKey, jobId: jobKey, taskId: jobKey }, ["projectId", "jobId"]),
-  tool("job_control", "Apply an allowlisted durable pause, stop, resume, cancellation, or task reconciliation action.", { projectId: jobKey, action: { type: "string", enum: ["pause_dispatch", "resume_dispatch", "emergency_stop", "cancel_job", "reconcile_task"] }, jobId: jobKey, taskId: jobKey, expectedRevision: { type: "integer", minimum: 1 } }, ["projectId", "action"]),
+  tool("job_control", "Apply an allowlisted durable pause, stop, resume, cancellation, or revision-fenced reconciliation. Reconcile observes an existing session or performs one read-only task-scoped session lookup after an ambiguous fresh launch; it never relaunches work.", { projectId: jobKey, action: { type: "string", enum: ["pause_dispatch", "resume_dispatch", "emergency_stop", "cancel_job", "reconcile_task"] }, jobId: jobKey, taskId: jobKey, expectedRevision: { type: "integer", minimum: 1 } }, ["projectId", "action"]),
   tool("job_inbox", "Read the caller's bounded durable incident inbox.", { projectId: jobKey, after: { type: "string", maxLength: 128 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, ["projectId"]),
   tool("job_inbox_ack", "Acknowledge one event in the caller's durable project inbox.", {
     projectId: jobKey, eventId: { type: "string", pattern: "^(?:repo|job):[1-9][0-9]{0,18}$", maxLength: 24 },

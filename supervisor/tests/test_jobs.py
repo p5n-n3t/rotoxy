@@ -245,6 +245,101 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual((row["state"], row["released_at"]), ("cancel_pending", None))
         self.assertEqual((op_state["state"], op_state["error_class"]), ("ambiguous", "CancelledAfterDispatch"))
 
+    def test_reconcile_fresh_launch_identity_by_one_read_only_task_session_inspection(self):
+        self.register("account-a", sessions=[])
+        self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
+        create = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(create["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-ambiguous"}}, now=3)
+        patch = self.registry.claim_operation("worker", now=4)
+        self.registry.record_result(patch["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-ambiguous"}}, now=5)
+        verify = self.registry.claim_operation("worker", now=6)
+        self.registry.record_result(verify["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-ambiguous"}}, now=7)
+        launch = self.registry.claim_operation("worker", now=8)
+        self.registry.record_result(launch["operationId"], {"workerId": "worker", "outcome": "ambiguous",
+                                    "errorClass": "launch_session_identity_unverified"}, now=9)
+        held = self.registry.get_assignment("job-1")
+        with self.assertRaisesRegex(RuntimeError, "Stale assignment revision"):
+            self.registry.reconcile_task("job-1", "fresh-1", held["revision"] - 1, now=10)
+        with self.registry.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM operations WHERE assignment='job-1' AND kind='inspect_task_agents'").fetchone()[0], 0)
+
+        receipt = self.registry.reconcile_task("job-1", "fresh-1", held["revision"], now=11)
+        self.assertEqual(receipt["state"], "starting")
+        self.assertEqual(receipt["providerTaskId"], "ls-task-ambiguous")
+        inspect = self.registry.claim_operation("worker", now=12)
+        self.assertEqual(inspect["kind"], "inspect_task_agents")
+        self.assertEqual(inspect["providerTaskId"], "ls-task-ambiguous")
+        self.assertEqual(inspect["input"]["workspaceId"], "workspace-a")
+        self.assertEqual(inspect["input"]["provider"], "claude")
+        self.registry.record_result(inspect["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-ambiguous", "sessionId": "existing-session-1",
+                                               "reportedModel": "claude-opus-5-5"}}, now=13)
+        observation = self.registry.claim_operation("worker", now=14)
+        self.assertEqual(observation["kind"], "observe_session")
+        self.assertEqual(observation["sessionId"], "existing-session-1")
+        self.assertEqual(observation["input"]["expectedMarker"], "DONE")
+        with self.registry.connection() as db:
+            operations = db.execute("SELECT kind,state FROM operations WHERE assignment='job-1' ORDER BY created_at,rowid").fetchall()
+            task = db.execute("SELECT state,session_id,reported_model FROM job_tasks WHERE assignment='job-1'").fetchone()
+        self.assertEqual([row["kind"] for row in operations].count("launch_task"), 1, "recovery never relaunches")
+        self.assertEqual(operations[-2]["kind"], "inspect_task_agents")
+        self.assertEqual((task["state"], task["session_id"], task["reported_model"]), ("awaiting_output", "existing-session-1", "claude-opus-5-5"))
+
+    def test_fresh_inspection_ambiguous_result_preserves_assignment_and_slot(self):
+        self.register("account-a", sessions=[])
+        self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
+        create = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(create["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {"providerTaskId": "ls-task"}}, now=3)
+        patch = self.registry.claim_operation("worker", now=4)
+        self.registry.record_result(patch["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {"providerTaskId": "ls-task"}}, now=5)
+        verify = self.registry.claim_operation("worker", now=6)
+        self.registry.record_result(verify["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {"providerTaskId": "ls-task"}}, now=7)
+        launch = self.registry.claim_operation("worker", now=8)
+        self.registry.record_result(launch["operationId"], {"workerId": "worker", "outcome": "ambiguous", "errorClass": "launch_session_identity_unverified"}, now=9)
+        held = self.registry.get_assignment("job-1")
+        self.registry.reconcile_task("job-1", "fresh-1", held["revision"], now=10)
+        inspect = self.registry.claim_operation("worker", now=11)
+        self.registry.record_result(inspect["operationId"], {"workerId": "worker", "outcome": "ambiguous", "errorClass": "task_session_identity_unverified"}, now=12)
+        snapshot = self.registry.get_assignment("job-1")
+        self.assertEqual((snapshot["state"], snapshot["tasks"][0]["state"]), ("held", "ambiguous"))
+        self.assertIsNone(snapshot["tasks"][0]["sessionId"])
+        with self.assertRaisesRegex(RuntimeError, "read-only inspection is unavailable"):
+            self.registry.reconcile_task("job-1", "fresh-1", snapshot["revision"], now=13)
+
+    def test_fresh_inspection_allows_bounded_retry_after_definitive_auth_rejection(self):
+        self.register("account-a", sessions=[])
+        self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
+        for now, kind, result in (
+            (2, "create_task", {"providerTaskId": "ls-task-auth"}),
+            (4, "patch_task", {"providerTaskId": "ls-task-auth"}),
+            (6, "verify_task_packet", {"providerTaskId": "ls-task-auth"}),
+        ):
+            op = self.registry.claim_operation("worker", now=now)
+            self.assertEqual(op["kind"], kind)
+            self.registry.record_result(op["operationId"], {"workerId": "worker", "outcome": "accepted", "result": result}, now=now + 1)
+        launch = self.registry.claim_operation("worker", now=8)
+        self.registry.record_result(launch["operationId"], {"workerId": "worker", "outcome": "ambiguous",
+                                    "errorClass": "launch_session_identity_unverified"}, now=9)
+        held = self.registry.get_assignment("job-1")
+        self.registry.reconcile_task("job-1", "fresh-1", held["revision"], now=10)
+        inspect = self.registry.claim_operation("worker", now=11)
+        self.registry.record_result(inspect["operationId"], {"workerId": "worker", "outcome": "rejected",
+                                    "errorClass": "auth"}, now=12)
+        failed = self.registry.get_assignment("job-1")
+        with self.assertRaisesRegex(RuntimeError, "read-only inspection is unavailable"):
+            self.registry.reconcile_task("job-1", "fresh-1", failed["revision"], now=69)
+        repaired = self.registry.reconcile_task("job-1", "fresh-1", failed["revision"], now=72)
+        self.assertEqual(repaired["state"], "starting")
+        retry = self.registry.claim_operation("worker", now=73)
+        self.assertEqual(retry["kind"], "inspect_task_agents")
+        with self.registry.connection() as db:
+            count = db.execute("SELECT COUNT(*) FROM operations WHERE assignment='job-1' AND kind='inspect_task_agents'").fetchone()[0]
+            launch_count = db.execute("SELECT COUNT(*) FROM operations WHERE assignment='job-1' AND kind='launch_task'").fetchone()[0]
+        self.assertEqual((count, launch_count), (2, 1), "auth recovery queues a bounded read-only retry, never another launch")
+
     def test_expired_fresh_launch_lease_is_ambiguous_and_never_claimed_again(self):
         self.register("account-a", sessions=[])
         self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
