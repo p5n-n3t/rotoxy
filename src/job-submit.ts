@@ -171,7 +171,7 @@ export const JOB_TOOL_DEFINITIONS = [
     schemaVersion: { type: "integer", const: 1 }, jobId: jobKey, idempotencyKey: jobKey, projectId: jobKey,
     scheduling: { type: "object", additionalProperties: false, required: ["profile"], properties: {
       profile: { type: "string", enum: ["economy", "balanced", "throughput", "custom"] },
-      maxConcurrency: { type: "integer", minimum: 1, maximum: 32 },
+      maxConcurrency: { type: "integer", minimum: 1, maximum: 32, description: "Only valid with profile=custom. Omit this field for economy, balanced, or throughput." },
     } },
     eligibleAccountIds: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: jobKey },
     tasks: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false,
