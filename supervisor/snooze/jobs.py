@@ -1470,6 +1470,28 @@ class JobRegistry:
                 db.execute("UPDATE job_tasks SET state='cancel_pending' WHERE assignment=? AND task_id=? AND generation=?", (assignment_id, task["task_id"], task["generation"]))
                 db.execute("UPDATE job_tasks SET generation=generation+1 WHERE assignment=? AND task_id=? AND generation=?", (assignment_id, task["task_id"], task["generation"]))
                 db.execute("UPDATE operations SET state='ambiguous',error_class='CancelledAfterDispatch' WHERE assignment=? AND task_id=? AND generation=? AND state IN ('queued','claimed')", (assignment_id, task["task_id"], task["generation"]))
+            # A fresh task can be durably created and patched, then held when
+            # exact instruction readback fails.  That refusal is before the
+            # only launch operation; cancellation may release its local slot
+            # only when the durable receipts prove no launch was ever queued
+            # or claimed.  Ambiguous/rejected launch outcomes retain ownership.
+            refused_before_launch = db.execute("""SELECT t.task_id,t.generation,t.attempt_id FROM job_tasks t
+                WHERE t.assignment=? AND t.state='blocked' AND t.released_at IS NULL
+                AND EXISTS (SELECT 1 FROM operations v WHERE v.assignment=t.assignment AND v.task_id=t.task_id
+                    AND v.generation=t.generation AND v.attempt_id=t.attempt_id
+                    AND v.kind='verify_task_packet' AND v.state='rejected'
+                    AND v.error_class='instruction_roundtrip_unverified')
+                AND NOT EXISTS (SELECT 1 FROM operations l WHERE l.assignment=t.assignment AND l.task_id=t.task_id
+                    AND l.generation=t.generation AND l.attempt_id=t.attempt_id AND l.kind='launch_task')""",
+                (assignment_id,)).fetchall()
+            for task in refused_before_launch:
+                db.execute("UPDATE job_tasks SET state='cancelled',released_at=? WHERE assignment=? AND task_id=? AND generation=? AND state='blocked' AND released_at IS NULL",
+                           (when, assignment_id, task["task_id"], task["generation"]))
+                db.execute("UPDATE attempts SET state='cancelled',released_at=? WHERE id=? AND released_at IS NULL",
+                           (when, task["attempt_id"]))
+                self._event(db, assignment_id, "prelaunch_refusal_released", {
+                    "taskId": task["task_id"], "generation": task["generation"], "reason": "instruction_roundtrip_unverified"
+                }, when)
             db.execute("UPDATE job_tasks SET state='cancelled' WHERE assignment=? AND state IN ('queued','retry_due')", (assignment_id,))
             db.execute("UPDATE assignments SET state='cancelled',revision=revision+1 WHERE id=?", (assignment_id,))
             self._event(db, assignment_id, "assignment_cancelled", {"state": "cancelled"}, when)

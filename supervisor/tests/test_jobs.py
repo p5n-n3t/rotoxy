@@ -176,6 +176,53 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(observe["input"]["sessionId"], "fresh-session-1")
         self.assertEqual(observe["input"]["expectedMarker"], "DONE")
 
+    def test_cancel_releases_only_durable_fresh_prelaunch_packet_refusal(self):
+        self.register("account-a", sessions=[])
+        self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
+        create = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(create["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-refused"}}, now=3)
+        patch = self.registry.claim_operation("worker", now=4)
+        self.registry.record_result(patch["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-refused"}}, now=5)
+        verify = self.registry.claim_operation("worker", now=6)
+        self.assertEqual(verify["kind"], "verify_task_packet")
+        self.registry.record_result(verify["operationId"], {"workerId": "worker", "outcome": "rejected",
+                                    "errorClass": "instruction_roundtrip_unverified"}, now=7)
+        self.assertEqual(self.registry.get_assignment("job-1")["tasks"][0]["state"], "blocked")
+
+        self.registry.submit(assignment("job-2", "key-2", [fresh_task("fresh-2")], accounts=["account-a"]), now=8)
+        self.assertIsNone(self.registry.claim_operation("worker", now=9), "the retained refusal still owns the account until explicitly cancelled")
+        held = self.registry.get_assignment("job-1")
+        self.registry.cancel_assignment("job-1", expected_revision=held["revision"], now=10)
+        with self.registry.connection() as db:
+            released = db.execute("SELECT state,released_at,attempt_id FROM job_tasks WHERE assignment='job-1'").fetchone()
+            attempt = db.execute("SELECT state,released_at FROM attempts WHERE id=?", (released["attempt_id"],)).fetchone()
+            launch_count = db.execute("SELECT COUNT(*) FROM operations WHERE assignment='job-1' AND kind='launch_task'").fetchone()[0]
+        self.assertEqual((released["state"], released["released_at"]), ("cancelled", 10))
+        self.assertEqual((attempt["state"], attempt["released_at"]), ("cancelled", 10))
+        self.assertEqual(launch_count, 0)
+        next_operation = self.registry.claim_operation("worker", now=11)
+        self.assertEqual((next_operation["kind"], next_operation["selectedAccountId"]), ("create_task", "account-a"))
+
+    def test_cancel_does_not_release_ambiguous_fresh_verification(self):
+        self.register("account-a", sessions=[])
+        self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
+        create = self.registry.claim_operation("worker", now=2)
+        self.registry.record_result(create["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-ambiguous"}}, now=3)
+        patch = self.registry.claim_operation("worker", now=4)
+        self.registry.record_result(patch["operationId"], {"workerId": "worker", "outcome": "accepted",
+                                    "result": {"providerTaskId": "ls-task-ambiguous"}}, now=5)
+        verify = self.registry.claim_operation("worker", now=6)
+        self.registry.record_result(verify["operationId"], {"workerId": "worker", "outcome": "ambiguous",
+                                    "errorClass": "worker_result_unavailable"}, now=7)
+        held = self.registry.get_assignment("job-1")
+        self.registry.cancel_assignment("job-1", expected_revision=held["revision"], now=8)
+        with self.registry.connection() as db:
+            row = db.execute("SELECT state,released_at FROM job_tasks WHERE assignment='job-1'").fetchone()
+        self.assertEqual((row["state"], row["released_at"]), ("ambiguous", None))
+
     def test_expired_fresh_launch_lease_is_ambiguous_and_never_claimed_again(self):
         self.register("account-a", sessions=[])
         self.registry.submit(assignment(tasks=[fresh_task()], accounts=["account-a"]), now=1)
