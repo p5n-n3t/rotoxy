@@ -146,6 +146,9 @@ test("rejects unlisted routes, path traversal, duplicate query keys, and unsuppo
   assert.equal(isAllowedSupervisorRoute("POST", "/v1/accounts"), true);
   assert.equal(isAllowedSupervisorRoute("GET", "/v1/assignments/job-1/results"), true);
   assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments/job-1/cancel"), true);
+  assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments/job-1/reconcile"), true);
+  assert.equal(isAllowedSupervisorRoute("GET", "/v1/assignments/job-1/reconcile"), false);
+  assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments/job-1/reconcile?force=true"), false);
   assert.equal(isAllowedSupervisorRoute("GET", "/v1/inbox?projectId=project-a&after=opaque_cursor-A9&limit=100"), true);
   assert.equal(isAllowedSupervisorRoute("POST", "/v1/inbox/repo:123/ack"), true);
   assert.equal(isAllowedSupervisorRoute("POST", "/v1/inbox/job:123/ack?projectId=project-a"), false);

@@ -148,12 +148,14 @@ export function isAllowedSupervisorRoute(method: string, route: string): boolean
     const result = path.match(/^\/v1\/operations\/([A-Za-z0-9._:-]{1,128})\/result$/);
     const ownedResult = path.match(/^\/v1\/assignments\/([A-Za-z0-9._:-]{1,128})\/results$/);
     const cancel = path.match(/^\/v1\/assignments\/([A-Za-z0-9._:-]{1,128})\/cancel$/);
+    const reconcile = path.match(/^\/v1\/assignments\/([A-Za-z0-9._:-]{1,128})\/reconcile$/);
     const inboxAck = path.match(/^\/v1\/inbox\/((?:repo|job):[1-9][0-9]{0,18})\/ack$/);
     if (approval && isSafeId(approval[1]) && method === "POST") return parsed.search === "";
     if (assignment && isSafeId(assignment[1]) && method === "GET") return parsed.search === "";
     if (result && isSafeId(result[1]) && method === "POST") return parsed.search === "";
     if (ownedResult && isSafeId(ownedResult[1]) && method === "GET") return parsed.search === "";
     if (cancel && isSafeId(cancel[1]) && method === "POST") return parsed.search === "";
+    if (reconcile && isSafeId(reconcile[1]) && method === "POST") return parsed.search === "";
     if (inboxAck && method === "POST") return parsed.search === "";
     return false;
   }

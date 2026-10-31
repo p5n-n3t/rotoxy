@@ -214,6 +214,7 @@ test("real Python IPC registers two accounts, completes pinned tasks, isolates c
   assert.equal(isAllowedSupervisorRoute("POST", "/v1/accounts"), true);
   assert.equal(isAllowedSupervisorRoute("GET", "/v1/assignments/job-one/results"), true);
   assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments/job-one/cancel"), true);
+  assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments/job-one/reconcile"), true);
   assert.equal(isAllowedSupervisorRoute("POST", "/v1/accounts/other"), false);
   assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/assignments/job-one/../../other"), false);
 
@@ -511,6 +512,9 @@ test("reconcile_task action verifies project ownership and passes caller revisio
   assert.equal(result.state, "awaiting_output");
   const reconcileCall = bridgeCalls.find((c) => c.path.endsWith("/reconcile"));
   assert.ok(reconcileCall, "bridge reconcile route must be called");
+  assert.equal(reconcileCall.method, "POST");
+  assert.equal(isAllowedSupervisorRoute(reconcileCall.method, reconcileCall.path), true,
+    "the generated reconcile request must pass the private bridge route allowlist");
   // Caller-supplied expectedRevision (3) must be passed, not the fetched one (5)
   assert.equal(reconcileCall.body.expectedRevision, 3, "caller-supplied revision must be forwarded");
   assert.equal(reconcileCall.body.taskId, "task-1");
