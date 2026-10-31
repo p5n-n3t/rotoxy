@@ -233,6 +233,13 @@ export class StateStore {
       if (!account) throw new Error("account not found");
       account.enabled = enabled;
       account.stats.state = enabled ? "unknown" : "disabled";
+      // This method is only used by explicit operator toggles. Once an
+      // operator chooses the state, a later scheduled-renewal check must not
+      // treat an old quota pause as permission to restore routing.
+      if (account.metadata) {
+        delete account.metadata.quotaDisabledBy;
+        delete account.metadata.disabledReason;
+      }
       if (enabled) {
         account.stats.cooldownUntil = undefined;
         account.stats.consecutiveFailures = 0;

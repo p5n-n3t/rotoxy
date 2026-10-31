@@ -46,6 +46,25 @@ test("future dates stay scheduled, overage clamps to zero, and only quota-disabl
   assert.equal(api.shouldRestoreQuotaDisabledAccount({ enabled: true, quotaDisabledBy: "quota-policy" }), false);
 });
 
+test("explicit account toggles remove quota-owned restoration permission", async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rotoxy-manual-pause-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { StateStore } = await import("../dist/store.js");
+  const store = new StateStore(dir);
+  await store.init({ adminPassword: "synthetic-manual-pause-test-password" });
+  const saved = await store.addAccount({ label: "Quota test", token: "synthetic-quota-test-credential" });
+  await store.update(state => {
+    const row = state.accounts.find(item => item.id === saved.id);
+    row.enabled = false;
+    row.metadata = { ...row.metadata, quotaDisabledBy: "quota-policy", disabledReason: "quota-depleted" };
+  });
+  await store.setAccountEnabled(saved.id, false);
+  const row = (await store.load()).accounts.find(item => item.id === saved.id);
+  assert.equal(row.enabled, false);
+  assert.equal(api.shouldRestoreQuotaDisabledAccount(row), false);
+  assert.equal(row.metadata.quotaDisabledBy, undefined);
+});
+
 test("balance snapshot audit IDs are idempotent and reject conflicting refresh replays", async t => {
   const store = await storeFor(t);
   const input = { auditId: "snap-1", provider: "lightsprint", accountId: "ls-01", unit: "credits", remaining: 0, observedAt: Date.parse("2026-10-31T12:00:00.000Z"), source: "user-reported", refreshDate: "2026-11-03" };
