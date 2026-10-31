@@ -7,7 +7,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from snooze import oracle_model_admin as models
-from snooze.oracle_pool import HOSTS, default_config
+from snooze.oracle_pool import DEFAULT_MODEL, HOSTS, default_config
 
 
 class OracleModelAdminTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class OracleModelAdminTests(unittest.TestCase):
         self.db = self.root / "queue.sqlite3"
         self.cache = self.root / "inventory.json"
         fleet = {**default_config(), "version": 2, "hosts": [
-            {**host, "enabled": True, "allowedModels": ["qwen3.5:9b", "gpt-oss:20b"]} for host in HOSTS
+            {**host, "enabled": True, "allowedModels": [DEFAULT_MODEL]} for host in HOSTS
         ]}
         self.config.write_text(json.dumps(fleet)); os.chmod(self.config, 0o600)
         conn = sqlite3.connect(self.db)

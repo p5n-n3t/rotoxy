@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import sqlite3
 import tempfile
@@ -60,6 +61,19 @@ class OracleOpsTests(unittest.TestCase):
             self.pool._event(db, row["id"], status, {"status": status, "model": model, "host": host,
                             "source": "owner-secret-source", "error_code": None}, now)
 
+    def _insert_historical_task(self, job_id, status, host, *, model, eval_tokens=None):
+        """Seed an old ledger row directly; historical models are not new admissions."""
+        text = "historical prompt fixture"
+        task_id = hashlib.sha256(job_id.encode()).hexdigest()[:32]
+        now = time.time()
+        with self.pool._connect() as db:
+            db.execute("""INSERT INTO pool_tasks(id,text,text_hash,source,model,status,created,updated,
+                assigned_host,actual_model,eval_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (task_id, text, hashlib.sha256(text.encode()).hexdigest(), "historical-fixture", model,
+                 status, now, now, host, model if status == "complete" else None, eval_tokens))
+            self.pool._event(db, task_id, status, {"status": status, "model": model, "host": host,
+                "source": "historical-fixture", "error_code": None}, now)
+
     def _write_v2(self, path, hosts):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"version": 2, "default_model": DEFAULT_MODEL, "max_context": 4096,
@@ -72,7 +86,7 @@ class OracleOpsTests(unittest.TestCase):
         self.pool.catalog(refresh=True)
         task = self.pool.submit("sensitive prompt text", job_id="caller-hash:private-task")
         self.pool.run_once()
-        self._insert_task("caller-hash:other-one", "complete", "ora3", model="gpt-oss:20b", eval_tokens=2)
+        self._insert_historical_task("caller-hash:other-one", "complete", "ora3", model="gpt-oss:20b", eval_tokens=2)
         self._insert_task("caller-hash:other-two", "running", "ora5", prompt_tokens=3)
         calls_before = self.transport.catalog_calls
 
@@ -121,7 +135,7 @@ class OracleOpsTests(unittest.TestCase):
         self.assertTrue(next(row for row in snapshot["hosts"] if row["host"] == "ora7")["configured"])
 
     def test_removed_host_history_remains_visible_and_is_marked_unconfigured(self):
-        self._insert_task("removed-host-task", "complete", "ora3", model="gpt-oss:20b", eval_tokens=5)
+        self._insert_historical_task("removed-host-task", "complete", "ora3", model="gpt-oss:20b", eval_tokens=5)
         only_ora1 = [{"id": "ora1", "ip": "100.65.151.42", "ssh_host": "shh-ora1.ziopsyop.tech",
                       "enabled": True, "allowedModels": list(APPROVED_MODELS)}]
         self._write_v2(self.config_path, only_ora1)

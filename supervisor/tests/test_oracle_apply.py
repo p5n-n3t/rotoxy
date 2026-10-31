@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from snooze import oracle_apply
-from snooze.oracle_pool import HOSTS, default_config
+from snooze.oracle_pool import DEFAULT_MODEL, HOSTS, default_config
 from snooze.oracle_fleet_config import _read
 
 
@@ -20,7 +20,7 @@ class OracleApplyTests(unittest.TestCase):
         self.root = Path(self.temp.name); self.root.chmod(0o700)
         self.config = self.root / "fleet.json"
         fleet = {**default_config(), "version": 2, "hosts": [
-            {**host, "enabled": True, "allowedModels": ["qwen3.5:9b"]} for host in HOSTS
+            {**host, "enabled": True, "allowedModels": [DEFAULT_MODEL]} for host in HOSTS
         ]}
         self.config.write_text(json.dumps(fleet)); self.config.chmod(0o600)
         self.db = self.root / "queue.sqlite3"; self.db.write_bytes(b"read-only-sentinel"); self.db.chmod(0o600)
