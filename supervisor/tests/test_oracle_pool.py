@@ -207,12 +207,12 @@ class OraclePoolTests(unittest.TestCase):
 
     def test_per_host_allowed_models_are_enforced_at_claim(self):
         hosts = [{**host, "enabled": True,
-                  "allowedModels": ["gpt-oss:20b"] if host["id"] == "ora1" else
-                                   [DEFAULT_MODEL] if host["id"] == "ora3" else ["gpt-oss:20b"]}
+                  "allowedModels": ["qwen2.5-coder:3b"] if host["id"] == "ora1" else
+                                   [DEFAULT_MODEL] if host["id"] == "ora3" else ["qwen2.5-coder:3b"]}
                  for host in HOSTS]
         pool = self._new_fleet(hosts, "model-policy")
         pool.catalog(refresh=True)
-        pool.submit("route gpt model", model="gpt-oss:20b", job_id="model:gpt")
+        pool.submit("route coder model", model="qwen2.5-coder:3b", job_id="model:gpt")
         pool.submit("route qwen model", model=DEFAULT_MODEL, job_id="model:qwen")
         outcome = pool.run_once()
         assignments = {row["id"]: row["host"] for row in outcome["completed"]}

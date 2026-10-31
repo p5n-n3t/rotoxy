@@ -36,9 +36,9 @@ HOSTS = (
     {"id": "ora5", "ip": "100.112.7.115", "ssh_host": "shh-ora5.ziopsyop.tech"},
 )
 HOST_BY_ID = {host["id"]: host for host in HOSTS}
-APPROVED_MODELS = ("qwen3.5:9b", "tev1:0.8b", "gpt-oss:20b")
-DEFAULT_HOST_MODELS = APPROVED_MODELS
-DEFAULT_MODEL = "qwen3.5:9b"
+APPROVED_MODELS = ("deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b", "tev1:0.8b", "gemma4:e2b")
+DEFAULT_HOST_MODELS = ("deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b", "tev1:0.8b")
+DEFAULT_MODEL = "qwen3.5:2b"
 HOST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}\Z")
 SSH_ALIAS_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
 MODEL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+/-]{0,159}\Z")

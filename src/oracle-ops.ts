@@ -3,8 +3,8 @@ import { isAbsolute } from "node:path";
 import { adminNav, esc } from "./html.js";
 
 /** Legacy empty-store inventory; configured and historical hosts are accepted dynamically below. */
-export const ORACLE_OPS_HOSTS = ["ora1", "ora3", "ora5"] as const;
-export const ORACLE_OPS_MODELS = ["qwen3.5:9b", "gpt-oss:20b", "tev1:0.8b"] as const;
+export const ORACLE_OPS_HOSTS = ["ora1", "ora3", "ora5", "ora6", "ora7", "ora8"] as const;
+export const ORACLE_OPS_MODELS = ["deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b", "tev1:0.8b", "gemma4:e2b"] as const;
 export const ORACLE_OPS_MAX_PAGE_SIZE = 50;
 export const ORACLE_OPS_MAX_OFFSET = 10_000;
 export const ORACLE_OPS_MAX_OUTPUT_BYTES = 256 * 1024;

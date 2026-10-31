@@ -3,7 +3,10 @@ import { spawn } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 import { runtimeStatePath } from "./supervisor-runtime.js";
 
-export const ORACLE_MODELS = ["qwen3.5:9b", "gpt-oss:20b", "tev1:0.8b"] as const;
+export const ORACLE_MODELS = ["deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b", "tev1:0.8b", "gemma4:e2b"] as const;
+// Existing durable tasks retain their original model identity after a fleet
+// migration. This read-only set must never be used to admit a new submission.
+const HISTORICAL_ORACLE_MODELS = new Set<string>([...ORACLE_MODELS, "qwen3.5:9b", "gpt-oss:20b"]);
 export const ORACLE_MAX_PROMPT_CHARS = 4000;
 export const ORACLE_MAX_RESULT_BYTES = 16 * 1024;
 export const ORACLE_MAX_STDOUT_BYTES = 64 * 1024;
@@ -192,7 +195,7 @@ function safeTaskError(value: unknown): string | undefined {
 
 function safeTaskMetadata(task: Record<string, unknown>, ownedId: string, externalId: string): Record<string, unknown> {
   if (task.id !== ownedId) throw new OracleToolError("job_not_found");
-  if (typeof task.status !== "string" || !TASK_STATES.has(task.status) || typeof task.model !== "string" || !ORACLE_MODELS.includes(task.model as typeof ORACLE_MODELS[number])) {
+  if (typeof task.status !== "string" || !TASK_STATES.has(task.status) || typeof task.model !== "string" || !HISTORICAL_ORACLE_MODELS.has(task.model)) {
     throw new OracleToolError("invalid_pool_response");
   }
   const host = typeof task.assigned_host === "string" && HOST_ID.test(task.assigned_host) ? task.assigned_host : undefined;

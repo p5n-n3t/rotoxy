@@ -64,12 +64,12 @@ test("submits prompt on stdin to fixed Python queue and returns safe queued meta
     return { exitCode: 0, stdout: JSON.stringify(poolTask(id, "queued", { model: args[args.indexOf("--model") + 1] })) };
   } });
   const prompt = "Keep this only on stdin";
-  const result = await tools.call("oracle_submit", { jobId: "job-A", prompt, model: "gpt-oss:20b" }, "oauth-client-a");
-  assert.deepEqual(result, { jobId: "job-A", state: "queued", model: "gpt-oss:20b", attempts: 1, promptTokens: 12, evalTokens: 8, createdAt: 100, updatedAt: 101, remoteSeconds: 2.5, elapsedSeconds: 3, actualModel: "qwen3.5:9b" });
+  const result = await tools.call("oracle_submit", { jobId: "job-A", prompt, model: "qwen2.5-coder:3b" }, "oauth-client-a");
+  assert.deepEqual(result, { jobId: "job-A", state: "queued", model: "qwen2.5-coder:3b", attempts: 1, promptTokens: 12, evalTokens: 8, createdAt: 100, updatedAt: 101, remoteSeconds: 2.5, elapsedSeconds: 3, actualModel: "qwen3.5:9b" });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "/usr/bin/python3");
   assert.deepEqual(calls[0].args.slice(0, 8), ["-m", "snooze.oracle_pool", "--config", configPath, "--db", dbPath, "submit", "--stdin"]);
-  assert.deepEqual(calls[0].args.slice(8, 12), ["--model", "gpt-oss:20b", "--id", calls[0].args[11]]);
+  assert.deepEqual(calls[0].args.slice(8, 12), ["--model", "qwen2.5-coder:3b", "--id", calls[0].args[11]]);
   assert.match(calls[0].args[11], /^o[0-9a-f]{44}:job-A$/);
   assert.equal(calls[0].args.includes(prompt), false);
   assert.equal(calls[0].request.stdin, prompt);
@@ -121,6 +121,20 @@ test("stable caller hash namespaces identical job IDs and status/result only que
   assert.equal(status.state, "complete");
 });
 
+test("retired models remain readable in history but cannot receive new submissions", async (t) => {
+  let calls = 0;
+  const tools = await isolatedTools(t, { commandRunner: async (_command, args) => {
+    calls++;
+    const ownedId = args[args.indexOf("--id") + 1];
+    return { exitCode: 0, stdout: JSON.stringify(poolTask(ownedId, "complete", { model: "gpt-oss:20b" })) };
+  } });
+  const status = await tools.call("oracle_status", { jobId: "old-task" }, "history-owner");
+  assert.equal(status.model, "gpt-oss:20b");
+  assert.equal(status.state, "complete");
+  await assert.rejects(tools.call("oracle_submit", { jobId: "new-task", prompt: "bounded", model: "gpt-oss:20b" }, "history-owner"));
+  assert.equal(calls, 1, "retired model rejection happens before any queue command");
+});
+
 test("batch submit forwards every independent task in one caller-namespaced atomic CLI request", async (t) => {
   const calls = [];
   const tools = await isolatedTools(t, { commandRunner: async (_command, args, request) => {
@@ -130,7 +144,7 @@ test("batch submit forwards every independent task in one caller-namespaced atom
   } });
   const input = { tasks: [
     { jobId: "batch-a", prompt: "Independent prompt A" },
-    { jobId: "batch-b", prompt: "Independent prompt B", model: "gpt-oss:20b" },
+    { jobId: "batch-b", prompt: "Independent prompt B", model: "qwen2.5-coder:3b" },
   ] };
   const first = await tools.call("oracle_submit_batch", input, "caller-one");
   const second = await tools.call("oracle_submit_batch", input, "caller-two");
