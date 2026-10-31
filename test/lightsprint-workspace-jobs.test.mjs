@@ -95,7 +95,7 @@ test("changed upstream instructions block launch before POST", async () => {
   await h.adapter.patchWorkspaceTaskInstructions("ws-a", "LW-1", "Reviewed instructions");
   h.changeInstructions("Unreviewed edit");
   const freshOperationAdapter = new LightSprintWorkspacePinnedJobsAdapter(h.newAdapter(), "ws-a");
-  assert.equal((await freshOperationAdapter.launchTask("LW-1", "claude", "Reviewed instructions")).reason, "instructions_mismatch");
+  assert.equal((await freshOperationAdapter.launchVerifiedTask("LW-1", "claude", "Reviewed instructions")).reason, "instructions_mismatch");
   assert.equal(h.calls.filter(c => c.method === "POST").length, 0);
 });
 
@@ -135,8 +135,9 @@ test("pinned worker adapter cannot substitute its verified workspace and derives
   const adapter = new LightSprintWorkspacePinnedJobsAdapter(h.adapter, "ws-a");
   assert.equal(await adapter.createTask("Bound task", "stack-a").then(row => row.classification), "accepted");
   assert.equal((await adapter.patchTaskInstructions("LW-1", "Reviewed instructions")).instructionsVerified, true);
+  assert.equal((await adapter.launchTask("LW-1", "codex")).classification, "accepted", "legacy two-argument call retains its one-shot local verification path");
   const stateless = new LightSprintWorkspacePinnedJobsAdapter(h.newAdapter(), "ws-a");
-  const launched = await stateless.launchTask("LW-1", "codex", "Reviewed instructions");
+  const launched = await stateless.launchVerifiedTask("LW-1", "codex", "Reviewed instructions");
   assert.equal(launched.classification, "accepted");
   assert.deepEqual(h.calls.at(-1), { method: "POST", path: "/api/workspaces/ws-a/agent-sessions", body: {
     taskRef: "LW-1", branchName: workspaceBranchName("LW-1"), provider: "codex", autoMerge: false,

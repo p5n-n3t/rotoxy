@@ -45,11 +45,17 @@ export class LightSprintWorkspacePinnedJobsAdapter {
     return this.upstream.readWorkspaceTask(this.workspaceId, taskId);
   }
 
-  launchTask(taskId: string, provider: string, expectedInstructions: string): Promise<JobResult> {
+  launchTask(taskId: string, provider: string): Promise<JobResult> {
     if (provider !== "claude" && provider !== "codex" && provider !== "auto" && provider !== "pi") throw new TypeError("provider is invalid");
     // LightSprint's documented workspace launch requires a branch label, but
     // it exposes neither a model nor effort selector. Derive a bounded label
     // from the task identity; it is not a caller-controlled branch path.
+    return this.upstream.launchWorkspaceSession(this.workspaceId, taskId, provider as JobProvider, workspaceBranchName(taskId));
+  }
+
+  /** Durable worker path: verification instructions are loaded from the claimed operation, not adapter-local memory. */
+  launchVerifiedTask(taskId: string, provider: string, expectedInstructions: string): Promise<JobResult> {
+    if (provider !== "claude" && provider !== "codex" && provider !== "auto" && provider !== "pi") throw new TypeError("provider is invalid");
     return this.upstream.launchWorkspaceSession(this.workspaceId, taskId, provider as JobProvider, workspaceBranchName(taskId), expectedInstructions);
   }
 }

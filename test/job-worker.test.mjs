@@ -345,7 +345,7 @@ test("fresh workspace launch accepts a validated nested provider session identit
       // for the task API route. Accept the exact internal id match while still
       // verifying the full instruction round trip.
       readTask: async () => ok("account-a", { task: { ref: "MARYSW-2", id: "LW-1", description: "bounded task" } }),
-      launchTask: async (_taskId, _provider, instructions) => { launchInstructions = instructions; return { ...ok("account-a", { session: { id: "_workspace-session" } }), reportedModel: "claude-opus-5-5" }; },
+      launchVerifiedTask: async (_taskId, _provider, instructions) => { launchInstructions = instructions; return { ...ok("account-a", { session: { id: "_workspace-session" } }), reportedModel: "claude-opus-5-5" }; },
     }),
   });
   worker.start();

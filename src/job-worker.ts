@@ -27,7 +27,8 @@ export interface PinnedJobsAdapter {
    * stock LightSprint API does not expose an exact model or effort selector;
    * any returned model is therefore recorded as reported metadata only.
    */
-  launchTask?(taskId: string, provider: string, expectedInstructions: string): Promise<JobResult>;
+  launchTask?(taskId: string, provider: string): Promise<JobResult>;
+  launchVerifiedTask?(taskId: string, provider: string, expectedInstructions: string): Promise<JobResult>;
 }
 
 export interface JobBridge {
@@ -419,7 +420,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           result = outcome === "accepted" ? { providerTaskId: taskId!, status: "instructions_verified" } : {};
           return await submit(op, outcome, result, errorClass);
         }
-        if (op.kind === "launch_task" && adapter.launchTask && adapter.readTask && text(input.provider, 32) &&
+      if (op.kind === "launch_task" && (adapter.launchVerifiedTask || adapter.launchTask) && adapter.readTask && text(input.provider, 32) &&
             (leaseDeadlines.get(op.operationId) ?? 0) - now() > adapterTimeoutMs + requestTimeoutMs &&
             await options.isAccountEligible(op.selectedAccountId)) {
           const readback = await adapter.readTask(taskId!);
@@ -430,7 +431,9 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
             return await submit(op, outcome, {}, errorClass);
           }
           mutationStarted = true;
-          const launched = await adapter.launchTask(taskId!, String(input.provider), instructions);
+          const launched = adapter.launchVerifiedTask
+            ? await adapter.launchVerifiedTask(taskId!, String(input.provider), instructions)
+            : await adapter.launchTask!(taskId!, String(input.provider));
           const launchedValue = resultRecord(launched.value);
           const launchedSession = object(field(launchedValue, "session"));
           const launchedSessionId = text(field(launchedValue, "sessionId", "agentSessionId") ??
