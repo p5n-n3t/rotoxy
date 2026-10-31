@@ -49,8 +49,11 @@ test("future dates stay scheduled, overage clamps to zero, and only quota-disabl
 test("explicit account toggles remove quota-owned restoration permission", async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rotoxy-manual-pause-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const priorConfig = process.env.ROTOXY_CONFIG_DIR;
+  process.env.ROTOXY_CONFIG_DIR = dir;
+  t.after(() => { if (priorConfig === undefined) delete process.env.ROTOXY_CONFIG_DIR; else process.env.ROTOXY_CONFIG_DIR = priorConfig; });
   const { StateStore } = await import("../dist/store.js");
-  const store = new StateStore(dir);
+  const store = new StateStore();
   await store.init({ adminPassword: "synthetic-manual-pause-test-password" });
   const saved = await store.addAccount({ label: "Quota test", token: "synthetic-quota-test-credential" });
   await store.update(state => {
@@ -61,7 +64,7 @@ test("explicit account toggles remove quota-owned restoration permission", async
   await store.setAccountEnabled(saved.id, false);
   const row = (await store.load()).accounts.find(item => item.id === saved.id);
   assert.equal(row.enabled, false);
-  assert.equal(api.shouldRestoreQuotaDisabledAccount(row), false);
+  assert.equal(api.shouldRestoreQuotaDisabledAccount({ enabled: row.enabled, quotaDisabledBy: row.metadata.quotaDisabledBy }), false);
   assert.equal(row.metadata.quotaDisabledBy, undefined);
 });
 
