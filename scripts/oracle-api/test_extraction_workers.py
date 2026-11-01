@@ -68,6 +68,18 @@ class WorkerEndpointTests(unittest.TestCase):
 
 
 class WorkerDispatchTests(unittest.TestCase):
+    def test_skipping_unhealthy_host_advances_beyond_selected_worker(self):
+        async def call(node_id, _url, _token):
+            return "example.org", "Example", "text", node_id
+
+        with patch.object(oracle_api, "_extraction_worker_rr", 0), \
+             patch.object(oracle_api, "_probe_extraction_worker", new=AsyncMock(side_effect=lambda node, _token: node != "ora1")), \
+             patch.object(oracle_api, "_call_extraction_worker", new=AsyncMock(side_effect=call)):
+            async def run():
+                return [await oracle_api._dispatch_extraction("https://example.org/", "test-token") for _ in range(3)]
+            results = asyncio.run(run())
+        self.assertEqual([item[3] for item in results], ["ora3", "ora5", "ora6"])
+
     def test_fair_health_aware_worker_selection_and_per_host_slot(self):
         async def probe(node_id, _token):
             return node_id in {"ora1", "ora5"}

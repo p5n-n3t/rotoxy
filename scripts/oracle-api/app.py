@@ -753,6 +753,7 @@ async def _dispatch_extraction(url: str, token: str) -> tuple[str, str, str, str
             if node_id in healthy and not slot.locked():
                 await slot.acquire()
                 selected = node_id
+                _extraction_worker_rr = (start + offset + 1) % len(_EXTRACTION_WORKER_IDS)
                 break
     if selected is None:
         source_host, title, text = await asyncio.to_thread(_safe_fetch, url)
