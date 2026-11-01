@@ -81,3 +81,30 @@ The retirement also removes the old renewal timer and rejects the obsolete
 renewal-verification action. Archived schedules remain unchanged rather than
 continuing to transition in the background. Old pool-control requests cannot
 resume the retired provider.
+
+## Deployed release
+
+Immutable release `768d493bbd590876188070c779f570bbf6aa8b1f` is running across
+gateway, Oracle pool and monitor. CI `41315168796` passed Node 22 and Node 24.
+After promotion, public health returned 200, `/providers` excluded LightSprint,
+and the old session-provisioning URL returned 410. Existing authenticated MCP
+reported no legacy account or worker bindings. The Codex policy sidecar contains
+seven profiles, one-worker defaults, dynamic initiating-account protection and
+`dispatchEnabled: false`; it does not designate a permanently primary account.
+
+Read-only SSH checks reached all five Oracle hosts. They reported ARM64, but
+neither `node` nor `codex` was present on their non-interactive PATH. This is not
+proof that no installation exists elsewhere. No remote Codex account was
+installed or signed in. Start with existing local isolated profiles for the
+next executor increment; remote worker provisioning can be a later adapter.
+
+Release rollback drop-ins are in
+`/home/jq/.local/state/rotoxy/backups/release-20261101-768d493/`. Preserve the
+retired active configuration if rolling back binaries; never restore obsolete
+LightSprint credentials or launch bindings automatically. Historical provider
+adapters remain for records/compatibility, not active availability.
+
+Known pre-existing dependency alert: GitHub Dependabot alert 5 reports a low
+severity prototype-poisoning issue in `deepmerge` 4.2.0–4.3.1 and no patched
+version. No dependency update was mixed into this provider transition. Track it
+separately before calling the overall product release security-complete.
