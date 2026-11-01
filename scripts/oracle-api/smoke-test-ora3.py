@@ -43,7 +43,7 @@ def main() -> int:
     status, catalog, _ = request("/v1/models", token=token)
     models = [item.get("id") for item in catalog.get("data", [])]
     print(f"models_status={status} model_count={len(models)} gpt_oss_20b_present={'gpt-oss:20b' in models}")
-    if status != 200 or not {"qwen3.5:2b", "qwen2.5-coder:3b"}.issubset(models) or "gpt-oss:20b" in models:
+    if status != 200 or not {"qwen3.5:2b", "qwen2.5-coder:3b", "gemma4:e2b"}.issubset(models) or "gpt-oss:20b" in models:
         raise SystemExit("model catalog check failed")
 
     status, _, _ = request("/extract", token=token, body={"url": "http://127.0.0.1:8877/health"})
@@ -65,7 +65,7 @@ def main() -> int:
         raise SystemExit("search query failed to return the expected Python documentation result")
 
     hosts = []
-    for index in range(5):
+    for index in range(6):
         started = time.monotonic()
         status, result, headers = request("/v1/chat/completions", token=token, body={
             "model": "qwen3.5:2b",
@@ -82,8 +82,8 @@ def main() -> int:
         if status != 200 or result.get("model") != "qwen3.5:2b" or "ORACLE_API_OK" not in content:
             raise SystemExit("bounded inference check failed")
     print("distinct_hosts=" + ",".join(dict.fromkeys(hosts)))
-    if len(set(hosts)) != 5:
-        raise SystemExit("requests did not cover all five eligible hosts")
+    if len(set(hosts)) != 6:
+        raise SystemExit("requests did not cover all six eligible hosts")
     return 0
 
 

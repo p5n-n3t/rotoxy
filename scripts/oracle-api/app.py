@@ -28,6 +28,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -52,8 +53,9 @@ _PRIVATE_NETWORKS = tuple(map(ipaddress.ip_network, (
     "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
 )))
 _ALLOWED_MODELS = frozenset({"deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b", "tev1:0.8b", "gemma4:e2b"})
-_NODE_IPS = {"ora3": "100.114.191.111", "ora5": "100.112.7.115", "ora6": "100.92.153.75", "ora7": "100.104.20.94", "ora8": "100.105.169.121"}
+_NODE_IPS = {"ora1": "100.65.151.42", "ora3": "100.114.191.111", "ora5": "100.112.7.115", "ora6": "100.92.153.75", "ora7": "100.104.20.94", "ora8": "100.105.169.121"}
 _DEFAULT_NODES = [
+    {"id": "ora1", "ip": "100.65.151.42", "models": ["deepseek-r1:1.5b", "qwen3.5:2b"]},
     {"id": "ora3", "ip": "100.114.191.111", "models": ["deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b"]},
     {"id": "ora5", "ip": "100.112.7.115", "models": ["deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b"]},
     {"id": "ora6", "ip": "100.92.153.75", "models": ["deepseek-r1:1.5b", "qwen3.5:2b", "qwen2.5-coder:3b"]},
@@ -64,7 +66,7 @@ _DEFAULT_NODES = [
 
 def _load_nodes() -> list[dict[str, Any]]:
     raw = json.loads(os.environ.get("ORACLE_NODES_JSON", json.dumps(_DEFAULT_NODES)))
-    if type(raw) is not list or not 1 <= len(raw) <= 5:
+    if type(raw) is not list or not 1 <= len(raw) <= 6:
         raise RuntimeError("invalid Oracle node configuration")
     result, seen = [], set()
     for node in raw:
@@ -166,6 +168,140 @@ class BodySizeLimitMiddleware:
 
 
 app.add_middleware(BodySizeLimitMiddleware)
+
+
+_MCP_PROTOCOL_VERSIONS = {"2025-03-26", "2025-06-18", "2025-11-25"}
+_MCP_SEARCH_TOOLS = [
+    {"name": "search_web", "description": "Search the configured private SearXNG service. Returns a bounded list of title, URL, excerpt, and engine fields.",
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "minLength": 2, "maxLength": 200}, "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}}, "required": ["query"], "additionalProperties": False},
+     "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True}},
+    {"name": "extract_url", "description": "Fetch one public HTTP/HTTPS document using Oracle API's DNS, port, redirect, content-type, timeout, and byte limits.",
+     "inputSchema": {"type": "object", "properties": {"url": {"type": "string", "minLength": 8, "maxLength": 2048}}, "required": ["url"], "additionalProperties": False},
+     "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True}},
+]
+_MCP_MODEL_TOOLS = [
+    {"name": "oracle_chat", "description": "Run one bounded non-streaming chat completion on the fixed Oracle model/node allowlist.",
+     "inputSchema": {"type": "object", "properties": {"model": {"type": "string", "enum": sorted(_ALLOWED_MODELS)}, "prompt": {"type": "string", "minLength": 1, "maxLength": 24000}, "max_tokens": {"type": "integer", "minimum": 1, "maximum": MAX_PREDICT, "default": 256}}, "required": ["model", "prompt"], "additionalProperties": False},
+     "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True}},
+]
+
+
+def _mcp_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+async def _mcp_call_tool(name: Any, arguments: Any, kind: str, token: str) -> dict[str, Any]:
+    if not isinstance(name, str) or not isinstance(arguments, dict):
+        raise ValueError("invalid tool arguments")
+    allowed_tools = {item["name"] for item in (_MCP_SEARCH_TOOLS if kind == "search" else _MCP_MODEL_TOOLS)}
+    if name not in allowed_tools:
+        raise LookupError("unknown tool")
+    try:
+        if kind == "search" and name == "search_web":
+            body = SearchRequest.model_validate(arguments)
+            response = await search(body, token)
+            value = json.loads(response.body)
+        elif kind == "search" and name == "extract_url":
+            body = ExtractRequest.model_validate(arguments)
+            response = await extract(body, token)
+            value = json.loads(response.body)
+        else:
+            prompt = arguments.get("prompt")
+            body = ChatRequest.model_validate({"model": arguments.get("model"), "messages": [{"role": "user", "content": prompt}], "max_tokens": arguments.get("max_tokens", 256)})
+            response = await chat(body, token)
+            completion = json.loads(response.body)
+            value = {"model": completion["model"], "host": response.headers.get("x-oracle-host", "unknown"), "text": completion["choices"][0]["message"]["content"]}
+        return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}], "isError": False}
+    except HTTPException as exc:
+        return {"content": [{"type": "text", "text": str(exc.detail)}], "isError": True}
+    except (ValueError, TypeError) as exc:
+        return {"content": [{"type": "text", "text": "invalid_arguments"}], "isError": True}
+
+
+async def _mcp_dispatch(payload: Any, kind: str, token: str) -> tuple[Any, bool]:
+    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0" or not isinstance(payload.get("method"), str):
+        return _mcp_error(payload.get("id") if isinstance(payload, dict) else None, -32600, "Invalid Request"), False
+    method = payload["method"]
+    params = payload.get("params") or {}
+    request_id = payload.get("id")
+    notification = "id" not in payload
+    if method == "notifications/initialized":
+        return None, True
+    if method.startswith("notifications/"):
+        return None, True
+    if notification:
+        return _mcp_error(None, -32600, "Invalid Request"), False
+    if method == "initialize":
+        version = params.get("protocolVersion") if isinstance(params, dict) else None
+        if not isinstance(version, str):
+            version = "2025-11-25"
+        if version not in _MCP_PROTOCOL_VERSIONS:
+            version = "2025-11-25"
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": f"rotoxy-oracle-{kind}", "version": "1.0.0"}}}, False
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": request_id, "result": {}}, False
+    if method == "tools/list":
+        tools = _MCP_SEARCH_TOOLS if kind == "search" else _MCP_MODEL_TOOLS
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": tools}}, False
+    if method == "tools/call":
+        if not isinstance(params, dict):
+            return _mcp_error(request_id, -32602, "Invalid params"), False
+        try:
+            result = await _mcp_call_tool(params.get("name"), params.get("arguments", {}), kind, token)
+            return {"jsonrpc": "2.0", "id": request_id, "result": result}, False
+        except LookupError:
+            return _mcp_error(request_id, -32602, "Unknown tool"), False
+        except (ValueError, TypeError):
+            return _mcp_error(request_id, -32602, "Invalid params"), False
+    return _mcp_error(request_id, -32601, "Method not found"), False
+
+
+async def _mcp_endpoint(request: Request, kind: str, token: str) -> Response:
+    # This service is a machine-to-machine API. Reject browser Origins rather than
+    # reflecting arbitrary origins through the authenticated MCP transport.
+    if request.headers.get("origin"):
+        return JSONResponse({"detail": "origin_not_allowed"}, status_code=403)
+    accept = request.headers.get("accept", "")
+    if "application/json" not in accept or "text/event-stream" not in accept:
+        return JSONResponse({"detail": "invalid_accept"}, status_code=406)
+    if "application/json" not in request.headers.get("content-type", ""):
+        return JSONResponse({"detail": "invalid_content_type"}, status_code=415)
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(_mcp_error(None, -32700, "Parse error"), status_code=400)
+    if isinstance(payload, list):
+        if not payload or len(payload) > 8:
+            return JSONResponse(_mcp_error(None, -32600, "Invalid Request"), status_code=400)
+        dispatched = [await _mcp_dispatch(item, kind, token) for item in payload]
+        responses = [item for item, is_notification in dispatched if item is not None and not is_notification]
+        if not responses:
+            return Response(status_code=202)
+        return JSONResponse(responses)
+    result, is_notification = await _mcp_dispatch(payload, kind, token)
+    if is_notification and result is None:
+        return Response(status_code=202)
+    return JSONResponse(result)
+
+
+@app.post("/search/mcp")
+async def search_mcp(request: Request, token: str = Depends(_require_auth)) -> Response:
+    return await _mcp_endpoint(request, "search", token)
+
+
+@app.get("/search/mcp")
+async def search_mcp_get(_token: str = Depends(_require_auth)) -> Response:
+    return Response(status_code=405, headers={"Allow": "POST"})
+
+
+@app.post("/models/mcp")
+async def models_mcp(request: Request, token: str = Depends(_require_auth)) -> Response:
+    return await _mcp_endpoint(request, "models", token)
+
+
+@app.get("/models/mcp")
+async def models_mcp_get(_token: str = Depends(_require_auth)) -> Response:
+    return Response(status_code=405, headers={"Allow": "POST"})
 
 
 @app.get("/health")
