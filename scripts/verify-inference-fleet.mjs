@@ -8,7 +8,7 @@ import { createSupervisorRuntime, readSupervisorRuntimeConfig } from "../dist/su
 import { CloudflareCredentialStore } from "../dist/cloudflare-ai.js";
 import { pkceS256 } from "../dist/crypto.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolve, join } from "node:path";
+import { resolve, join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 
 const REQUIRED = ["--config", "--state-dir", "--project-id", "--cloudflare-account-id", "--oracle-account-id", "--job-id"];
@@ -40,7 +40,7 @@ export function parseArgs(argv) {
 export function buildCanaryTasks(jobId, oracleModel, cloudflareModel) {
   const task = (taskId, provider, model, dependsOn, marker) => ({
     taskId, dependsOn, scopeKeys: [`path:inference-canary/${jobId}/${taskId}`],
-    instructions: `This bounded provider acceptance check is part of job ${jobId}. Return a short status line and then the exact marker ${marker} on the final nonempty line. Do not use tools, external services, or perform other work.`,
+    instructions: `Reply exactly ${marker} and nothing else. Do not add an explanation, preamble, or other text.`,
     execution: { mode: "inference", provider, model, maxOutputTokens: 64 },
     output: { kind: "text", maxBytes: 1024, format: "plain text", expectedMarker: marker },
   });
@@ -63,6 +63,43 @@ export function validateCanaryResources(resources, { cloudflareAccountId, oracle
     throw new Error("cloudflare_resource_not_currently_eligible");
   }
   return { oracle, cloudflare };
+}
+
+export function inspectCanaryResources(resources, { cloudflareAccountId, oracleAccountId, oracleModel, cloudflareModel }) {
+  const rows = new Map((Array.isArray(resources) ? resources : []).filter(row => row && typeof row.accountId === "string").map(row => [row.accountId, row]));
+  const check = (accountId, provider, model, label) => {
+    const row = rows.get(accountId);
+    const reasons = [];
+    if (!row) reasons.push("resource_missing");
+    else {
+      if (row.provider !== provider) reasons.push("provider_mismatch");
+      if (row.enabled !== true) reasons.push("disabled");
+      if (row.authorized !== true) reasons.push("authorization_unavailable");
+      if (row.health !== "healthy") reasons.push(`health_${row.health === "unknown" ? "unknown" : "degraded"}`);
+      if (row.quota !== "unknown") reasons.push("quota_state_not_unknown");
+      if (!Array.isArray(row.models) || !row.models.includes(model)) reasons.push("model_not_in_live_allowlist_catalog");
+      if (!Number.isSafeInteger(row.capacity) || row.capacity < 1) reasons.push("capacity_unavailable");
+      if (!Number.isSafeInteger(row.maxOutputTokens) || row.maxOutputTokens < 64) reasons.push("output_limit_below_64");
+    }
+    return { provider: label, eligible: reasons.length === 0, reasons,
+      ...(row ? { enabled: row.enabled === true, authorized: row.authorized === true, health: row.health,
+        quota: row.quota === "unknown" ? "unknown" : "unavailable", modelAllowed: Array.isArray(row.models) && row.models.includes(model),
+        capacity: Number.isSafeInteger(row.capacity) ? row.capacity : null,
+        maxOutputTokens: Number.isSafeInteger(row.maxOutputTokens) ? row.maxOutputTokens : null,
+        provenance: typeof row.provenance === "string" ? row.provenance : "unknown",
+        ...(provider === "oracle" ? { eligibleHostCount: Number.isSafeInteger(row.eligibleHostCount) ? row.eligibleHostCount : null } : {}) } : {}) };
+  };
+  return { oracle: check(oracleAccountId, "oracle", oracleModel, "oracle"),
+    cloudflare: check(cloudflareAccountId, "cloudflare", cloudflareModel, "cloudflare") };
+}
+
+export async function assertOracleCredentialReady(tokenPath, uid = process.getuid?.()) {
+  if (typeof tokenPath !== "string" || !isAbsolute(tokenPath)) throw new Error("ROTOXY_ORACLE_API_TOKEN_FILE must identify an owner-only API token file in this process environment");
+  const info = await lstat(tokenPath).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink() || uid !== undefined && info.uid !== uid || (info.mode & 0o077) !== 0 ||
+      (info.mode & 0o400) === 0 || info.size < 8 || info.size > 4096) {
+    throw new Error("ROTOXY_ORACLE_API_TOKEN_FILE is unavailable or not owner-only; no token value was read or logged");
+  }
 }
 
 const safeError = error => ({ name: error?.name || "Error", code: /^[A-Za-z0-9_]{1,80}$/.test(error?.code || "") ? error.code : undefined, message: String(error?.message || "operation failed").slice(0, 240) });
@@ -129,9 +166,93 @@ async function initialize(base, token) {
 function rowsOf(status) { return Array.isArray(status?.tasks) ? status.tasks.filter(row => row && typeof row.taskId === "string") : []; }
 function isTerminal(status) {
   if (TERMINAL.has(String(status?.state || "").toLowerCase())) return true;
-  const rows = rowsOf(status); return rows.length === 3 && rows.every(row => TERMINAL.has(String(row.state || "").toLowerCase()));
+  const rows = rowsOf(status);
+  return rows.some(row => ["failed", "cancelled", "ambiguous", "blocked"].includes(String(row.state || "").toLowerCase())) ||
+    rows.length === 3 && rows.every(row => TERMINAL.has(String(row.state || "").toLowerCase()));
+}
+function hasTerminalFailure(status) {
+  return rowsOf(status).some(row => ["failed", "cancelled", "ambiguous", "blocked"].includes(String(row.state || "").toLowerCase()));
 }
 const pause = milliseconds => new Promise(resolvePause => setTimeout(resolvePause, milliseconds));
+
+/** Drive the durable job protocol through an injectable authenticated MCP tool caller. */
+export async function executeCanaryJobFlow({ callTool, projectId, jobId, body, oracleAccountId, cloudflareAccountId,
+  timeoutMs = 300_000, pollMs = 750, pauseFn = pause }) {
+  const evidence = { jobId, state: "not_started", submission: "not_attempted", idempotency: "not_checked", blockers: [], tasks: [] };
+  let submitted;
+  try {
+    submitted = await callTool("job_submit", body);
+    evidence.submission = "accepted";
+    evidence.assignmentId = submitted.assignmentId;
+    evidence.state = submitted.state || "queued";
+  } catch (error) {
+    evidence.submission = "ambiguous";
+    evidence.blockers.push("submission response ambiguous; the job will not be resubmitted or replayed");
+    evidence.submitError = safeError(error);
+    return evidence;
+  }
+  if (submitted.assignmentId !== jobId) throw new Error("assignment_id_mismatch");
+  const tasks = body.tasks;
+  evidence.tasks = tasks.map(task => ({ taskId: task.taskId, provider: task.execution.provider, model: task.execution.model,
+    dependsOn: task.dependsOn, expectedMarker: task.output.expectedMarker, state: "not_started", markerMatched: false }));
+  const deadline = Date.now() + timeoutMs;
+  const samples = [];
+  let status;
+  while (Date.now() < deadline) {
+    try { status = await callTool("job_status", { projectId, jobId }); }
+    catch (error) { evidence.blockers.push(`read-only status lookup failed (${safeError(error).name}); provider work will not be replayed`); break; }
+    const rows = rowsOf(status);
+    samples.push({ at: new Date().toISOString(), runningTaskIds: rows.filter(row => row.state === "running").map(row => row.taskId) });
+    if (isTerminal(status)) break;
+    await pauseFn(pollMs);
+  }
+  evidence.state = status?.state || (Date.now() >= deadline ? "timeout" : "status_unconfirmed");
+  evidence.statusSamples = samples;
+  const taskRows = rowsOf(status);
+  if (!TERMINAL.has(String(status?.state || "").toLowerCase()) && hasTerminalFailure(status)) {
+    evidence.state = taskRows.find(row => ["failed", "cancelled", "ambiguous", "blocked"].includes(String(row.state || "").toLowerCase()))?.state || "blocked";
+  }
+  evidence.tasks = evidence.tasks.map(task => {
+    const row = taskRows.find(candidate => candidate.taskId === task.taskId);
+    return { ...task, state: row?.state || "unknown", selectedAccountId: row?.selectedAccountId || null,
+      generation: row?.generation ?? null, dispatchAt: row?.dispatchAt ?? null, releasedAt: row?.releasedAt ?? null };
+  });
+  evidence.parallelIndependentObserved = samples.some(sample => sample.runningTaskIds.includes("oracle-independent") && sample.runningTaskIds.includes("cloudflare-independent"));
+  if (evidence.tasks.find(task => task.taskId === "oracle-independent")?.selectedAccountId !== oracleAccountId ||
+      evidence.tasks.find(task => task.taskId === "cloudflare-independent")?.selectedAccountId !== cloudflareAccountId ||
+      evidence.tasks.find(task => task.taskId === "oracle-dependency-join")?.selectedAccountId !== oracleAccountId) {
+    evidence.blockers.push("task account pinning did not match requested Oracle/Cloudflare provider accounts");
+  }
+  const dependencyJoin = taskRows.find(row => row.taskId === "oracle-dependency-join");
+  if (dependencyJoin && JSON.stringify(dependencyJoin.dependsOn) !== JSON.stringify(["oracle-independent", "cloudflare-independent"])) {
+    evidence.blockers.push("dependency join edges were not returned as submitted");
+  }
+  if (!evidence.parallelIndependentObserved) evidence.blockers.push("status polling did not observe both independent tasks running simultaneously");
+  if (evidence.state === "complete" || evidence.state === "completed") {
+    const result = await callTool("job_results", { projectId, jobId });
+    const resultRows = Array.isArray(result.results) ? result.results : [];
+    for (const task of evidence.tasks) {
+      const row = resultRows.find(item => item.taskId === task.taskId);
+      task.markerMatched = typeof row?.text === "string" && row.text.split(/\r?\n/).filter(line => line.trim()).at(-1) === task.expectedMarker;
+      task.reportedModel = row?.reportedModel ?? null;
+      task.finishReason = row?.finishReason ?? null;
+      task.terminationEvidence = row?.terminationEvidence ?? null;
+      task.modelEvidence = row?.modelEvidence ?? null;
+      task.providerHost = row?.providerHost ?? null;
+      task.providerAccountId = row?.providerAccountId ?? null;
+    }
+    evidence.idempotency = "checking_same_request_after_terminal_completion";
+    const repeated = await callTool("job_submit", body);
+    if (repeated.assignmentId === jobId && repeated.taskCount === 3) evidence.idempotency = "same_assignment_returned_without_new_provider_operations";
+    else evidence.blockers.push("same-key submission did not return the original durable assignment");
+  }
+  if (!evidence.tasks.every(task => task.markerMatched)) evidence.blockers.push("one or more exact terminal markers were not verified in durable results");
+  const joinedTask = evidence.tasks.find(task => task.taskId === "oracle-dependency-join");
+  if (joinedTask?.state !== "complete" || !joinedTask.dependsOn.includes("oracle-independent") || !joinedTask.dependsOn.includes("cloudflare-independent")) {
+    evidence.blockers.push("Oracle dependency join did not complete behind both independent task edges");
+  }
+  return evidence;
+}
 
 async function run() {
   const options = parseArgs(process.argv.slice(2));
@@ -153,6 +274,7 @@ async function run() {
   }
   await state.init();
   await state.load();
+  await assertOracleCredentialReady(process.env.ROTOXY_ORACLE_API_TOKEN_FILE, uid);
   const config = await readSupervisorRuntimeConfig(productionConfigPath);
   const project = config.projects.find(row => row.projectId === options.project_id);
   if (!project) throw new Error("configured_project_not_found");
@@ -206,83 +328,31 @@ async function run() {
     const inferenceArm = submitTool?.inputSchema?.properties?.tasks?.items?.properties?.execution?.oneOf?.some(arm => arm?.properties?.mode?.const === "inference");
     if (!inferenceArm) throw new Error("job_submit_inference_schema_unavailable");
     const workers = await tool(base, oauth.accessToken, 2, "job_workers", { projectId: project.projectId });
+    evidence.resourcePreflight = inspectCanaryResources(workers.inferenceResources, { oracleAccountId: options.oracle_account_id,
+      cloudflareAccountId: options.cloudflare_account_id, oracleModel, cloudflareModel });
+    if (!evidence.resourcePreflight.oracle.eligible || !evidence.resourcePreflight.cloudflare.eligible) {
+      evidence.blockers.push(...["oracle", "cloudflare"].filter(provider => !evidence.resourcePreflight[provider].eligible)
+        .map(provider => `${provider}_resource_not_currently_eligible:${evidence.resourcePreflight[provider].reasons.join(",")}`));
+      return;
+    }
     const resources = validateCanaryResources(workers.inferenceResources, { oracleAccountId: options.oracle_account_id,
       cloudflareAccountId: options.cloudflare_account_id, oracleModel, cloudflareModel });
-    evidence.resources = { oracle: { accountId: options.oracle_account_id, model: oracleModel, capacity: resources.oracle.capacity,
-      quota: resources.oracle.quota, provenance: resources.oracle.provenance }, cloudflare: { accountId: options.cloudflare_account_id,
-      model: cloudflareModel, capacity: resources.cloudflare.capacity, quota: resources.cloudflare.quota, provenance: resources.cloudflare.provenance } };
+    evidence.resources = { oracle: { model: oracleModel, capacity: resources.oracle.capacity,
+      quota: resources.oracle.quota, provenance: resources.oracle.provenance, eligibleHostCount: resources.oracle.eligibleHostCount },
+      cloudflare: { model: cloudflareModel, capacity: resources.cloudflare.capacity,
+        quota: resources.cloudflare.quota, provenance: resources.cloudflare.provenance } };
 
     const tasks = buildCanaryTasks(options.job_id, oracleModel, cloudflareModel);
     const body = { schemaVersion: 1, jobId: options.job_id, idempotencyKey: options.job_id, projectId: project.projectId,
       eligibleAccountIds: [options.oracle_account_id, options.cloudflare_account_id], scheduling: { profile: "custom", maxConcurrency: 3 }, tasks };
-    evidence.tasks = tasks.map(task => ({ taskId: task.taskId, provider: task.execution.provider, model: task.execution.model,
-      dependsOn: task.dependsOn, expectedMarker: task.output.expectedMarker, state: "not_started", markerMatched: false }));
     evidence.submittedAt = new Date().toISOString();
     submissionAttempted = true;
-    let submitted;
-    try {
-      submitted = await tool(base, oauth.accessToken, 3, "job_submit", body);
-      evidence.submission = "accepted";
-      evidence.state = submitted.state || "queued";
-      evidence.assignmentId = submitted.assignmentId;
-    } catch (error) {
-      evidence.submission = "ambiguous";
-      evidence.blockers.push("submission response ambiguous; the job will not be resubmitted or replayed");
-      evidence.submitError = safeError(error);
-      return;
-    }
-    if (submitted.assignmentId !== options.job_id) throw new Error("assignment_id_mismatch");
-
-    const deadline = Date.now() + options.timeout_seconds * 1000;
-    const samples = [];
-    let status;
-    while (Date.now() < deadline) {
-      status = await tool(base, oauth.accessToken, 4, "job_status", { projectId: project.projectId, jobId: options.job_id });
-      const taskRows = rowsOf(status);
-      samples.push({ at: new Date().toISOString(), runningTaskIds: taskRows.filter(row => row.state === "running").map(row => row.taskId) });
-      if (isTerminal(status)) break;
-      await pause(750);
-    }
-    evidence.state = status?.state || (Date.now() >= deadline ? "timeout" : "unknown");
-    evidence.statusSamples = samples;
-    const taskRows = rowsOf(status);
-    evidence.tasks = evidence.tasks.map(task => {
-      const row = taskRows.find(candidate => candidate.taskId === task.taskId);
-      return { ...task, state: row?.state || "unknown", selectedAccountId: row?.selectedAccountId || null,
-        generation: row?.generation ?? null, dispatchAt: row?.dispatchAt ?? null, releasedAt: row?.releasedAt ?? null };
+    const flow = await executeCanaryJobFlow({
+      callTool: (name, args) => tool(base, oauth.accessToken, name === "job_submit" ? 3 : name === "job_status" ? 4 : name === "job_results" ? 5 : 6, name, args),
+      projectId: project.projectId, jobId: options.job_id, body, oracleAccountId: options.oracle_account_id,
+      cloudflareAccountId: options.cloudflare_account_id, timeoutMs: options.timeout_seconds * 1000,
     });
-    evidence.parallelIndependentObserved = samples.some(sample => sample.runningTaskIds.includes("oracle-independent") && sample.runningTaskIds.includes("cloudflare-independent"));
-    if (evidence.tasks.find(task => task.taskId === "oracle-independent")?.selectedAccountId !== options.oracle_account_id ||
-        evidence.tasks.find(task => task.taskId === "cloudflare-independent")?.selectedAccountId !== options.cloudflare_account_id ||
-        evidence.tasks.find(task => task.taskId === "oracle-dependency-join")?.selectedAccountId !== options.oracle_account_id) {
-      evidence.blockers.push("task account pinning did not match requested Oracle/Cloudflare provider accounts");
-    }
-    const join = taskRows.find(row => row.taskId === "oracle-dependency-join");
-    if (join && JSON.stringify(join.dependsOn) !== JSON.stringify(["oracle-independent", "cloudflare-independent"])) evidence.blockers.push("dependency join edges were not returned as submitted");
-    if (!evidence.parallelIndependentObserved) evidence.blockers.push("status polling did not observe both independent tasks running simultaneously");
-
-    if (evidence.state === "complete" || evidence.state === "completed") {
-      const result = await tool(base, oauth.accessToken, 5, "job_results", { projectId: project.projectId, jobId: options.job_id });
-      const resultRows = Array.isArray(result.results) ? result.results : [];
-      for (const task of evidence.tasks) {
-        const row = resultRows.find(item => item.taskId === task.taskId);
-        task.markerMatched = typeof row?.text === "string" && row.text.split(/\r?\n/).filter(line => line.trim()).at(-1) === task.expectedMarker;
-        task.reportedModel = row?.reportedModel ?? null;
-        task.finishReason = row?.finishReason ?? null;
-        task.terminationEvidence = row?.terminationEvidence ?? null;
-        task.modelEvidence = row?.modelEvidence ?? null;
-        task.providerHost = row?.providerHost ?? null;
-        task.providerAccountId = row?.providerAccountId ?? null;
-      }
-      evidence.idempotency = "checking_same_request_after_terminal_completion";
-      const repeated = await tool(base, oauth.accessToken, 6, "job_submit", body);
-      if (repeated.assignmentId === options.job_id && repeated.taskCount === 3) evidence.idempotency = "same_assignment_returned_without_new_provider_operations";
-      else evidence.blockers.push("same-key submission did not return the original durable assignment");
-    }
-    if (!evidence.tasks.every(task => task.markerMatched)) evidence.blockers.push("one or more exact terminal markers were not verified in durable results");
-    if (evidence.tasks[2]?.state !== "complete" || !evidence.tasks[2]?.dependsOn?.includes("oracle-independent") || !evidence.tasks[2]?.dependsOn?.includes("cloudflare-independent")) {
-      evidence.blockers.push("Oracle dependency join did not complete behind both independent task edges");
-    }
+    Object.assign(evidence, flow);
   } finally {
     const authStore = new StateStore();
     if (authDir) process.env.TOKEN2OAUTH_CONFIG_DIR = authDir;
