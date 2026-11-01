@@ -41,14 +41,14 @@ export function createResourceRoutingAdminRouter(store: StateStore, sessions: Ad
     }
   });
   const knownAccounts=async()=>{
-    const [state,ollama,cf]=await Promise.all([store.load(),models.listCredentials(),cloudflare.listCredentials()]);
-    const native=state.config.upstreamUrl==="https://app.lightsprint.ai/mcp";
-    return [...state.accounts.filter(a=>a.provider==="lightsprint"||(native&&a.provider==="generic-bearer-mcp")).map(a=>({provider:"LightSprint",id:a.id,label:a.label})),...ollama.map(a=>({provider:"Ollama",id:a.id,label:a.label})),...cf.map(a=>({provider:"Cloudflare Workers AI",id:a.id,label:a.label}))];
+    const [ollama,cf]=await Promise.all([models.listCredentials(),cloudflare.listCredentials()]);
+    return [...ollama.map(a=>({provider:"Ollama",id:a.id,label:a.label})),...cf.map(a=>({provider:"Cloudflare Workers AI",id:a.id,label:a.label}))];
   };
   router.post("/admin/routing/controls",async(req,res)=>{
     if(!sessions.verifyCsrf(res.locals.token,req.body?._csrf))return res.status(403).json({error:"csrf_invalid"});
     try{
       const b=req.body;if(typeof b.expected!=="string"||!["true","false"].includes(b.enabled))throw new Error("invalid");
+      if(b.pool && !["ollama","cloudflare"].includes(b.pool))throw new Error("pool retired or unsupported");
       if(b.accountId&&!(await knownAccounts()).some(a=>a.id===b.accountId))throw new Error("account");
       const capacity=b.capacity===""||b.capacity===undefined?undefined:Number(b.capacity);
       await rulesStore.patchControls({...(b.pool?{pool:b.pool}:{accountId:b.accountId}),enabled:b.enabled==="true",capacity,expected:b.expected});

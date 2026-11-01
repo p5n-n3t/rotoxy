@@ -1,4 +1,5 @@
 import type { WorkspaceReconciliationBinding } from "./workspace-execution.js";
+import { safeClientId } from "./oauth-client-id.js";
 
 export interface WorkspaceReconcilerOptions {
   claim(limit: number): Promise<WorkspaceReconciliationBinding[]>;
@@ -19,7 +20,7 @@ function validBinding(value: unknown): value is WorkspaceReconciliationBinding {
   const row = value as Record<string, unknown>;
   return typeof row.projectId === "string" && SAFE_ID.test(row.projectId) &&
     typeof row.jobId === "string" && SAFE_ID.test(row.jobId) &&
-    typeof row.clientId === "string" && SAFE_ID.test(row.clientId);
+    safeClientId(row.clientId);
 }
 
 function settlesSyncResult(value: unknown): boolean {

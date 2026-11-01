@@ -10,7 +10,7 @@ import type { StateStore } from "./store.js";
 import type { ModelCredentialStore, ModelScope } from "./model-credentials.js";
 import { loadOracleOpsSnapshot, renderOracleOpsPage } from "./oracle-ops.js";
 import { runtimeStatePath } from "./supervisor-runtime.js";
-import { CreditSnapshotStore, listCreditAccounts, shouldRestoreQuotaDisabledAccount, summarizeCredits, type CreditAccount } from "./credit-snapshots.js";
+import { CreditSnapshotStore, listCreditAccounts, summarizeCredits, type CreditAccount } from "./credit-snapshots.js";
 
 export function createControlPlaneAdminRouter(store: StateStore, sessions: AdminSessions, models: ModelCredentialStore, supervisorCwd: string, codex?: CodexProfiles, modelSnapshot?: () => { accounts: Array<{ accountId: string; requests: number; successes: number; failures: number; inflight: number }>; recent: Array<{ accountId: string; path: string; model?: string; durationMs: number; status: number }> }) {
   const router = express.Router();
@@ -54,7 +54,6 @@ export function createControlPlaneAdminRouter(store: StateStore, sessions: Admin
   router.get("/admin/models", (_req, res) => renderModels(res));
   const creditStore = async () => {
     const state = await store.load();
-    const native = new URL(state.config.upstreamUrl || "http://invalid.local").hostname === "app.lightsprint.ai";
     const accounts = listCreditAccounts({ accounts: state.accounts.filter(a => a.provider === "exa") });
     try {
       const file = join(store.dir, "credit-accounts.json"), info = await lstat(file);
@@ -65,23 +64,8 @@ export function createControlPlaneAdminRouter(store: StateStore, sessions: Admin
     } catch (e: any) { if (e?.code !== "ENOENT") throw Error("credit_registry_unavailable"); }
     return { accounts, ledger: new CreditSnapshotStore(accounts, { directory: store.dir }), reporting: new Map(state.accounts.map(a => [a.id, a.metadata])) };
   };
-  // Reconcile dated operator estimates at initialization and while the service
-  // runs. A due date moves to pending verification only; it never resets
-  // credits or enables an account. Guard against overlapping slow ticks.
-  let renewalCheckInFlight = false;
-  const checkDueRenewals = async () => {
-    if (renewalCheckInFlight) return;
-    renewalCheckInFlight = true;
-    try { const { ledger } = await creditStore(); await ledger.checkScheduledRenewals(); }
-    catch { /* a later tick or admin read retries */ }
-    finally { renewalCheckInFlight = false; }
-  };
-  const renewalCheckTimer = setInterval(checkDueRenewals, 60_000);
-  renewalCheckTimer.unref();
-  void checkDueRenewals();
   router.get("/admin/credits", async (_req, res) => {
     const { accounts, ledger, reporting } = await creditStore();
-    await ledger.checkScheduledRenewals();
     const creditState = await ledger.load();
     const views = summarizeCredits(accounts, creditState);
     const groups = (["lightsprint", "exa"] as const).filter(provider => accounts.some(a => a.provider === provider)).map(provider => {
@@ -111,23 +95,7 @@ export function createControlPlaneAdminRouter(store: StateStore, sessions: Admin
   });
   router.post("/admin/credits/renewal/verify", express.urlencoded({ extended: false, limit: "8kb" }), async (req, res) => {
     if (!sessions.verifyCsrf(res.locals.token, req.body?._csrf)) return res.status(403).json({ error: "csrf_invalid" });
-    try {
-      const accountId = String(req.body.account ?? ""), dueDate = String(req.body.dueDate ?? ""), evidence = String(req.body.evidence ?? "").trim();
-      const { accounts, ledger } = await creditStore();
-      const account = accounts.find(row => row.provider === "lightsprint" && row.accountId === accountId);
-      if (!account || !evidence || evidence.length > 500) throw Error();
-      await ledger.checkScheduledRenewals();
-      const verifiedAt = Date.now(), auditId = `scheduled-renewal-${accountId}-${dueDate}`;
-      await ledger.verifyScheduledRenewal({ accountId, dueDate, verifiedAt, auditId, evidence });
-      await store.update(state => {
-        const target = state.accounts.find(row => row.id === accountId);
-        if (target?.metadata && shouldRestoreQuotaDisabledAccount({ enabled: target.enabled, quotaDisabledBy: target.metadata.quotaDisabledBy })) {
-          target.enabled = true; target.stats.state = "unknown"; target.stats.cooldownUntil = undefined; target.stats.consecutiveFailures = 0;
-          target.metadata.quotaRenewalStatus = "verified"; delete target.metadata.quotaDisabledBy; delete target.metadata.disabledReason;
-        }
-      });
-      return res.redirect(303, res.locals.base + "/admin/credits");
-    } catch { return res.status(400).json({ error: "credit_renewal_verification_rejected" }); }
+    return res.status(410).json({ error: "provider_retired" });
   });
   for (const action of ["add", "rotate", "toggle", "rename", "remove", "revoke", "token"]) router.post("/admin/models/" + action, async (req, res) => {
     try {

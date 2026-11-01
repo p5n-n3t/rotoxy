@@ -64,3 +64,20 @@ adapter; it was not installed and no project material was uploaded. See
 `docs/research/2026-11-01-delta-and-account-orchestration.md` for sources and the
 integration decision. Browser QA remains blocked by Work settings disabling
 local browser use; rendered route and navigation tests supply narrower evidence.
+
+## Verification follow-up
+
+The initial local full Node suite passed 654 tests. Its first CI run passed
+Node 22 but reproduced the background reconciliation timeout on Node 24.
+Investigation found that `WorkspaceReconciler` accepted client IDs using the
+job-ID pattern, which rejects valid opaque OAuth IDs beginning with punctuation.
+The ledger could claim those jobs, but the reconciler would skip them before
+calling sync. The fix uses the shared `safeClientId` validator, while project
+and job validation remain strict. A deterministic regression covers valid
+underscore, hyphen and dot-prefixed clients plus unsafe-ID rejection. No timeout
+was raised and no test was disabled.
+
+The retirement also removes the old renewal timer and rejects the obsolete
+renewal-verification action. Archived schedules remain unchanged rather than
+continuing to transition in the background. Old pool-control requests cannot
+resume the retired provider.

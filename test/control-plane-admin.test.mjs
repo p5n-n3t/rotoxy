@@ -27,9 +27,13 @@ test('active credit page excludes retired provider balances without deleting his
   await store.update(s=>{const a=s.accounts.find(a=>a.id===empty.id);a.metadata={quotaReadingMeaning:'pending-confirmation',quotaRefreshDate:'2026-11-03'};});
   const ledger=new CreditSnapshotStore([empty,unused].map(a=>({provider:'lightsprint',accountId:a.id,label:a.label,unit:'credits'})),{directory:store.dir});
   for(const [a,remaining]of[[empty,0],[unused,10000000]])await ledger.recordBalanceSnapshot({auditId:'fixture-'+a.id,provider:'lightsprint',accountId:a.id,unit:'credits',remaining,observedAt:Date.now(),source:'user-reported',refreshDate:'2026-11-16'});
+  await ledger.scheduleRenewal({provider:'lightsprint',accountId:unused.id,dueDate:'2026-01-01',scheduledAt:Date.now()-1000,auditId:'retired-schedule',source:'user-scheduled-estimate'});
   const built=await buildApp(store);server=built.app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const base='http://127.0.0.1:'+server.address().port;
   const state=await store.load(),sid=built.sessions.create(undefined,adminEpoch(state));
   const response=await fetch(base+'/admin/credits',{headers:{cookie:'t2o_admin='+sid}}),html=await response.text();
-  assert.equal(response.status,200);assert.doesNotMatch(html,/Depleted account|Unused account|LightSprint/);assert.match(html,/Retired provider history is archived/);const preserved=await ledger.load();assert.equal(preserved.snapshots.length,2);
+  assert.equal(response.status,200);assert.doesNotMatch(html,/Depleted account|Unused account|LightSprint/);assert.match(html,/Retired provider history is archived/);const preserved=await ledger.load();assert.equal(preserved.snapshots.length,2);assert.equal(preserved.scheduledRenewals[0].status,'scheduled','retired renewal schedules are no longer processed');
+  const csrf=built.sessions.csrfToken(sid);
+  const retired=await fetch(base+'/admin/credits/renewal/verify',{method:'POST',headers:{cookie:'t2o_admin='+sid,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({_csrf:csrf,account:unused.id,dueDate:'2026-01-01',evidence:'obsolete flow'})});
+  assert.equal(retired.status,410);
  }finally{if(server)await new Promise(r=>server.close(r));if(old.home===undefined)delete process.env.HOME;else process.env.HOME=old.home;if(old.config===undefined)delete process.env.TOKEN2OAUTH_CONFIG_DIR;else process.env.TOKEN2OAUTH_CONFIG_DIR=old.config;await rm(dir,{recursive:true,force:true});}
 });

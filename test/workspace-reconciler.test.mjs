@@ -11,6 +11,21 @@ import { WorkspaceReconciler } from "../dist/workspace-reconciler.js";
 const supervisor = new URL("../supervisor/", import.meta.url).pathname;
 const binding = (jobId, clientId = "client-a") => ({ projectId: "project-a", jobId, clientId });
 
+test("reconciler preserves valid opaque OAuth client IDs instead of discarding their leased jobs", async () => {
+  const candidates = ['_client', '-client', '.client', ':client'].map((clientId, index) => binding('job-' + index, clientId));
+  const synced = [], settled = [];
+  const reconciler = new WorkspaceReconciler({
+    claim: async () => candidates.slice(0,3),
+    sync: async row => { synced.push(row); return { dispatch:{state:'completed'}, projectionPending:false, resultsUnavailable:false }; },
+    settle: async row => { settled.push(row); },
+  });
+  assert.deepEqual(await reconciler.runOnce(), { claimed:3, settled:3, errors:0, skipped:false });
+  assert.deepEqual(synced,candidates.slice(0,3));
+  assert.deepEqual(settled,synced);
+  const denied = new WorkspaceReconciler({ claim:async()=>[binding('valid','../invalid'),{...binding('valid','_client'),projectId:'../project'}],sync:async()=>assert.fail('unsafe binding reached sync'),settle:async()=>assert.fail('unsafe binding settled') });
+  assert.deepEqual(await denied.runOnce(),{claimed:0,settled:0,errors:2,skipped:false});
+});
+
 test("SQLite reconciliation lease is scoped, durable, and only settles terminal complete projections", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "rotoxy-workspace-reconcile-"));
   const oldHome = process.env.HOME;

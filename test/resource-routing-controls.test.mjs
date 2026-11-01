@@ -123,6 +123,7 @@ test("routing editor enforces admin CSRF and rules alter real Cloudflare/Ollama 
   const policyStore=new ResourceRoutingRulesStore(store);
   const controls=(fields)=>fetch(base+"/admin/routing/controls",{method:"POST",redirect:"manual",headers:{cookie,"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({_csrf:csrf,...fields})});
   const revision=JSON.stringify(await policyStore.read());
+  assert.equal((await controls({pool:"lightsprint",enabled:"true",expected:revision})).status,400,"retired pools cannot be resumed through old controls");
   assert.equal((await controls({pool:"cloudflare",enabled:"false",expected:revision,_csrf:""})).status,403);
   assert.equal((await controls({pool:"cloudflare",enabled:"false",expected:revision})).status,303);
   assert.equal((await controls({pool:"ollama",enabled:"false",expected:revision})).status,409,"stale form cannot overwrite pool state");
