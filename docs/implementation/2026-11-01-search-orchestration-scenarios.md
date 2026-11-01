@@ -106,3 +106,28 @@ ceiling; this direct CLI result does not prove a ROTOXY durable Claude executor.
 The operator changed native ChatGPT accounts during this work. Codex dispatch
 remains disabled until a supported origin binding protects the current account.
 No permanent primary account is assumed.
+
+## Live Cloudflare selection repair and failed first mixed job
+
+All eight configured Cloudflare credentials passed real read-only catalog
+checks. Their old selection `@cf/meta/llama-3.1-8b-instruct` was absent from
+those catalogs; `@cf/meta/llama-3.1-8b-instruct-fp8` was present and is
+[officially documented](https://developers.cloudflare.com/workers-ai/models/llama-3.1-8b-instruct-fp8/).
+The owner-authorized repair updated only that exact stale singleton selection,
+using the existing encrypted credential store. Tokens were unchanged. Backup:
+`/home/jq/.config/rotoxy/backups/cloudflare-model-repair-20261101/`.
+No inference was used to test catalog availability.
+
+Mixed job `rx-mixed-20261101-a` was submitted once after preflight blockers
+were resolved. Oracle completed. Cloudflare returned explanatory text, consumed
+its 64-token output cap and omitted the required final marker. The task was
+blocked, and its dependent remained queued. It was not automatically replayed.
+The isolated runtime is retained at
+`/tmp/rotoxy-inference-canary-runtime-Gzl7dc`; the report is
+`/tmp/rotoxy-mixed-canary-report.json`. This job is a failed acceptance test,
+not evidence of finished multi-provider execution. Its account pins were
+verified from the durable database; the undispatched join has no selected account.
+
+Pre-submission harness failures (a variable shadow and missing process-level
+Oracle credential-file environment) launched no inference. They were fixed
+before any job was accepted. A separate follow-up job must retain its own ID.
