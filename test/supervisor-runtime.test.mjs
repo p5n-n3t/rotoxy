@@ -38,6 +38,73 @@ test("worker concurrency adds eligible inference capacity within both ceilings",
   assert.equal(boundedWorkerConcurrency(40, 20, [20]), 32, "the hard process ceiling still applies");
 });
 
+test("Oracle inference capacity and host set exclude nodes with an active queue assignment", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-oracle-host-capacity-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tokenPath = join(dir, "oracle-token");
+  await writeFile(tokenPath, "temporary-token-1234567890\n", { mode: 0o600 });
+  const priorToken = process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+  process.env.ROTOXY_ORACLE_API_TOKEN_FILE = tokenPath;
+  const now = Date.now() / 1000;
+  const inventory = { cacheUpdatedAt: now, maintenance: { paused: false }, hosts: [
+    { id: "ora3", enabled: true, hostStatus: "healthy", observedAt: now, allowedModels: ["qwen3.5:2b"], models: [{ name: "qwen3.5:2b", size: 100 }], load: { running: 0, assigned: 1 } },
+    { id: "ora8", enabled: true, hostStatus: "healthy", observedAt: now, allowedModels: ["qwen3.5:2b"], models: [{ name: "qwen3.5:2b", size: 100 }], load: { running: 1, assigned: 2 } },
+  ] };
+  const boundConfig = structuredClone(config);
+  boundConfig.projects = [{ ...boundConfig.projects[0], accountIds: ["oracle-canary"],
+    inferenceBindings: [{ accountId: "oracle-canary", provider: "oracle", maxOutputTokens: 128 }] }];
+  const runtime = new SupervisorRuntime(boundConfig, { configDir: dir, routingConfigDir: dir, store,
+    oracleInventoryReader: async () => inventory });
+  runtime.started = true;
+  try {
+    const snapshot = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
+    assert.deepEqual(snapshot.inferenceResources.map(row => ({ accountId: row.accountId, enabled: row.enabled,
+      capacity: row.capacity, eligibleHostCount: row.eligibleHostCount })), [
+      { accountId: "oracle-canary", enabled: true, capacity: 1, eligibleHostCount: 1 },
+    ]);
+  } finally {
+    await runtime.close();
+    if (priorToken === undefined) delete process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+    else process.env.ROTOXY_ORACLE_API_TOKEN_FILE = priorToken;
+  }
+});
+
+test("Oracle capability refresh evaluates freshness against the refreshed inventory clock", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-oracle-inventory-refresh-"));
+  await chmod(dir, 0o700);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tokenPath = join(dir, "oracle-token");
+  await writeFile(tokenPath, "temporary-token-1234567890\n", { mode: 0o600 });
+  const priorToken = process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+  process.env.ROTOXY_ORACLE_API_TOKEN_FILE = tokenPath;
+  const boundConfig = structuredClone(config);
+  boundConfig.projects = [{ ...boundConfig.projects[0], accountIds: ["oracle-canary"],
+    inferenceBindings: [{ accountId: "oracle-canary", provider: "oracle", maxOutputTokens: 128 }] }];
+  let reads = 0;
+  const runtime = new SupervisorRuntime(boundConfig, { configDir: dir, routingConfigDir: dir, store,
+    oracleInventoryReader: async () => {
+      reads++;
+      if (reads === 1) return { cacheRevision: "b".repeat(24), cacheUpdatedAt: Date.now() / 1000 - 400, hosts: [] };
+      const updatedAt = Date.now() / 1000;
+      return { cacheRevision: "a".repeat(24), cacheUpdatedAt: updatedAt, maintenance: { paused: false }, hosts: [
+        { id: "ora3", enabled: true, hostStatus: "healthy", observedAt: updatedAt, allowedModels: ["qwen3.5:2b"],
+          models: [{ name: "qwen3.5:2b", size: 100 }], load: { running: 0, assigned: 0 } },
+      ] };
+    } });
+  runtime.started = true;
+  try {
+    const snapshot = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
+    assert.equal(reads, 2);
+    assert.equal(snapshot.inferenceResources[0].enabled, true);
+    assert.equal(snapshot.inferenceResources[0].capacity, 1);
+  } finally {
+    await runtime.close();
+    if (priorToken === undefined) delete process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+    else process.env.ROTOXY_ORACLE_API_TOKEN_FILE = priorToken;
+  }
+});
+
 test("expired transient cooldown restores eligibility without clearing auth or quota blocks", async t=>{
   const dir=await mkdtemp(join(tmpdir(),"rx-expired-cooldown-"));
   t.after(()=>rm(dir,{recursive:true,force:true}));
@@ -55,6 +122,7 @@ test("expired transient cooldown restores eligibility without clearing auth or q
   ]){
     state.accounts[0].stats=stats;
     const snapshot=await runtime.callTool("job_workers",{projectId:"project-a"},caller);
+    assert.ok(Array.isArray(snapshot.inferenceResources), "inference capability view is present even when empty");
     assert.equal(snapshot.workers.find(w=>w.accountId==="acct-a").eligible,eligible,stats.state);
   }
 });

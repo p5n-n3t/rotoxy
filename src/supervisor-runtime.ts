@@ -75,6 +75,8 @@ export interface SupervisorRuntimeOptions {
   oracleConfigPath?: string;
   oracleDbPath?: string;
   oracleCachePath?: string;
+  /** Read-only routing rules directory; may differ from the isolated bridge directory. */
+  routingConfigDir?: string;
   store: StateStore;
   bridgeOptions?: Partial<SupervisorBridgeOptions>;
   /** Injection seam for deterministic tests; production defaults to the pinned LightSprint adapter. */
@@ -455,9 +457,10 @@ export class SupervisorRuntime implements SupervisorBackend {
   }
 
   private async inferenceResources(force = false): Promise<Map<string, InferenceResourceSnapshot>> {
-    const now = Date.now();
+    let now = Date.now();
     if (!force && this.inferenceSnapshotCache && now - this.inferenceSnapshotCache.at < 5_000) return this.inferenceSnapshotCache.value;
-    const [credentials, rules] = await Promise.all([this.cloudflareCredentials?.listCredentials() ?? [], new ResourceRoutingRulesStore(this.options.store, this.options.configDir).read()]);
+    const rulesDir = this.options.routingConfigDir ?? this.options.configDir ?? this.options.store.dir;
+    const [credentials, rules] = await Promise.all([this.cloudflareCredentials?.listCredentials() ?? [], new ResourceRoutingRulesStore(this.options.store, rulesDir).read()]);
     const permitted = new Set(this.config.projects.flatMap(project => project.accountIds));
     const found = new Map<string, InferenceResourceSnapshot>();
     for (const credential of credentials) {
@@ -497,6 +500,9 @@ export class SupervisorRuntime implements SupervisorBackend {
           try {
             raw = await this.readOracleInventory({ action: "refresh", expectedCacheRevision: inventory.cacheRevision });
             inventory = object(raw) ? raw : undefined;
+            // A successful metadata refresh can publish timestamps later than
+            // the initial snapshot read. Rebase freshness checks after I/O.
+            now = Date.now();
             cacheAt = inventory && typeof inventory.cacheUpdatedAt === "number" ? inventory.cacheUpdatedAt : undefined;
             fresh = cacheAt !== undefined && now / 1000 >= cacheAt && now / 1000 - cacheAt <= 300;
           } catch { /* stale inventory remains ineligible; next ordinary refresh is throttled */ }
@@ -504,7 +510,9 @@ export class SupervisorRuntime implements SupervisorBackend {
         const inventoryHosts = Array.isArray(inventory?.hosts) ? inventory.hosts : [];
         const maintenancePaused = object(inventory?.maintenance) && inventory?.maintenance.paused === true;
         const healthyHosts = fresh && !maintenancePaused ? inventoryHosts.filter((host: unknown) => object(host) && host.enabled === true && host.hostStatus === "healthy" &&
-          typeof host.observedAt === "number" && now / 1000 >= host.observedAt && now / 1000 - host.observedAt <= 300 && Array.isArray(host.allowedModels) && Array.isArray(host.models)) as Array<Record<string, unknown>> : [];
+          typeof host.observedAt === "number" && now / 1000 >= host.observedAt && now / 1000 - host.observedAt <= 300 &&
+          object(host.load) && Number.isSafeInteger(host.load.running) && host.load.running === 0 &&
+          Array.isArray(host.allowedModels) && Array.isArray(host.models)) as Array<Record<string, unknown>> : [];
         const installedAllowed = new Set<string>();
         for (const host of healthyHosts) {
           const allowed = new Set(host.allowedModels as string[]);
@@ -521,10 +529,17 @@ export class SupervisorRuntime implements SupervisorBackend {
         }
         for (const binding of oracleBindings) {
           if (found.has(binding.accountId)) continue;
-          found.set(binding.accountId, { provider: "oracle", enabled: tokenAvailable && healthyHosts.length > 0,
-            authorized: tokenAvailable, health: healthyHosts.length > 0 ? "healthy" : "unknown",
-            models: [...installedAllowed].sort(), maxOutputTokens: binding.maxOutputTokens,
-            capacity: Math.min(5, healthyHosts.length), oracleHosts: healthyHosts.map(host => String(host.id)).filter(id => /^ora(?:1|3|5|6|7|8)$/.test(id)) });
+          const rule = rules.resources[binding.accountId];
+          const hostsForModels = healthyHosts.filter(host => (host.models as Array<Record<string, unknown>>).some(model =>
+            typeof model.name === "string" && ORACLE_SMALL_MODELS.has(model.name) &&
+            (host.allowedModels as string[]).includes(model.name) && routingRuleAllowsModel(rule, `oracle/${model.name}`)));
+          const allowedModels = [...installedAllowed].filter(model => routingRuleAllowsModel(rule, model)).sort();
+          const enabled = tokenAvailable && hostsForModels.length > 0 && rule?.enabled !== false && rules.pools?.oracle?.enabled !== false;
+          found.set(binding.accountId, { provider: "oracle", enabled,
+            authorized: tokenAvailable, health: hostsForModels.length > 0 ? "healthy" : "unknown",
+            models: allowedModels, maxOutputTokens: binding.maxOutputTokens,
+            capacity: Math.min(5, boundedAccountCapacity(rule?.capacity, 5), hostsForModels.length),
+            oracleHosts: hostsForModels.map(host => String(host.id)).filter(id => /^ora(?:1|3|5|6|7|8)$/.test(id)) });
         }
       } catch {
         for (const binding of oracleBindings) if (!found.has(binding.accountId)) found.set(binding.accountId, {
@@ -538,7 +553,8 @@ export class SupervisorRuntime implements SupervisorBackend {
   }
 
   private async syncDispatchPolicy():Promise<void>{
-    const [state,rules,inference]=await Promise.all([this.options.store.load(),new ResourceRoutingRulesStore(this.options.store,this.options.configDir).read(),this.inferenceResources(true)]);
+    const rulesDir=this.options.routingConfigDir??this.options.configDir??this.options.store.dir;
+    const [state,rules,inference]=await Promise.all([this.options.store.load(),new ResourceRoutingRulesStore(this.options.store,rulesDir).read(),this.inferenceResources(true)]);
     const payloads=[...new Set(this.config.projects.flatMap(p=>p.accountIds))].map(accountId=>{
       const account=state.accounts.find(a=>a.id===accountId);
       const inferenceResource=inference.get(accountId);
@@ -704,7 +720,8 @@ export class SupervisorRuntime implements SupervisorBackend {
         },
         isAccountEligible: async (accountId) => {
           const latest = await this.options.store.load();
-          const rules=await new ResourceRoutingRulesStore(this.options.store,this.options.configDir).read();
+          const rulesDir=this.options.routingConfigDir??this.options.configDir??this.options.store.dir;
+          const rules=await new ResourceRoutingRulesStore(this.options.store,rulesDir).read();
           if(rules.pools?.lightsprint?.enabled===false||rules.resources[accountId]?.enabled===false)return false;
           const signal = accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl));
           return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
@@ -874,6 +891,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     }
     if (name === "job_workers") {
       const state = await this.options.store.load();
+      const inference = await this.inferenceResources(true);
       const nativeTarget = nativeLightSprintTarget(state.config.upstreamUrl);
       const workers = project.registeredSessions.map((session) => {
         const signal = accountSignal(state.accounts.find((row) => row.id === session.accountId), nativeTarget);
@@ -897,7 +915,22 @@ export class SupervisorRuntime implements SupervisorBackend {
           ...(freshBinding ? { freshProvisioning: { workspaceId: freshBinding.workspaceId, stackId: freshBinding.stackId, provider: freshBinding.provider },
             freshProvisioningBindings: freshBindings.map(({ workspaceId, stackId, provider }) => ({ workspaceId, stackId, provider })) } : {}) };
       });
-      return boundedJson({ projectId: project.projectId, accounts, workers, maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
+      // Inference accounts are a separate capability view: these IDs are
+      // project-authorized bindings, not entries in the legacy provider pool.
+      // Quota stays unknown unless a provider supplies authoritative usage.
+      const inferenceResources = project.accountIds.flatMap((accountId) => {
+        const resource = inference.get(accountId);
+        if (!resource) return [];
+        return [{ accountId, provider: resource.provider, enabled: resource.enabled,
+          authorized: resource.authorized, health: resource.health, quota: "unknown",
+          models: resource.models, maxOutputTokens: resource.maxOutputTokens,
+          capacity: resource.capacity, provenance: resource.provider === "oracle"
+            ? "fresh_enabled_host_inventory_and_private_api_credential"
+            : "encrypted_credential_allowlist_and_live_model_catalog",
+          ...(resource.provider === "oracle" ? { eligibleHostCount: resource.oracleHosts?.length ?? 0 } : {}) }];
+      });
+      return boundedJson({ projectId: project.projectId, accounts, workers, inferenceResources,
+        maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
     }
     if (name === "job_inbox") {
       const after = (args.after ?? "0") as string;
