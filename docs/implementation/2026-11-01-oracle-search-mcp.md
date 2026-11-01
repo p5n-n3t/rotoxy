@@ -23,6 +23,8 @@ Both REST and MCP requests use the same API Bearer token and per-token rate limi
 
 The fixed source inventory now includes ora1 (`100.65.151.42`) for `deepseek-r1:1.5b` and `qwen3.5:2b`; ora3, ora5, ora6, ora7, and ora8 retain their configured model sets. The bounded Oracle chat route reserves one configured host per request, with one concurrent inference per host in this API process. This is source configuration for six eligible hosts, not proof of six simultaneous requests across API processes or other Oracle clients; shared leases are not implemented here.
 
+The normal-size defaults on ora1 are `qwen3.5:2b` and `deepseek-r1:1.5b`. `qwen2.5-coder:3b` remains in the explicit model allowlist on its existing hosts; its reported actual parameter size is 3.086B, so it is above the normal 3B ceiling and is only run when explicitly named by the caller. The model tool has no implicit model selection or automatic completion loop.
+
 The `gemma4:e2b` catalog entry remains limited to ora8. Direct read-only `/api/tags` metadata from ora8 reported `gemma4:e2b`, 4,587,156,505 bytes, 4.6B parameters, GGUF/Q4_K_M. This fits the stated 5B ceiling. `gemma4:e4b` is excluded (inventory reported 7.518B). ora1 does not receive either Gemma model.
 
 ## Verification
