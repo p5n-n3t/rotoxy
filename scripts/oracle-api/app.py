@@ -206,11 +206,16 @@ async def _mcp_call_tool(name: Any, arguments: Any, kind: str, token: str) -> di
             response = await extract(body, token)
             value = json.loads(response.body)
         else:
+            if set(arguments) - {"model", "prompt", "max_tokens"}:
+                raise ValueError("unsupported_arguments")
             prompt = arguments.get("prompt")
+            if not isinstance(prompt, str) or not prompt:
+                raise ValueError("prompt_required")
             body = ChatRequest.model_validate({"model": arguments.get("model"), "messages": [{"role": "user", "content": prompt}], "max_tokens": arguments.get("max_tokens", 256)})
             response = await chat(body, token)
             completion = json.loads(response.body)
-            value = {"model": completion["model"], "host": response.headers.get("x-oracle-host", "unknown"), "text": completion["choices"][0]["message"]["content"]}
+            choice = completion["choices"][0]
+            value = {"model": completion["model"], "host": response.headers.get("x-oracle-host", "unknown"), "text": choice["message"]["content"], "finish_reason": choice.get("finish_reason"), "usage": completion.get("usage")}
         return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}], "isError": False}
     except HTTPException as exc:
         return {"content": [{"type": "text", "text": str(exc.detail)}], "isError": True}
@@ -221,13 +226,21 @@ async def _mcp_call_tool(name: Any, arguments: Any, kind: str, token: str) -> di
 async def _mcp_dispatch(payload: Any, kind: str, token: str) -> tuple[Any, bool]:
     if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0" or not isinstance(payload.get("method"), str):
         return _mcp_error(payload.get("id") if isinstance(payload, dict) else None, -32600, "Invalid Request"), False
+    if "id" in payload and (isinstance(payload["id"], bool) or not isinstance(payload["id"], (str, int))):
+        return _mcp_error(None, -32600, "Invalid Request"), False
+    if "params" in payload and not isinstance(payload["params"], dict):
+        return _mcp_error(payload.get("id"), -32600, "Invalid Request"), False
     method = payload["method"]
-    params = payload.get("params") or {}
+    params = payload.get("params", {})
     request_id = payload.get("id")
     notification = "id" not in payload
     if method == "notifications/initialized":
+        if not notification:
+            return _mcp_error(request_id, -32600, "Invalid Request"), False
         return None, True
     if method.startswith("notifications/"):
+        if not notification:
+            return _mcp_error(request_id, -32600, "Invalid Request"), False
         return None, True
     if notification:
         return _mcp_error(None, -32600, "Invalid Request"), False
@@ -256,11 +269,28 @@ async def _mcp_dispatch(payload: Any, kind: str, token: str) -> tuple[Any, bool]
     return _mcp_error(request_id, -32601, "Method not found"), False
 
 
-async def _mcp_endpoint(request: Request, kind: str, token: str) -> Response:
+def _mcp_origin_error(request: Request) -> JSONResponse | None:
     # This service is a machine-to-machine API. Reject browser Origins rather than
     # reflecting arbitrary origins through the authenticated MCP transport.
     if request.headers.get("origin"):
         return JSONResponse({"detail": "origin_not_allowed"}, status_code=403)
+    return None
+
+
+def _mcp_protocol_error(request: Request) -> JSONResponse | None:
+    version = request.headers.get("mcp-protocol-version")
+    if version is not None and version not in _MCP_PROTOCOL_VERSIONS:
+        return JSONResponse({"detail": "unsupported_protocol_version"}, status_code=400)
+    return None
+
+
+async def _mcp_endpoint(request: Request, kind: str, token: str) -> Response:
+    origin_error = _mcp_origin_error(request)
+    if origin_error is not None:
+        return origin_error
+    version_error = _mcp_protocol_error(request)
+    if version_error is not None:
+        return version_error
     accept = request.headers.get("accept", "")
     if "application/json" not in accept or "text/event-stream" not in accept:
         return JSONResponse({"detail": "invalid_accept"}, status_code=406)
@@ -271,13 +301,7 @@ async def _mcp_endpoint(request: Request, kind: str, token: str) -> Response:
     except Exception:
         return JSONResponse(_mcp_error(None, -32700, "Parse error"), status_code=400)
     if isinstance(payload, list):
-        if not payload or len(payload) > 8:
-            return JSONResponse(_mcp_error(None, -32600, "Invalid Request"), status_code=400)
-        dispatched = [await _mcp_dispatch(item, kind, token) for item in payload]
-        responses = [item for item, is_notification in dispatched if item is not None and not is_notification]
-        if not responses:
-            return Response(status_code=202)
-        return JSONResponse(responses)
+        return JSONResponse(_mcp_error(None, -32600, "Invalid Request"), status_code=400)
     result, is_notification = await _mcp_dispatch(payload, kind, token)
     if is_notification and result is None:
         return Response(status_code=202)
@@ -290,7 +314,13 @@ async def search_mcp(request: Request, token: str = Depends(_require_auth)) -> R
 
 
 @app.get("/search/mcp")
-async def search_mcp_get(_token: str = Depends(_require_auth)) -> Response:
+async def search_mcp_get(request: Request, _token: str = Depends(_require_auth)) -> Response:
+    origin_error = _mcp_origin_error(request)
+    if origin_error is not None:
+        return origin_error
+    version_error = _mcp_protocol_error(request)
+    if version_error is not None:
+        return version_error
     return Response(status_code=405, headers={"Allow": "POST"})
 
 
@@ -300,7 +330,13 @@ async def models_mcp(request: Request, token: str = Depends(_require_auth)) -> R
 
 
 @app.get("/models/mcp")
-async def models_mcp_get(_token: str = Depends(_require_auth)) -> Response:
+async def models_mcp_get(request: Request, _token: str = Depends(_require_auth)) -> Response:
+    origin_error = _mcp_origin_error(request)
+    if origin_error is not None:
+        return origin_error
+    version_error = _mcp_protocol_error(request)
+    if version_error is not None:
+        return version_error
     return Response(status_code=405, headers={"Allow": "POST"})
 
 
