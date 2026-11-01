@@ -79,3 +79,30 @@ The ordinary-code rate-window wait consumed no model inference. The report at
 worker attribution, model usage and timings. This is a real bounded pipeline,
 not proof of a durable orchestration job or hours-long execution. Marker success
 is not a general intelligence benchmark or independent review of answer quality.
+
+## OAuth release verification
+
+Gateway release `1c2c7e9` is deployed after CI run `41332756878` passed.
+The public search-only endpoint returns 401 with its dedicated protected-resource
+metadata URL; metadata advertises only `mcp`, `web:search`, and `web:extract`.
+An isolated real PKCE client completed registration, consent and token exchange,
+discovered `search`/`fetch`, and made two actual Oracle calls: Python web results
+and Example Domain retrieval attributed to ora1. Production OAuth records were
+not changed. This is protocol execution proof, not a fresh ChatGPT UI connection
+on the operator's newly switched account.
+
+Release/config rollback backup:
+`/home/jq/.config/rotoxy/backups/inference-release-20261101T174349Z`.
+The shared Fleet configuration now authorizes eight existing Cloudflare
+credential IDs and one bounded Oracle inference binding. Existing manual pool
+policies remain authoritative. No credentials were recreated or copied.
+
+The direct official Claude Code Bedrock/Haiku canary returned its exact marker
+and reported $0.000132. A later bounded implementation assignment exceeded its
+requested $0.05 CLI budget, reporting $0.0570727, and produced no verified edits.
+It was not retried. CLI budget controls are not assumed to be an exact billing
+ceiling; this direct CLI result does not prove a ROTOXY durable Claude executor.
+
+The operator changed native ChatGPT accounts during this work. Codex dispatch
+remains disabled until a supported origin binding protects the current account.
+No permanent primary account is assumed.
