@@ -22,11 +22,12 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   await writeFile(tokenFile,'synthetic-private-oracle-key',{mode:0o600});
   const calls=[];
   let reject=false;
+  let selectedHost='ora8';
   const app=express();
   app.use(createOracleModelApi(store,{tokenFile,fetch:async(url,init)=>{
     calls.push({url,init});
     if(reject) throw Error('synthetic-private-oracle-key must not leak');
-    return Response.json(init.method==='GET'?{object:'list',data:[{id:'qwen3.5:2b'}]}:{model:'qwen3.5:2b',choices:[{message:{content:'OK'}}]},{headers:{'x-oracle-host':'ora8'}});
+    return Response.json(init.method==='GET'?{object:'list',data:[{id:'qwen3.5:2b'}]}:{model:'qwen3.5:2b',choices:[{message:{content:'OK'}}]},{headers:{'x-oracle-host':selectedHost}});
   }}));
   const server=createServer(app);
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -54,7 +55,12 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   assert.equal(failed.status,502);
   assert.doesNotMatch(await failed.text(),/synthetic-private/);
   assert.equal(calls.length,3,'ambiguous upstream failures are not replayed');
+  reject=false;
+  selectedHost='ora1';
+  const restoredHost=await fetch(base+'/chat/completions',{method:'POST',headers,body:JSON.stringify(body)});
+  assert.equal(restoredHost.headers.get('x-oracle-host'),'ora1','the restored small-model host retains execution attribution');
+  await restoredHost.json();
   await chmod(tokenFile,0o644);
   assert.equal((await fetch(base+'/models',{headers})).status,503);
-  assert.equal(calls.length,3);
+  assert.equal(calls.length,4);
 });

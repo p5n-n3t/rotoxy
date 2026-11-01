@@ -73,7 +73,7 @@ export function createOracleModelApi(store: StateStore, options: Options = {}) {
         if (typeof data?.model !== "string" || !Array.isArray(data.choices)) return fail(502, "oracle_response_invalid");
         data.model = "oracle/" + data.model;
         const host = response.headers.get("x-oracle-host");
-        if (host && /^ora(?:3|5|6|7|8)$/.test(host)) res.setHeader("X-Oracle-Host", host);
+        if (host && /^ora(?:1|3|5|6|7|8)$/.test(host)) res.setHeader("X-Oracle-Host", host);
       }
       res.setHeader("X-Rotoxy-Provider-Path", "oracle");
       return res.json(data);

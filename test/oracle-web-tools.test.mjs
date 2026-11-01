@@ -1,0 +1,43 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,writeFile,chmod,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {loadWebToolsConfig} from '../dist/web-tools-config.js';
+
+test('Oracle web tools preserve permission boundaries, fixed origin and private credentials',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'oracle-web-'));
+  const old=process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+  t.after(async()=>{if(old===undefined)delete process.env.ROTOXY_ORACLE_API_TOKEN_FILE;else process.env.ROTOXY_ORACLE_API_TOKEN_FILE=old;await rm(dir,{recursive:true,force:true});});
+  const tokenFile=join(dir,'key');
+  await writeFile(tokenFile,'synthetic-oracle-private-key',{mode:0o600});
+  process.env.ROTOXY_ORACLE_API_TOKEN_FILE=tokenFile;
+  const config=join(dir,'web.json');
+  await writeFile(config,JSON.stringify({providers:{oracle:{enabled:true,features:{search:'supported',extract:'supported'}}},permissions:{clients:{allowed:['web_search','web_extract']}}}),{mode:0o600});
+  const calls=[];
+  let status=200;
+  const service=await loadWebToolsConfig(config,{load:async()=>({accounts:[]}),revealToken:()=>{throw Error('must not borrow another account credential');}},{fetch:async(url,init)=>{
+    calls.push({url,init});
+    return Response.json(url.endsWith('/search')?{results:[{url:'https://example.com',content:'sample'}]}:{text:'sample'},{status});
+  }});
+  assert.deepEqual(await service.definitionsFor('other',new Set(['web:search'])),[]);
+  assert.deepEqual(await service.definitionsFor('allowed',new Set()),[]);
+  const definitions=await service.definitionsFor('allowed',new Set(['web:search']));
+  assert.deepEqual(definitions[0].inputSchema.properties.provider.enum,['oracle']);
+  await assert.rejects(service.call('web_search',{provider:'oracle',query:'test'},'other'),e=>e.code==='tool_not_allowed');
+  await assert.rejects(service.call('web_search',{provider:'oracle',query:'test',providerOptions:{url:'http://evil.test'}},'allowed'),e=>e.code==='invalid_arguments');
+  assert.equal(calls.length,0);
+  const search=await service.call('web_search',{provider:'oracle',query:'test',maxResults:3},'allowed');
+  assert.equal(search.provider,'oracle');
+  assert.equal(search.providerUsage,null);
+  assert.equal(calls[0].url,'http://100.114.191.111:8877/search');
+  assert.equal(calls[0].init.headers.authorization,'Bearer synthetic-oracle-private-key');
+  assert.deepEqual(JSON.parse(calls[0].init.body),{query:'test',limit:3});
+  assert.equal((await service.call('web_extract',{provider:'oracle',url:'https://example.com'},'allowed')).text,'sample');
+  status=503;
+  await assert.rejects(service.call('web_search',{provider:'oracle',query:'test'},'allowed'),e=>e.code==='oracle_upstream_rejected');
+  assert.equal(calls.length,3,'no automatic retry or paid fallback');
+  await chmod(tokenFile,0o644);
+  await assert.rejects(service.call('web_search',{provider:'oracle',query:'test'},'allowed'));
+  assert.equal(calls.length,3);
+});

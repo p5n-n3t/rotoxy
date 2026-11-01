@@ -19,7 +19,7 @@ import {
 } from "./providers/tavily.js";
 
 export type WebToolName = "web_search" | "web_extract";
-export type WebProviderName = WebProvider | "tavily";
+export type WebProviderName = WebProvider | "tavily" | "oracle";
 export type WebFeature = "search" | "extract";
 export type FeatureCapability = "supported" | "unsupported" | "unknown";
 export type WebToolScope = "web:search" | "web:extract";
@@ -30,7 +30,7 @@ export interface WebToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
-const providerNames: WebProviderName[] = ["exa", "firecrawl", "tavily"];
+const providerNames: WebProviderName[] = ["exa", "firecrawl", "tavily", "oracle"];
 const providerEnum = [...providerNames];
 const providerOptions = {
   type: "object",
@@ -41,7 +41,7 @@ const providerOptions = {
 export const WEB_TOOL_DEFINITIONS: WebToolDefinition[] = [
   {
     name: "web_search",
-    description: "Run one web search with the explicitly selected Exa, Firecrawl, or Tavily provider. Provider-specific options are validated by that adapter; no fallback provider is tried.",
+    description: "Run one web search with the explicitly selected Exa, Firecrawl, Tavily, or self-hosted Oracle provider. Oracle accepts 2–200 characters and at most 10 results. No fallback provider is tried.",
     inputSchema: {
       type: "object",
       properties: {
@@ -56,7 +56,7 @@ export const WEB_TOOL_DEFINITIONS: WebToolDefinition[] = [
   },
   {
     name: "web_extract",
-    description: "Extract one supplied HTTP(S) URL with the explicitly selected Exa, Firecrawl, or Tavily provider. Provider-specific options are validated by that adapter; no fallback provider is tried.",
+    description: "Extract one supplied HTTP(S) URL with the explicitly selected Exa, Firecrawl, Tavily, or self-hosted Oracle provider. Oracle performs bounded plain-text extraction without JavaScript. No fallback provider is tried.",
     inputSchema: {
       type: "object",
       properties: {
@@ -256,7 +256,30 @@ export class WebTools {
     };
     try {
       let response: unknown;
-      if (provider === "exa") {
+      if (provider === "oracle") {
+        if (args.providerOptions !== undefined && Object.keys(args.providerOptions as object).length) throw new WebToolError("invalid_arguments");
+        if (operation === "search" && (typeof args.query !== "string" || args.query.trim().length < 2 || args.query.length > 200 || (args.maxResults !== undefined && (!Number.isInteger(args.maxResults) || (args.maxResults as number) < 1 || (args.maxResults as number) > 10)))) throw new WebToolError("invalid_arguments");
+        if (operation === "extract" && (typeof args.url !== "string" || !args.url.trim() || args.url.length > 2_048)) throw new WebToolError("invalid_arguments");
+        const token = await resolveForCaller("oracle");
+        const result = await this.fetcher("http://100.114.191.111:8877/" + operation, {
+          method: "POST", redirect: "error", signal: AbortSignal.timeout(30_000),
+          headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+          body: JSON.stringify(operation === "search" ? { query: args.query, limit: args.maxResults ?? 5 } : { url: args.url }),
+        });
+        if (!result.ok) { await result.body?.cancel(); throw new WebToolError("oracle_upstream_rejected"); }
+        const reader = result.body?.getReader();
+        if (!reader) throw new WebToolError("invalid_provider_response");
+        const chunks: Uint8Array[] = []; let size = 0;
+        try { while (true) {
+          const part = await reader.read(); if (part.done) break;
+          size += part.value.length;
+          if (size > 128 * 1024) { await reader.cancel(); throw new WebToolError("invalid_provider_response"); }
+          chunks.push(part.value);
+        } } finally { reader.releaseLock(); }
+        const data: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (!isRecord(data) || (operation === "search" ? !Array.isArray(data.results) : typeof data.text !== "string")) throw new WebToolError("invalid_provider_response");
+        response = { ...data, provider: "oracle", usage: null };
+      } else if (provider === "exa") {
         const adapter = createExaWebInformationAdapter({ fetch: this.fetcher, resolveCredential: resolveForCaller });
         response = operation === "search"
           ? await adapter.search({ query: args.query as string, maxResults: args.maxResults as number | undefined, providerOptions: args.providerOptions as ExaSearchOptions | undefined })

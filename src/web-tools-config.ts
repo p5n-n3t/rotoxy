@@ -11,7 +11,7 @@ type PrivateConfig = {
     authenticatedClients?: WebToolName[];
   };
 };
-const providers: WebProviderName[] = ["exa", "firecrawl", "tavily"];
+const providers: WebProviderName[] = ["exa", "firecrawl", "tavily", "oracle"];
 const tools: WebToolName[] = ["web_search", "web_extract"];
 const features: WebFeature[] = ["search", "extract"];
 
@@ -23,7 +23,7 @@ function validate(value: unknown): PrivateConfig {
   for (const [name, rawBinding] of Object.entries(raw.providers)) {
     const binding = rawBinding as Record<string, any>;
     if (!providers.includes(name as WebProviderName) || !binding || typeof binding !== "object" || Array.isArray(binding) || typeof binding.enabled !== "boolean" || Object.keys(binding).some((key) => !["enabled", "accountId", "features"].includes(key))) throw new Error("Invalid web tools provider binding.");
-    if (binding.enabled && (typeof binding.accountId !== "string" || !binding.accountId.trim())) throw new Error("Enabled web provider requires an existing account id.");
+    if (name !== "oracle" && binding.enabled && (typeof binding.accountId !== "string" || !binding.accountId.trim())) throw new Error("Enabled web provider requires an existing account id.");
     const selected: Partial<Record<WebFeature, FeatureCapability>> = {};
     if (binding.features !== undefined) {
       if (!binding.features || typeof binding.features !== "object" || Array.isArray(binding.features) || Object.keys(binding.features).some((key) => !features.includes(key as WebFeature))) throw new Error("Invalid web provider feature capabilities.");
@@ -58,6 +58,15 @@ export async function loadWebToolsConfig(path: string | undefined, store: StateS
     fetch: options.fetch,
     resolveCredential: async (provider) => {
       const binding = config.providers[provider];
+      if (provider === "oracle" && binding?.enabled) {
+        const file = process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+        if (!file?.startsWith("/")) throw new WebToolError("provider_not_enabled");
+        const info = await lstat(file);
+        if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o077) || info.size > 4096) throw new WebToolError("provider_not_enabled");
+        const token = (await readFile(file, "utf8")).trim();
+        if (!/^[A-Za-z0-9_-]{16,200}$/.test(token)) throw new WebToolError("provider_not_enabled");
+        return token;
+      }
       if (!binding?.enabled || !binding.accountId) throw new WebToolError("provider_not_enabled");
       const state = await store.load();
       const account = state.accounts.find((candidate) => candidate.id === binding.accountId);
@@ -86,7 +95,7 @@ export async function loadWebToolsConfig(path: string | undefined, store: StateS
         const selected = providers.filter((provider) => {
           const binding = config.providers[provider];
           const account = state.accounts.find((candidate) => candidate.id === binding?.accountId);
-          return Boolean(binding?.enabled && binding.features?.[feature] === "supported" && account?.enabled && account.provider === provider);
+          return Boolean(binding?.enabled && binding.features?.[feature] === "supported" && (provider === "oracle" ? process.env.ROTOXY_ORACLE_API_TOKEN_FILE : account?.enabled && account.provider === provider));
         });
         if (!selected.length) return [];
         const schema = structuredClone(definition.inputSchema);
