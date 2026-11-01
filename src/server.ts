@@ -37,7 +37,6 @@ import { liveWebToolsConfig, type ConfiguredWebTools } from "./web-tools-config.
 import { createAnalyticsApiRouter } from "./analytics-api.js";
 import { createModelGateway } from "./model-gateway.js";
 import { createControlPlaneAdminRouter } from "./control-plane-admin.js";
-import { createLightSprintSessionBindingsRouter } from "./lightsprint-session-bindings.js";
 
 export interface ServerOptions {
   host?: string;
@@ -100,7 +99,11 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(createOracleModelAdminRouter(store, sessions).router);
   router.use(createResourceRoutingAdminRouter(store, sessions).router);
   router.use(createAgentWorkspaceAccessRouter(store, sessions, options.supervisorBackend));
-  if (options.supervisorConfigPath) router.use(createLightSprintSessionBindingsRouter(store, sessions, { configPath: options.supervisorConfigPath }).router);
+  // Retired provider: preserve durable history, but never expose account
+  // provisioning or mutation controls for obsolete session bindings.
+  router.all(["/admin/lightsprint/sessions", "/admin/lightsprint/sessions/*path"], (_req, res) => {
+    res.status(410).type("text").send("This provider has been retired. Use ChatGPT & Codex or Private workers in Resources.");
+  });
   router.use(createAgentWorkspaceRouter(store, sessions, agentWorkspace, renderAgentWorkspace));
   router.use(createCommandWorkspaceRouter(store, sessions, options.supervisorBackend));
   router.use(createJobsAdminRouter(store, sessions, options.supervisorBackend));

@@ -121,8 +121,8 @@ test("provider guide distinguishes pinned inference paths from workspace-job pro
   const guide = callOnboardingTool({ topic: "providers" });
   assert.match(guide, /GET \/providers/);
   assert.match(guide, /\/providers\/<provider>\/v1\/models/);
-  assert.match(guide, /LightSprint is a workspace-job provider/);
-  assert.match(guide, /not an OpenAI-compatible inference endpoint/);
+  assert.match(guide, /Retired providers are unavailable for new work/);
+  assert.match(guide, /CLI agent, not that HTTP endpoint/);
   assert.match(guide, /Claude Code is a CLI agent/);
 });
 

@@ -1,5 +1,12 @@
 # ROTOXY Oct31 release and Oracle checkpoint
 
+> Superseded provider decision, 2026-11-01: the operator permanently retired
+> LightSprint after all accounts were disabled. Do not follow the older
+> reauthentication/reconciliation next actions below. Thirteen legacy account
+> credentials and all active LightSprint bindings/monitor registrations have
+> been removed; routing is disabled and history is retained only for audit.
+> The active plan is Oracle plus supported isolated Codex account workers.
+
 ## Current release — final verification
 
 This section supersedes the earlier snapshots. Gateway, Oracle pool and monitor

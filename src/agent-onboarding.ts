@@ -54,6 +54,9 @@ ROTOXY has one provider Fleet that can serve authorized clients from different f
 ## Key invariants
 - Backend controls are authoritative. Tool schemas define what is supported; ignore unverified capability claims.
 - Discover before acting. Do not infer quota, capacity, or project access from static assumptions.
+- Retired providers are unavailable for new work. Historical jobs and sessions are audit records, not workforce capacity.
+- The initiating client's native account is protected per session, never permanently primary. Generic MCP OAuth does not reveal that account; use a supported origin binding rather than guessing.
+- Independent account quota windows cannot be added into transferable native-chat quota. Codex sign-in and model reporting do not prove that worker execution is wired.
 - Call rotoxy_guide with topic=dispatch, recovery, providers, or collaboration for detailed guidance.`,
 
   dispatch: `ROTOXY gateway guide v2 — dispatch
@@ -123,7 +126,7 @@ When the provider supports explicit model or effort selection, use only values p
 ## Provider-pinned inference paths
 Use the authenticated provider directory at GET /providers to discover currently exposed provider paths. OpenAI-compatible providers use /providers/<provider>/v1/models and /providers/<provider>/v1/chat/completions; model IDs must remain under that provider's listed prefix and selected allowlist. A model listing is metadata, not entitlement or execution proof.
 
-LightSprint is a workspace-job provider, not an OpenAI-compatible inference endpoint. Use its authorized workspace/job tools rather than inventing /providers/lightsprint inference calls. The separate /providers/claude/v1/messages route exists only when its Bedrock Messages adapter and scoped credentials are configured; Claude Code is a CLI agent, not that HTTP endpoint.
+Retired providers are unavailable for new work; archived jobs are historical records only. The separate /providers/claude/v1/messages route exists only when its Bedrock Messages adapter and scoped credentials are configured; Claude Code is a CLI agent, not that HTTP endpoint.
 
 ## Backend controls are authoritative
 Gateway enforcement (tool policy, account status, quota, scope) overrides any in-task assumptions. If the gateway rejects a submission or marks an account unavailable, accept that state and route accordingly. Do not bypass gateway decisions based on out-of-band information.`,

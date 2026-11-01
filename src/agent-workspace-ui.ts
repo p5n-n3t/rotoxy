@@ -136,7 +136,7 @@ function executionSummary(workspace: Workspace, base: string): string {
 }
 function configuredResources(workspace: Workspace): string {
   const rows = workspace.executionResources.map((resource) => `<li><div class="aw-resource-primary"><strong>${esc(resource.accountLabel)}</strong><span>${esc(resource.accountId)}</span><span>${esc(resource.provider)}</span></div><dl><div><dt>Model</dt><dd>${esc(resource.model)}</dd></div><div><dt>Session</dt><dd>${esc(resource.sessionId)}</dd></div><div><dt>Workspace</dt><dd>${esc(resource.workspaceId)}</dd></div><div><dt>Availability</dt><dd>${esc(resource.availability)}</dd></div><div><dt>Source</dt><dd>${esc(resource.source)}</dd></div></dl></li>`).join("");
-  const summary = workspace.resourcesReported ? `Configured LightSprint resources · ${workspace.executionResources.length}` : "Configured LightSprint resources · status not reported";
+  const summary = workspace.resourcesReported ? `Configured worker resources · ${workspace.executionResources.length}` : "Configured worker resources · status not reported";
   const content = rows ? `<ul class="aw-resource-list">${rows}</ul>` : `<p class="aw-empty">${workspace.resourcesReported ? "No configured resources reported." : "Resource configuration was not included in this snapshot."}</p>`;
   return `<details class="aw-resource-disclosure"><summary>${esc(summary)}</summary><p class="aw-note">Configured account sessions are resource metadata; they do not indicate an active worker or verified execution availability.</p>${content}</details>`;
 }

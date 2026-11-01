@@ -51,7 +51,8 @@ test("renders AW records in the shared page shell with real workflow columns and
   assert.match(html, /job-exec-1/);
   assert.match(html, /href="\/token2oauth\/admin\/supervisor"/);
   assert.match(html, /href="\/token2oauth\/admin\/jobs"/);
-  assert.match(html, /Configured LightSprint resources · 1/);
+  assert.match(html, /Configured worker resources · 1/);
+  assert.doesNotMatch(html, /LightSprint sessions|\/admin\/lightsprint\/sessions/);
   assert.match(html, /<details class="aw-resource-disclosure"><summary>/);
   assert.match(html, /do not indicate an active worker/);
   assert.match(html, /Primary account/);

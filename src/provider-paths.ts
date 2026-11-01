@@ -13,7 +13,6 @@ const PENDING = Object.freeze([
   { id: "anthropic", protocol: "Anthropic Messages", availability: "unavailable", reason: "No direct Anthropic API adapter is configured here." },
   { id: "codex", protocol: "Codex App Server", availability: "unavailable", reason: "Saved Codex profiles do not yet have direct provider-path dispatch." },
   { id: "oracle", protocol: "OpenAI-compatible", availability: "separate-opt-in-adapter", path: "/providers/oracle/v1", reason: "Requires a configured private Oracle API token file. Uses scoped ROTOXY model tokens; does not run workspace agents." },
-  { id: "lightsprint", protocol: "Workspace jobs", availability: "unavailable", reason: "LightSprint is a workspace provider, not a model-inference adapter." },
 ]);
 
 function error(res: Response, status: number, code: string): void {

@@ -27,21 +27,17 @@ bounded single-page HTTP fetch; it does not execute JavaScript or follow redirec
 Cloudflare rejected Python urllib's default user agent in one test; ordinary
 curl and Node fetch clients succeeded without a Cloudflare rule change.
 
-## LightSprint execution is currently blocked
+## LightSprint retired — superseded on 2026-11-01
 
-LightSprint authentication changed during the verification run. The monitor
-successfully read its nine registered sessions early in the run, then reported
-HTTP 401 for every one in later cycles. Independent read-only initialization
-checks also failed across the tested account credentials. No published official
-incident or authentication migration was found. This is not evidence that the
-accounts ran out of credits.
+The operator reported that every LightSprint account was disabled and explicitly
+removed LightSprint from ROTOXY's workforce. All 13 active legacy credentials,
+launch bindings and session registrations have been removed. Its routing pool
+is disabled. Do not request reauthentication or attempt to resume its jobs.
 
-The approved review job has a verified provider task but an ambiguous launch
-receipt. Preserve its original identity and reservation. Reconcile that task;
-never launch a replacement just to get past the missing session identity.
-LightSprint fan-out is not ready to be advertised as verified working until
-authentication and original-task observation are restored.
+Historical jobs, artifacts and event records are preserved for audit only.
+The old instruction to reconcile an ambiguous task after reauthentication is
+superseded by this retirement. Archived records are not eligible worker capacity.
 
-The Oracle model pool and authenticated search service do not depend on these
-LightSprint credentials. Their successful live results are recorded separately
-in the Oracle implementation and bridge proof reports.
+The active direction is the Oracle model pool and isolated, officially
+authenticated Codex workers. See the November 1 retirement and pool transition
+checkpoint for current implementation boundaries.

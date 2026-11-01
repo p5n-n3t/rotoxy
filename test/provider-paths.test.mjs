@@ -62,7 +62,7 @@ test("provider directory distinguishes direct inference from workspace and unava
   assert.equal(body.providers.find(provider => provider.id === "ollama").path, "/providers/ollama/v1");
   assert.equal(body.providers.find(provider => provider.id === "claude").protocol, "Anthropic Messages");
   assert.equal(body.providers.find(provider => provider.id === "claude").availability, "separate-opt-in-adapter");
-  assert.equal(body.providers.find(provider => provider.id === "lightsprint").availability, "unavailable");
+  assert.equal(body.providers.some(provider => provider.id === "lightsprint"), false);
 });
 
 test("direct model catalogs expose only models from the named provider and keep read scope", async t => {
@@ -235,6 +235,11 @@ test("production buildApp wiring serves provider directory and rejects unauthent
   const directory = await fetch(`${base}/providers`);
   assert.equal(directory.status, 200);
   assert.ok((await directory.json()).providers.some(provider => provider.id === "openrouter"));
+  for (const path of ["/admin/lightsprint/sessions", "/admin/lightsprint/sessions/action"]) {
+    const retired = await fetch(base + path, { method: path.endsWith("action") ? "POST" : "GET" });
+    assert.equal(retired.status, 410);
+    assert.match(await retired.text(), /provider has been retired/);
+  }
   const unauthorized = await fetch(`${base}/providers/openai/v1/chat/completions`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: "openai/gpt-test", messages: [{ role: "user", content: "hello" }] }),
