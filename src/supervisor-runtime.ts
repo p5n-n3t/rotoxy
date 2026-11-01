@@ -85,6 +85,11 @@ export interface SupervisorRuntimeOptions {
 }
 
 function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+export function boundedWorkerConcurrency(maxWorkers: number, sessionCapacity: number, inferenceCapacities: readonly number[]): number {
+  const inferenceCapacity = inferenceCapacities.reduce((sum, capacity) =>
+    sum + (Number.isSafeInteger(capacity) && capacity > 0 ? capacity : 0), 0);
+  return Math.min(32, maxWorkers, Math.max(1, sessionCapacity + inferenceCapacity));
+}
 function usageProjection(value: unknown): SupervisorUsage | undefined {
   if (!object(value)) return undefined;
   const nonnegative = (key: string) => typeof value[key] === "number" && Number.isFinite(value[key]) && Number(value[key]) >= 0 ? Number(value[key]) : undefined;
@@ -276,8 +281,8 @@ export class SupervisorRuntime implements SupervisorBackend {
    */
   private readonly monitorRegistrationByProject = new Map<string, { expected: number; sessions: number; authorizedViewers: number; remoteReads: number; registered: number; failed: number }>();
   private readonly workerGuidance: WorkerGuidanceService;
-  private readonly cloudflareCredentials: CloudflareCredentialStore;
-  private readonly cloudflareInference: CloudflareAIAdapter;
+  private readonly cloudflareCredentials?: CloudflareCredentialStore;
+  private readonly cloudflareInference?: CloudflareAIAdapter;
   private readonly inferenceAdapter: InferenceJobsAdapter;
   private inferenceSnapshotCache?: { at: number; value: Map<string, InferenceResourceSnapshot> };
   private readonly cloudflareCatalogCache = new Map<string, { at: number; models: Set<string>; valid: boolean }>();
@@ -287,8 +292,13 @@ export class SupervisorRuntime implements SupervisorBackend {
     this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
     this.supervisionDbPath = options.supervisionDbPath ?? runtimeStatePath("supervision", "inbox.sqlite");
     this.recoveryDbPath = options.recoveryDbPath ?? runtimeStatePath("supervision", "recovery.sqlite3");
-    this.cloudflareCredentials = new CloudflareCredentialStore(options.store);
-    this.cloudflareInference = new CloudflareAIAdapter(this.cloudflareCredentials, { maxTokens: 4096, maxInflightPerAccount: 1 });
+    // Some injected test/readiness stores are intentionally in-memory and do
+    // not have the filesystem/key paths required by the credential vault.
+    // Leave Cloudflare unavailable for those stores; never invent a vault.
+    this.cloudflareCredentials = typeof options.store.dir === "string" && options.store.dir
+      ? new CloudflareCredentialStore(options.store) : undefined;
+    this.cloudflareInference = this.cloudflareCredentials
+      ? new CloudflareAIAdapter(this.cloudflareCredentials, { maxTokens: 4096, maxInflightPerAccount: 1 }) : undefined;
     this.inferenceAdapter = new InferenceJobsAdapter({ cloudflare: this.cloudflareInference,
       oracleTokenFile: process.env.ROTOXY_ORACLE_API_TOKEN_FILE, timeoutMs: 120_000,
       oracleAllowedHosts: async (accountId) => (await this.inferenceResources(true)).get(accountId)?.oracleHosts ?? [] });
@@ -447,7 +457,7 @@ export class SupervisorRuntime implements SupervisorBackend {
   private async inferenceResources(force = false): Promise<Map<string, InferenceResourceSnapshot>> {
     const now = Date.now();
     if (!force && this.inferenceSnapshotCache && now - this.inferenceSnapshotCache.at < 5_000) return this.inferenceSnapshotCache.value;
-    const [credentials, rules] = await Promise.all([this.cloudflareCredentials.listCredentials(), new ResourceRoutingRulesStore(this.options.store, this.options.configDir).read()]);
+    const [credentials, rules] = await Promise.all([this.cloudflareCredentials?.listCredentials() ?? [], new ResourceRoutingRulesStore(this.options.store, this.options.configDir).read()]);
     const permitted = new Set(this.config.projects.flatMap(project => project.accountIds));
     const found = new Map<string, InferenceResourceSnapshot>();
     for (const credential of credentials) {
@@ -459,7 +469,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       let catalog = this.cloudflareCatalogCache.get(credential.id);
       if (enabled && !cooling && (!catalog || now - catalog.at > 300_000)) {
         try {
-          const raw = await this.cloudflareInference.listModels(credential.id, 2);
+          const raw = await this.cloudflareInference?.listModels(credential.id, 2);
           const root = object(raw) ? raw : undefined;
           const rows = Array.isArray(root?.result) ? root!.result : [];
           const models = new Set(rows.flatMap((row: unknown) => object(row) && typeof row.name === "string" ? [row.name] : []));
@@ -659,8 +669,21 @@ export class SupervisorRuntime implements SupervisorBackend {
     };
       const registeredModels = [...new Set(this.config.projects.flatMap(project => project.registeredSessions.map(session => session.model)))];
       const freshBindingsConfigured = this.config.projects.some((project) => (project.freshProvisioningBindings?.length ?? 0) > 0);
-      const inferenceBindingsConfigured = this.config.projects.some((project) => (project.inferenceBindings?.length ?? 0) > 0 ||
-        project.accountIds.some((id) => this.inferenceSnapshotCache?.value.has(id)));
+      const permittedAccountIds = new Set(this.config.projects.flatMap(project => project.accountIds));
+      const configuredOracle = this.config.projects.some(project => (project.inferenceBindings?.length ?? 0) > 0);
+      const configuredCloudflare = this.cloudflareCredentials !== undefined &&
+        (await this.cloudflareCredentials.listCredentials()).some(credential => permittedAccountIds.has(credential.id));
+      const inferenceBindingsConfigured = configuredOracle || configuredCloudflare;
+      const inferenceCapacity = inferenceBindingsConfigured
+        ? [...(await this.inferenceResources(true)).entries()]
+          .filter(([, resource]) => resource.enabled && resource.authorized && resource.health === "healthy" &&
+            resource.capacity > 0 && resource.models.length > 0)
+          .reduce((sum, [, resource]) => sum + resource.capacity, 0)
+        : 0;
+      const sessionCapacity = Math.max(
+        new Set(this.config.projects.flatMap(project => project.registeredSessions.map(session => session.sessionId))).size,
+        this.config.projects.flatMap(project => project.freshProvisioningBindings ?? []).length,
+      );
       // Fleet discovery and collaboration work before the first worker is bound.
       // Empty fleets have no dispatch worker; do not invent an allowed model.
       if (registeredModels.length || freshBindingsConfigured || inferenceBindingsConfigured) {
@@ -694,9 +717,8 @@ export class SupervisorRuntime implements SupervisorBackend {
           return signal.enabled && signal.authorized;
         },
         workerId: `token2oauth-${createHash("sha256").update(this.options.configDir).digest("hex").slice(0, 12)}`,
-        allowedModels: registeredModels, maxConcurrent: Math.min(this.config.maxWorkers, Math.max(1,
-          new Set(this.config.projects.flatMap((p) => p.registeredSessions.map((session) => session.sessionId))).size,
-          this.config.projects.flatMap((p) => p.freshProvisioningBindings ?? []).length)),
+        allowedModels: registeredModels, maxConcurrent: boundedWorkerConcurrency(this.config.maxWorkers, sessionCapacity,
+          inferenceCapacity ? [inferenceCapacity] : []),
         allowFreshOperations: freshBindingsConfigured, ...this.options.workerOptions,
       });
       this.worker.start();

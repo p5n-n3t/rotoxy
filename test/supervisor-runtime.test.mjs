@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, chmod, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SupervisorRuntime, readSupervisorRuntimeConfig } from "../dist/supervisor-runtime.js";
+import { SupervisorRuntime, boundedWorkerConcurrency, readSupervisorRuntimeConfig } from "../dist/supervisor-runtime.js";
 import { isAllowedSupervisorRoute } from "../dist/supervisor-bridge.js";
 
 const config = {
@@ -27,6 +27,16 @@ const currentState = {
 };
 const store = { async load() { return currentState; } };
 const caller = { clientId: "client-a", projectId: "project-a" };
+
+test("in-memory state stores need no filesystem-backed Cloudflare credential vault", () => {
+  assert.doesNotThrow(() => new SupervisorRuntime(config, { configDir: "/tmp/rotoxy-memory-store", store }));
+});
+
+test("worker concurrency adds eligible inference capacity within both ceilings", () => {
+  assert.equal(boundedWorkerConcurrency(12, 0, [3]), 3, "inference-only fleets do not collapse to one worker");
+  assert.equal(boundedWorkerConcurrency(12, 2, [2, 1]), 5, "session/fresh and inference capacities combine");
+  assert.equal(boundedWorkerConcurrency(40, 20, [20]), 32, "the hard process ceiling still applies");
+});
 
 test("expired transient cooldown restores eligibility without clearing auth or quota blocks", async t=>{
   const dir=await mkdtemp(join(tmpdir(),"rx-expired-cooldown-"));
