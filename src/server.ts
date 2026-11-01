@@ -1,5 +1,6 @@
 import { createRunnerAdminRouter } from "./runner-admin.js";
 import { createOracleModelApi } from "./oracle-model-api.js";
+import { searchMcpHandler } from "./search-mcp.js";
 import { createOracleModelAdminRouter } from "./oracle-model-admin.js";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -112,6 +113,9 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(createAnalyticsApiRouter(store, sessions, telemetry));
   router.use(createSupervisorAdminRouter(store, sessions, options.supervisorBackend));
   router.use(ui.router);
+  router.all(
+    "/search/mcp", express.raw({ type: "*/*", limit: "16kb" }), oauth.authenticateSearchMcp, searchMcpHandler(webTools),
+  );
   router.all(
     "/mcp",
     express.raw({ type: "*/*", limit: "32mb" }),

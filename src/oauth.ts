@@ -66,6 +66,7 @@ export class OAuthService {
     private readonly sessions: AdminSessions,
   ) {
     this.router.get("/.well-known/oauth-protected-resource", this.protectedResource);
+    this.router.get("/.well-known/oauth-protected-resource/search/mcp", this.searchProtectedResource);
     this.router.get("/.well-known/oauth-authorization-server", this.authorizationMetadata);
     this.router.post("/oauth/register", express.json({ limit: "128kb" }), this.register);
     // The consent page must never render inside another site's frame: a
@@ -145,6 +146,13 @@ export class OAuthService {
     });
   };
 
+  private searchProtectedResource = async (_req: Request, res: Response) => {
+    const state = await this.store.load();
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ resource: this.issuer(state) + "/search/mcp", authorization_servers: [this.issuer(state)],
+      scopes_supported: ["mcp", "web:search", "web:extract"], bearer_methods_supported: ["header"], resource_name: "ROTOXY Search" });
+  };
+
   private authorizationMetadata = async (_req: Request, res: Response) => {
     const state = await this.store.load();
     const issuer = this.issuer(state);
@@ -216,10 +224,11 @@ export class OAuthService {
       throw new Error("PKCE S256 is required");
     }
     const resource = String(q.resource || this.resource(state));
-    if (resource !== this.resource(state)) throw new Error("resource does not match this MCP server");
+    if (![this.resource(state), this.issuer(state) + "/search/mcp"].includes(resource)) throw new Error("resource does not match this MCP server");
     const requested = [...new Set(String(q.scope || "mcp").split(/\s+/).filter(Boolean))];
     if (!requested.includes("mcp")) throw new Error("mcp scope is required");
     if (requested.some((scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope))) throw new Error("unsupported scope requested");
+    if (resource.endsWith("/search/mcp") && requested.some(scope => !["mcp", "web:search", "web:extract"].includes(scope))) throw new Error("scope is not available for search-only access");
     return { client, redirectUri, resource, scope: requested.join(" ") };
   }
 
@@ -395,9 +404,12 @@ ${loggedIn ? '<input type="hidden" name="session_authorized" value="1"><input ty
     return oauthError(res, 400, "unsupported_grant_type", "Supported grants: authorization_code, refresh_token.");
   };
 
-  authenticateMcp = async (req: Request, res: Response, next: NextFunction) => {
+  authenticateMcp = (req: Request, res: Response, next: NextFunction) => this.authenticateResource(req, res, next, false);
+  authenticateSearchMcp = (req: Request, res: Response, next: NextFunction) => this.authenticateResource(req, res, next, true);
+
+  private authenticateResource = async (req: Request, res: Response, next: NextFunction, search: boolean) => {
     const state = await this.store.load();
-    const metadata = this.issuer(state) + "/.well-known/oauth-protected-resource";
+    const metadata = this.issuer(state) + "/.well-known/oauth-protected-resource" + (search ? "/search/mcp" : "");
     const auth = req.header("authorization") || "";
     const match = auth.match(/^Bearer\s+(.+)$/i);
     if (!match) {
@@ -406,7 +418,7 @@ ${loggedIn ? '<input type="hidden" name="session_authorized" value="1"><input ty
     }
     try {
       const claims = verifyAccessToken(match[1], await ensureMasterKey(this.store.keyPath));
-      if (claims.iss !== this.issuer(state) || claims.aud !== this.resource(state)) {
+      if (claims.iss !== this.issuer(state) || claims.aud !== (search ? this.issuer(state) + "/search/mcp" : this.resource(state))) {
         throw new Error("issuer or audience mismatch");
       }
       if (!claims.scope.split(/\s+/).includes("mcp")) throw new Error("missing mcp scope");

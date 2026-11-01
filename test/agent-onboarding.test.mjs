@@ -96,7 +96,7 @@ test("mcp-only token discovers rotoxy_guide and calls it without upstream or sup
 test("rotoxy_guide returns deterministic text per topic", async () => {
   await withGateway(async (base) => {
     const { token } = await oauthToken(base, "mcp");
-    for (const topic of ["start", "dispatch", "recovery", "providers", "collaboration"]) {
+    for (const topic of ["start", "dispatch", "recovery", "providers", "collaboration", "search", "oracle"]) {
       const r1 = await mcp(base, token, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "rotoxy_guide", arguments: { topic } } });
       const r2 = await mcp(base, token, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "rotoxy_guide", arguments: { topic } } });
       assert.equal(r1.status, 200);
