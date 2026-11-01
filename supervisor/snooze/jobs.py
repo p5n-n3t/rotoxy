@@ -22,8 +22,8 @@ MAX_INSTRUCTIONS = 16 * 1024
 MAX_JOB_BYTES = 1024 * 1024
 MAX_DEPENDENCIES = 8
 MAX_PAGE = 200
-MUTATING_KINDS = {"create_task", "patch_task", "launch_task", "chat_session", "cancel_session"}
-OPERATION_KINDS = {"observe_session", "inspect_task_agents", "chat_session", "cancel_session", "create_task", "patch_task", "verify_task_packet", "launch_task"}
+MUTATING_KINDS = {"create_task", "patch_task", "launch_task", "chat_session", "cancel_session", "run_inference"}
+OPERATION_KINDS = {"observe_session", "inspect_task_agents", "chat_session", "cancel_session", "create_task", "patch_task", "verify_task_packet", "launch_task", "run_inference"}
 USAGE_KEYS = {"reportedSessionCostUsd", "promptCount", "budgetUsed", "maxBudget", "fundingSource", "sandboxTier"}
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # Node job-worker.ts returns these only on the chat_session path before
@@ -191,6 +191,18 @@ def validate_assignment(body):
                 raise ValueError("Unsupported fresh execution provider")
             if execution["accountId"] not in accounts:
                 raise ValueError("Fresh execution account must be eligible")
+        elif execution.get("mode") == "inference":
+            if set(execution) != {"mode", "accountId", "provider", "model", "maxOutputTokens"}:
+                raise ValueError("Invalid bounded inference execution binding")
+            _text(execution["accountId"], "accountId", 256)
+            _text(execution["provider"], "provider", 64)
+            _text(execution["model"], "model", 160)
+            if execution["provider"] not in {"oracle", "cloudflare"}:
+                raise ValueError("Unsupported inference provider")
+            if type(execution["maxOutputTokens"]) is not int or not 1 <= execution["maxOutputTokens"] <= 4096:
+                raise ValueError("maxOutputTokens must be between 1 and 4096")
+            if execution["accountId"] not in accounts:
+                raise ValueError("Inference account must be eligible")
         else:
             raise ValueError("Unsupported task execution mode")
         output = task["output"]
@@ -383,7 +395,7 @@ class JobRegistry:
 
     def register_account(self, body, now=None):
         required = {"accountId", "enabled", "authorized", "allowUnknownQuota", "health", "quota", "registeredSessions"}
-        _allowed_object(body, required, {"localCapacity"}, "account")
+        _allowed_object(body, required, {"localCapacity", "inferenceProviders"}, "account")
         account_id = _text(body["accountId"], "accountId")
         if any(type(body[key]) is not bool for key in ("enabled", "authorized", "allowUnknownQuota")):
             raise ValueError("Account flags must be boolean")
@@ -404,12 +416,43 @@ class JobRegistry:
                 raise ValueError("Duplicate registered session")
             seen.add(clean["id"])
             clean_sessions.append(clean)
+        providers = body.get("inferenceProviders", [])
+        if not isinstance(providers, list) or len(providers) > 4:
+            raise ValueError("inferenceProviders must be a bounded list")
+        clean_providers = []
+        seen_providers = set()
+        for item in providers:
+            _closed_object(item, {"provider", "models", "maxOutputTokens"}, "inference provider")
+            provider = _text(item["provider"], "inference provider", 64)
+            models = item["models"]
+            if provider not in {"oracle", "cloudflare"} or provider in seen_providers:
+                raise ValueError("Unsupported or duplicate inference provider")
+            if not isinstance(models, list) or not 1 <= len(models) <= 64:
+                raise ValueError("Inference models must be a bounded nonempty list")
+            clean_models = [_text(model, "inference model", 160) for model in models]
+            if len(set(clean_models)) != len(clean_models):
+                raise ValueError("Duplicate inference model")
+            maximum = item["maxOutputTokens"]
+            if type(maximum) is not int or not 1 <= maximum <= 4096:
+                raise ValueError("Invalid inference output token limit")
+            seen_providers.add(provider)
+            clean_providers.append({"provider": provider, "models": clean_models, "maxOutputTokens": maximum})
         data = {"accountId": account_id, "enabled": body["enabled"], "authorized": body["authorized"],
                 "allowUnknownQuota": body["allowUnknownQuota"], "health": body["health"],
-                "quota": body["quota"], "localCapacity": capacity, "registeredSessions": clean_sessions}
+                "quota": body["quota"], "localCapacity": capacity, "registeredSessions": clean_sessions,
+                "inferenceProviders": clean_providers}
         when = time.time() if now is None else now
         with self.connection(write=True) as db:
             current = db.execute("SELECT revision,data FROM registered_accounts WHERE account_id=?", (account_id,)).fetchone()
+            old_providers = json.loads(current["data"]).get("inferenceProviders", []) if current else []
+            if current and old_providers != clean_providers:
+                active_inference = False
+                for row in db.execute("SELECT body FROM job_tasks WHERE selected_account=? AND (" + _SLOT_SQL + ")", (account_id,)):
+                    if json.loads(row["body"]).get("execution", {}).get("mode") == "inference":
+                        active_inference = True
+                        break
+                if active_inference:
+                    raise ValueError("Cannot change inference provider allowlist while a task is reserved")
             # A busy session is an identity tuple, not just an ID. Keep its owning
             # account, workspace, and model stable until every reservation releases.
             old_sessions = {item["id"]: item for item in json.loads(current["data"])["registeredSessions"]} if current else {}
@@ -750,6 +793,8 @@ class JobRegistry:
     @staticmethod
     def _next_kind(task):
         mode = task["execution"]["mode"]
+        if mode == "inference":
+            return "run_inference" if task.get("dispatchPhase", "queued") == "queued" else None
         if mode == "fresh":
             return {"queued": "create_task", "created": "patch_task", "patched": "verify_task_packet",
                     "verified": "launch_task"}.get(task.get("dispatchPhase", "queued"))
@@ -835,9 +880,18 @@ class JobRegistry:
                             external_occupancy += 1
                 if job_occupancy + external_occupancy < account_data["localCapacity"]:
                     available.append(candidate)
-            if spec["execution"]["mode"] in {"existing-session", "fresh"}:
+            if spec["execution"]["mode"] in {"existing-session", "fresh", "inference"}:
                 pinned = spec["execution"]["accountId"]
                 available = [account for account in available if account == pinned]
+            if spec["execution"]["mode"] == "inference":
+                execution = spec["execution"]
+                for candidate in list(available):
+                    data, _ = self._account(db, candidate)
+                    provider = next((item for item in data.get("inferenceProviders", [])
+                                     if item["provider"] == execution["provider"]), None)
+                    if (provider is None or execution["model"] not in provider["models"] or
+                            execution["maxOutputTokens"] > provider["maxOutputTokens"]):
+                        available.remove(candidate)
             if spec["execution"]["mode"] == "existing-session":
                 session_id = spec["execution"]["sessionId"]
                 session_occupancy = db.execute(
@@ -887,6 +941,10 @@ class JobRegistry:
                     "provider": execution["provider"],
                     **({"providerTaskId": spec["providerTaskId"]} if spec.get("providerTaskId") else {}),
                 }
+            elif execution["mode"] == "inference":
+                operation_input = {"provider": execution["provider"], "model": execution["model"],
+                                   "prompt": spec["instructions"], "maxOutputTokens": execution["maxOutputTokens"],
+                                   "expectedMarker": spec["output"]["expectedMarker"], "dispatchAt": dispatch_at}
             else:
                 operation_input = {"sessionId": session["id"], "instructions": spec["instructions"],
                                    "clientMessageId": f"{attempt}:{generation}", "expectedMarker": spec["output"]["expectedMarker"],
@@ -1004,6 +1062,23 @@ class JobRegistry:
                 registered_session = execution.get("sessionId") if execution["mode"] == "existing-session" else None
                 account_data, _ = self._account(db, op["account"], registered_session,
                                                 observation=op["kind"] == "inspect_task_agents")
+                if op["kind"] == "run_inference":
+                    inference = execution
+                    provider = next((item for item in account_data.get("inferenceProviders", [])
+                                     if item["provider"] == inference["provider"]), None)
+                    if (provider is None or inference["model"] not in provider["models"] or
+                            inference["maxOutputTokens"] > provider["maxOutputTokens"]):
+                        db.execute("UPDATE operations SET state='rejected',error_class='InferenceBindingUnavailable' WHERE id=? AND state='queued'", (op["id"],))
+                        db.execute("UPDATE job_tasks SET state='blocked',released_at=? WHERE assignment=? AND task_id=? AND generation=?",
+                                   (when, op["assignment"], op["task_id"], op["generation"]))
+                        db.execute("UPDATE attempts SET state='blocked',released_at=? WHERE id=? AND released_at IS NULL",
+                                   (when, op["attempt_id"]))
+                        if not self._has_runnable_tasks(db, op["assignment"]):
+                            db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
+                        self._event(db, op["assignment"], "inference_binding_unavailable", {
+                            "taskId": op["task_id"], "generation": op["generation"], "operationId": op["id"]
+                        }, when)
+                        return None
                 occupied = db.execute(
                     "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) "
                     "AND (" + _SLOT_SQL + ")",
@@ -1084,7 +1159,7 @@ class JobRegistry:
         result = body.get("result", {})
         if not isinstance(result, dict) or len(json.dumps(result, separators=(",", ":")).encode()) > 32768:
             raise ValueError("Result must be a bounded object")
-        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "usage", "creditDebit"}
+        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "usage", "creditDebit", "finishReason"}
         if set(result) - allowed_result:
             raise ValueError("Unsupported operation result fields")
         for key, value in result.items():
@@ -1153,6 +1228,14 @@ class JobRegistry:
                 inspected_session_id = result.get("sessionId")
                 if not isinstance(inspected_session_id, str) or not SESSION_ID_RE.fullmatch(inspected_session_id):
                     raise ValueError("Accepted task inspection requires a valid bound sessionId")
+            if outcome == "accepted" and op["kind"] == "run_inference":
+                spec = json.loads(db.execute("SELECT body FROM job_tasks WHERE assignment=? AND task_id=?",
+                                              (op["assignment"], op["task_id"])).fetchone()["body"])
+                execution = spec["execution"]
+                if (not isinstance(result.get("assistantText"), str) or
+                        result.get("reportedModel") != execution["model"] or
+                        not isinstance(result.get("finishReason"), str) or not result["finishReason"]):
+                    raise ValueError("Accepted inference result requires exact model, text, and finish reason")
             debit = result.get("creditDebit")
             if debit is not None:
                 if self.credit_admission is None or op["kind"] != "chat_session" or outcome != "accepted":
@@ -1201,6 +1284,31 @@ class JobRegistry:
                 if isinstance(observed_status, str):
                     db.execute("UPDATE job_tasks SET provider_status=? WHERE assignment=? AND task_id=? AND generation=?",
                                (observed_status, op["assignment"], op["task_id"], op["generation"]))
+            elif op["kind"] == "run_inference":
+                spec = json.loads(task["body"])
+                execution = spec["execution"]
+                text_value = result.get("assistantText", "")
+                complete = (result.get("finishReason") in {"stop", "end_turn"} and
+                            len(text_value.encode("utf-8")) <= spec["output"]["maxBytes"] and
+                            spec["output"]["expectedMarker"] in text_value)
+                if complete:
+                    assistant_at = result.get("assistantAt", when)
+                    if type(assistant_at) not in {int, float} or not math.isfinite(assistant_at) or assistant_at < task["dispatch_at"]:
+                        raise ValueError("Invalid inference completion timestamp")
+                    db.execute("INSERT OR IGNORE INTO job_results(assignment,task_id,generation,text,assistant_at,reported_model,created_at) VALUES(?,?,?,?,?,?,?)",
+                               (op["assignment"], op["task_id"], op["generation"], text_value,
+                                assistant_at, result["reportedModel"], when))
+                    db.execute("UPDATE job_tasks SET reported_model=?,released_at=? WHERE assignment=? AND task_id=? AND generation=?",
+                               (result["reportedModel"], when, op["assignment"], op["task_id"], op["generation"]))
+                    db.execute("UPDATE attempts SET state='complete',released_at=? WHERE id=? AND released_at IS NULL",
+                               (when, op["attempt_id"]))
+                    state = "complete"
+                else:
+                    db.execute("UPDATE job_tasks SET released_at=? WHERE assignment=? AND task_id=? AND generation=?",
+                               (when, op["assignment"], op["task_id"], op["generation"]))
+                    db.execute("UPDATE attempts SET state='blocked',released_at=? WHERE id=? AND released_at IS NULL",
+                               (when, op["attempt_id"]))
+                    state = "blocked"
             else:
                 spec = json.loads(task["body"])
                 phase_map = {"create_task": "created", "patch_task": "patched", "verify_task_packet": "verified"}

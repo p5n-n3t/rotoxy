@@ -91,6 +91,96 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(operation["input"]["instructions"], "Do bounded work for task-1")
         self.assertEqual(operation["input"]["sessionId"], "session-account-a")
 
+    def test_bounded_inference_uses_durable_outbox_without_fabricating_session(self):
+        self.registry.register_account({
+            "accountId": "oracle-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "oracle", "models": ["oracle/qwen3.5:2b"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        value = task("inference-1", account="oracle-a")
+        value["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                              "model": "oracle/qwen3.5:2b", "maxOutputTokens": 96}
+        value["instructions"] = "Return exactly DONE"
+        body = assignment("inference-job", "inference-key", [value], accounts=["oracle-a"])
+        self.registry.submit(body, now=2)
+        operation = self.registry.claim_operation("oracle-worker", now=3)
+        self.assertEqual(operation["kind"], "run_inference")
+        self.assertIsNone(operation["sessionId"])
+        with self.assertRaisesRegex(ValueError, "while a task is reserved"):
+            self.registry.register_account({
+                "accountId": "oracle-a", "enabled": True, "authorized": True,
+                "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+                "registeredSessions": [], "inferenceProviders": [{
+                    "provider": "oracle", "models": ["oracle/other-model"], "maxOutputTokens": 128,
+                }],
+            }, now=3)
+        self.assertEqual(operation["input"], {
+            "provider": "oracle", "model": "oracle/qwen3.5:2b", "prompt": "Return exactly DONE",
+            "maxOutputTokens": 96, "expectedMarker": "DONE", "dispatchAt": 3,
+        })
+        result = {"workerId": "oracle-worker", "outcome": "accepted", "result": {
+            "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 4,
+        }}
+        recorded = self.registry.record_result(operation["operationId"], result, now=4)
+        self.assertEqual(recorded["state"], "complete")
+        self.assertEqual(self.registry.get_assignment("inference-job")["state"], "complete")
+        self.assertEqual(self.registry.assignment_results("inference-job")["results"][0]["text"], "DONE")
+        self.assertTrue(self.registry.record_result(operation["operationId"], result, now=5)["replayed"])
+
+    def test_inference_lease_expiry_is_ambiguous_and_never_redispatched(self):
+        self.registry.register_account({
+            "accountId": "oracle-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "oracle", "models": ["oracle/qwen3.5:2b"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        value = task("inference-ambiguous", account="oracle-a")
+        value["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                              "model": "oracle/qwen3.5:2b", "maxOutputTokens": 96}
+        body = assignment("inference-ambiguous-job", "inference-ambiguous-key", [value], accounts=["oracle-a"])
+        self.registry.submit(body, now=2)
+        operation = self.registry.claim_operation("oracle-worker", lease_seconds=1, now=3)
+        self.assertEqual(operation["kind"], "run_inference")
+        self.assertIsNone(self.registry.claim_operation("oracle-worker-2", now=5))
+        status = self.registry.get_assignment("inference-ambiguous-job")
+        self.assertEqual(status["tasks"][0]["state"], "ambiguous")
+        self.assertTrue(status["tasks"][0]["reconciliation"]["required"])
+        self.assertFalse(status["tasks"][0]["reconciliation"]["redispatchAllowed"])
+
+    def test_inference_requires_registered_provider_model_and_bounded_tokens(self):
+        value = task("inference-invalid")
+        value["execution"] = {"mode": "inference", "accountId": "account-a", "provider": "oracle",
+                              "model": "oracle/not-registered", "maxOutputTokens": 4097}
+        with self.assertRaises(ValueError):
+            validate_assignment(assignment("invalid-inference", tasks=[value]))
+
+    def test_truncated_inference_result_is_blocked_and_not_published(self):
+        self.registry.register_account({
+            "accountId": "oracle-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "oracle", "models": ["oracle/qwen3.5:2b"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        value = task("inference-truncated", account="oracle-a")
+        value["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                              "model": "oracle/qwen3.5:2b", "maxOutputTokens": 96}
+        body = assignment("inference-truncated-job", "inference-truncated-key", [value], accounts=["oracle-a"])
+        self.registry.submit(body, now=2)
+        operation = self.registry.claim_operation("oracle-worker", now=3)
+        recorded = self.registry.record_result(operation["operationId"], {
+            "workerId": "oracle-worker", "outcome": "accepted", "result": {
+                "assistantText": "Partial answer without marker", "reportedModel": "oracle/qwen3.5:2b",
+                "finishReason": "length", "assistantAt": 4,
+            },
+        }, now=4)
+        self.assertEqual(recorded["state"], "blocked")
+        self.assertEqual(self.registry.get_assignment("inference-truncated-job")["state"], "held")
+        self.assertEqual(self.registry.assignment_results("inference-truncated-job")["results"], [])
+
     def test_fresh_execution_requires_explicit_eligible_account_stack_and_provider(self):
         body = assignment(tasks=[fresh_task()], accounts=["account-a"])
         self.assertEqual(validate_assignment(body)["tasks"][0]["execution"]["mode"], "fresh")
