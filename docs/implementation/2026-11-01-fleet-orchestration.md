@@ -22,9 +22,26 @@ This metadata is an allowlist and capacity declaration, not evidence of provider
 
 The durable operation is returned by `JobRegistry.claim_operation()` with `kind: "run_inference"`, the committed `operationId`, pinned `selectedAccountId`, and bounded input fields `provider`, `model`, `prompt`, `maxOutputTokens`, `expectedMarker`, and `dispatchAt`. The executor must use the operation ID as its idempotency/correlation key when supported. It returns through `record_result()` with one of `accepted`, `rejected`, or `ambiguous` and the exact `reportedModel`, `assistantText`, `finishReason`, and `assistantAt` fields for an accepted response. Transport timeouts after request dispatch are ambiguous; workers must not retry them. No new DB or credential store was introduced.
 
-## Integration still required
+## TypeScript integration
 
-The current TypeScript `job-submit` validator and `job-worker.ts` still expose session/fresh-task operations only. They must be extended before MCP callers can submit `inference` tasks or a worker can execute `run_inference`. That worker should route Oracle through the existing fixed-origin, scoped-token `createOracleModelApi` adapter and Cloudflare through `CloudflareAIAdapter`, using the live credential/model allowlists and per-account limits. Do not route inference through a synthetic session or use the Oracle upstream service token directly. Until that TypeScript worker is wired, the Python operation is persisted and testable but is not a live provider execution path.
+Source commit `58dc48e` adds the TypeScript inference submission, worker and
+runtime wiring. Oracle uses the fixed private API with an owner-private service
+credential and a trusted restriction-only host list; Cloudflare uses an exact
+credential pin in its existing adapter. No caller can supply upstream credentials
+or host lists. This is source implementation until a release/canary proves it.
+Codex and Claude durable execution adapters remain separate unfinished work.
+
+Cloudflare does not always report a model ID or finish reason. Its receipt
+therefore distinguishes `modelEvidence: pinned_endpoint` and
+`terminationEvidence: expected_marker`, with no invented reported model.
+The declared completion marker must be the final nonempty line. An explicit
+truncated/error finish signal takes precedence. Oracle requires its reported
+model and finish reason. Neither marker validation nor a successful HTTP call
+alone proves semantic artifact quality.
+
+`7bc043f` fixes optional in-memory-store compatibility and inference worker
+concurrency. `1c2c7e9` shares account-slot counters between same-process HTTP
+and job adapters; this does not provide cross-process leases.
 
 ## Verification
 

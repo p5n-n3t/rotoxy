@@ -74,6 +74,10 @@ ROTOXY has one provider Fleet that can serve authorized clients from different f
 ## Submitting jobs
 Use workspace_dispatch for a bounded job DAG connected to the collaboration ledger. Use job_submit when collaboration overhead is unnecessary. Both require an authorized projectId from workspace_projects.
 
+For bounded inference, inspect job_workers.inferenceResources first. Use only eligible account IDs and listed exact models. Submit execution={mode:"inference",provider:"oracle"|"cloudflare",model:<listed ID>,maxOutputTokens:<bounded integer>} through job_submit when its schema advertises it. Independent tasks may run concurrently; dependsOn gates later tasks. Each task needs explicit instructions, scopeKeys, bounded text output and an exact expectedMarker. Record the returned job ID, poll job_status, retrieve job_results, and inspect blocked/ambiguous outcomes. Do not interpret planning as dispatch or manufacture a provider session. Dependencies order tasks; they do not automatically inject prior outputs into later prompts. Use verified artifacts explicitly when synthesizing results.
+
+Cloudflare may provide endpoint-pinned model evidence and a final-marker completion contract rather than a reported model/finish reason. Preserve that distinction. Oracle reports model, selected host and finish reason. A completion marker proves the bounded output contract, not answer quality. Codex and Claude Code require their own verified durable executors; sign-in alone is insufficient.
+
 For workspace_dispatch jobs, track the original jobId with workspace_sync. Direct job_status and job_results address IDs returned by job_submit; workspace dispatch uses a separate private assignment ID internally. Do not pass a workspace job's original ID to those raw-job tools or treat a resulting not-found error as provider failure.
 
 Scheduling profiles economy, balanced, and throughput choose their own concurrency. To set a worker ceiling explicitly, use scheduling={"profile":"custom","maxConcurrency":1}. Do not attach maxConcurrency to any other profile; validation rejects that combination before execution.
