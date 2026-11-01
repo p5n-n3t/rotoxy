@@ -198,10 +198,10 @@ export class CloudflareAIAdapter {
         !Number.isInteger(this.maxInflight) || this.maxInflight < 1 || this.maxInflight > 32) throw new RangeError("Cloudflare adapter limits are invalid");
   }
 
-  private async acquire(model?: string): Promise<{ view: CloudflareCredentialView; token: string; release: () => void }> {
+  private async acquire(model?: string, pinnedAccountId?: string): Promise<{ view: CloudflareCredentialView; token: string; release: () => void }> {
     const [all, rules] = await Promise.all([this.credentials.listCredentials(), this.credentials.routingRules.read()]);
     const ruleFor = (id: string) => rules.resources[id];
-    const eligible = all.filter((account) => rules.pools?.cloudflare?.enabled !== false && account.enabled && ruleFor(account.id)?.enabled !== false && (account.cooldownUntil === undefined || account.cooldownUntil <= this.now()) &&
+    const eligible = all.filter((account) => (pinnedAccountId === undefined || account.id === pinnedAccountId) && rules.pools?.cloudflare?.enabled !== false && account.enabled && ruleFor(account.id)?.enabled !== false && (account.cooldownUntil === undefined || account.cooldownUntil <= this.now()) &&
       (model === undefined || account.allowedModels.includes(model) && routingRuleAllowsModel(ruleFor(account.id), model)) &&
       (this.inflight.get(account.id) ?? 0) < boundedAccountCapacity(ruleFor(account.id)?.capacity, this.maxInflight));
     if (!eligible.length) {
@@ -282,7 +282,8 @@ export class CloudflareAIAdapter {
     } finally { clearTimeout(timer); }
   }
 
-  async listModels(accountId?: string): Promise<unknown> {
+  async listModels(accountId?: string, maxPages = 20): Promise<unknown> {
+    if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 20) throw new CloudflareAIError("invalid_request");
     // Explicit admin metadata discovery may inspect disabled accounts; it does not permit inference.
     const account = accountId === undefined ? await this.acquire() : await (async () => {
       const credential = await this.credentials.credentialForRequest(accountId);
@@ -293,7 +294,7 @@ export class CloudflareAIAdapter {
     const deadline = Date.now() + this.timeoutMs;
     let truncated = false, pages = 0;
     try {
-      for (let page = 1; page <= 20; page++) {
+      for (let page = 1; page <= maxPages; page++) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new CloudflareAIError("upstream_ambiguous");
         const raw = await this.request(account, `/ai/models/search?page=${page}&per_page=100`, "GET", undefined, MAX_CATALOG_BYTES, remaining) as { result?: unknown; result_info?: { total_pages?: unknown } };
@@ -308,7 +309,7 @@ export class CloudflareAIAdapter {
         if (typeof totalPages === "number" && Number.isSafeInteger(totalPages) && totalPages >= 0) {
           if (page >= totalPages) break;
         } else if (raw.result.length < 100) break;
-        if (names.size >= 2000 || page === 20 || names.size === before) { truncated = true; break; }
+        if (names.size >= 2000 || page === maxPages || names.size === before) { truncated = true; break; }
       }
       truncated ||= names.size > 2000;
       return { success: true, result: [...names].slice(0, 2000).map(name => ({ name })), result_info: { count: Math.min(names.size, 2000), pages, truncated } };
@@ -322,6 +323,29 @@ export class CloudflareAIAdapter {
     try { json = JSON.stringify(input.input); } catch { throw new CloudflareAIError("invalid_request"); }
     if (Buffer.byteLength(json, "utf8") > 1_000_000) throw new CloudflareAIError("invalid_request");
     const account = await this.acquire(input.model);
+    return this.runWithAccount(account, input);
+  }
+
+  /** Execute on one exact persisted credential; task/account affinity is never silently rerouted. */
+  async runForAccount(accountId: string, input: CloudflareInferenceInput): Promise<unknown> {
+    return (await this.runForAccountWithReceipt(accountId, input)).result;
+  }
+
+  async runForAccountWithReceipt(accountId: string, input: CloudflareInferenceInput): Promise<{ result: unknown; credentialId: string; providerAccountId: string }> {
+    if (typeof accountId !== "string" || !/^[A-Za-z0-9_-]{8,80}$/.test(accountId) ||
+        !input || !validModel(input.model) || !input.input || typeof input.input !== "object" || Array.isArray(input.input)) {
+      throw new CloudflareAIError("invalid_request");
+    }
+    let json: string;
+    try { json = JSON.stringify(input.input); } catch { throw new CloudflareAIError("invalid_request"); }
+    if (Buffer.byteLength(json, "utf8") > 1_000_000) throw new CloudflareAIError("invalid_request");
+    const account = await this.acquire(input.model, accountId);
+    if (account.view.id !== accountId) { account.release(); throw new CloudflareAIError("no_eligible_account"); }
+    const result = await this.runWithAccount(account, input);
+    return { result, credentialId: account.view.id, providerAccountId: account.view.accountId };
+  }
+
+  private async runWithAccount(account: { view: CloudflareCredentialView; token: string; release: () => void }, input: CloudflareInferenceInput): Promise<unknown> {
     const started = this.now();
     let status = "failed";
     let usage: Record<string, number> | undefined;

@@ -19,7 +19,8 @@ export interface JobTaskInput {
   inputRef?: string;
   inputSha256?: string;
   instructions: string;
-  execution: { mode: "fresh"; provider: "claude" | "codex" | "auto" | "pi" } | { mode: "existing-session" };
+  execution: { mode: "fresh"; provider: "claude" | "codex" | "auto" | "pi" } | { mode: "existing-session" } |
+    { mode: "inference"; provider: "oracle" | "cloudflare"; model: string; maxOutputTokens: number };
   output: { kind: "text"; maxBytes: number; format: string; expectedMarker: string };
   priority?: number;
   observationTimeoutSeconds?: number;
@@ -101,7 +102,15 @@ function parseTask(raw: unknown): JobTaskInput {
   } else if (raw.execution.mode === "existing-session") {
     only(raw.execution, ["mode"], "execution");
     execution = { mode: "existing-session" };
-  } else throw new JobInputError("execution.mode must be fresh or existing-session");
+  } else if (raw.execution.mode === "inference") {
+    only(raw.execution, ["mode", "provider", "model", "maxOutputTokens"], "execution");
+    if (raw.execution.provider !== "oracle" && raw.execution.provider !== "cloudflare") throw new JobInputError("inference provider must be oracle or cloudflare");
+    const model = str(raw.execution.model, "inference model", 160);
+    const validModel = raw.execution.provider === "oracle" ? /^oracle\/[A-Za-z0-9._:-]{1,160}$/.test(model) : /^@?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+$/.test(model);
+    if (!validModel) throw new JobInputError("inference model does not match its provider");
+    if (!Number.isSafeInteger(raw.execution.maxOutputTokens) || Number(raw.execution.maxOutputTokens) < 1 || Number(raw.execution.maxOutputTokens) > 4096) throw new JobInputError("maxOutputTokens must be between 1 and 4096");
+    execution = { mode: "inference", provider: raw.execution.provider, model, maxOutputTokens: Number(raw.execution.maxOutputTokens) };
+  } else throw new JobInputError("execution.mode must be fresh, existing-session, or inference");
 
   if (!object(raw.output) || raw.output.kind !== "text") throw new JobInputError("the current supervisor supports bounded text output only");
   only(raw.output, ["kind", "maxBytes", "format", "expectedMarker"], "output");
@@ -167,7 +176,7 @@ const tool = (name: JobToolName, description: string, properties: Record<string,
 });
 const jobKey = { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" };
 export const JOB_TOOL_DEFINITIONS = [
-  tool("job_submit", "Submit one explicitly authorized bounded task DAG for durable multi-account execution.", {
+  tool("job_submit", "Submit one explicitly authorized bounded DAG for durable account-pinned execution. Inference tasks must select provider oracle or cloudflare, an exact allowlisted model, maxOutputTokens from 1 to 4096, and a text output marker. Oracle output requires provider-reported finish evidence; Cloudflare output must end with the exact expectedMarker as its final nonempty line. Oracle uses the small-model allowlist; Cloudflare model allowlists and account health are checked at dispatch.", {
     schemaVersion: { type: "integer", const: 1 }, jobId: jobKey, idempotencyKey: jobKey, projectId: jobKey,
     scheduling: { type: "object", additionalProperties: false, required: ["profile"], properties: {
       profile: { type: "string", enum: ["economy", "balanced", "throughput", "custom"] },
@@ -185,6 +194,11 @@ export const JOB_TOOL_DEFINITIONS = [
           { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { const: "existing-session" } } },
           { type: "object", additionalProperties: false, required: ["mode", "provider"], properties: {
             mode: { const: "fresh" }, provider: { type: "string", enum: ["claude", "codex", "auto", "pi"] },
+          } },
+          { type: "object", additionalProperties: false, required: ["mode", "provider", "model", "maxOutputTokens"], properties: {
+            mode: { const: "inference" }, provider: { type: "string", enum: ["oracle", "cloudflare"] },
+            model: { type: "string", minLength: 1, maxLength: 160, description: "Exact provider model ID; Oracle models are prefixed oracle/, Cloudflare IDs use @cf/…" },
+            maxOutputTokens: { type: "integer", minimum: 1, maximum: 4096, description: "Hard output token limit checked against the registered provider cap." },
           } },
         ] },
         output: { type: "object", additionalProperties: false, required: ["kind", "maxBytes", "format", "expectedMarker"], properties: {

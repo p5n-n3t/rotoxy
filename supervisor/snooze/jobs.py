@@ -351,6 +351,7 @@ class JobRegistry:
             "assignments": {"owner_principal": "TEXT", "client_id": "TEXT"},
             "job_tasks": {"released_at": "REAL", "dispatch_at": "REAL", "poll_count": "INTEGER NOT NULL DEFAULT 0", "reported_model": "TEXT", "provider_status": "TEXT"},
             "bridge_control": {"max_workers": "INTEGER NOT NULL DEFAULT 3"},
+            "job_results": {"metadata": "TEXT NOT NULL DEFAULT '{}'"},
         }
         for table, columns in additions.items():
             existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -1009,6 +1010,21 @@ class JobRegistry:
                     return True
         return False
 
+    @staticmethod
+    def _oracle_dispatch_window(db, now):
+        """Count durable recent Oracle run attempts against the fixed API's 10/minute limit."""
+        rows = db.execute("SELECT created_at,input FROM operations WHERE kind='run_inference' "
+                          "AND state IN ('claimed','accepted','ambiguous','rejected') AND created_at>?",
+                          (now - 60,)).fetchall()
+        times = []
+        for row in rows:
+            try:
+                if json.loads(row["input"]).get("provider") == "oracle":
+                    times.append(row["created_at"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+        return times
+
     def claim_operation(self, worker_id, lease_seconds=30, now=None):
         _text(worker_id, "workerId", 128)
         if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
@@ -1079,6 +1095,12 @@ class JobRegistry:
                             "taskId": op["task_id"], "generation": op["generation"], "operationId": op["id"]
                         }, when)
                         return None
+                    if inference["provider"] == "oracle":
+                        dispatched = self._oracle_dispatch_window(db, when)
+                        if len(dispatched) >= 10:
+                            db.execute("UPDATE operations SET due_at=? WHERE id=? AND state='queued'",
+                                       (min(dispatched) + 60, op["id"]))
+                            return None
                 occupied = db.execute(
                     "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) "
                     "AND (" + _SLOT_SQL + ")",
@@ -1159,7 +1181,7 @@ class JobRegistry:
         result = body.get("result", {})
         if not isinstance(result, dict) or len(json.dumps(result, separators=(",", ":")).encode()) > 32768:
             raise ValueError("Result must be a bounded object")
-        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "usage", "creditDebit", "finishReason"}
+        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "usage", "creditDebit", "finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId"}
         if set(result) - allowed_result:
             raise ValueError("Unsupported operation result fields")
         for key, value in result.items():
@@ -1177,6 +1199,25 @@ class JobRegistry:
                 _text(value["source"], "creditDebit.source", 512)
                 if type(value["verified"]) is not bool:
                     raise ValueError("Invalid provider credit debit verification")
+                continue
+            if key in {"terminationEvidence", "modelEvidence"}:
+                if not isinstance(value, str) or value not in {"provider_finish", "expected_marker", "provider_reported", "pinned_endpoint"}:
+                    raise ValueError("Invalid inference evidence")
+                continue
+            if key == "providerHost":
+                if value not in {"ora1", "ora3", "ora5", "ora6", "ora7", "ora8"}:
+                    raise ValueError("Invalid Oracle worker attribution")
+                continue
+            if key == "providerAccountId":
+                if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value):
+                    raise ValueError("Invalid Cloudflare account attribution")
+                continue
+            if key == "providerUsage":
+                if (not isinstance(value, dict) or len(value) > 8 or
+                        set(value) - {"prompt_tokens", "completion_tokens", "total_tokens", "neurons"} or
+                        any(type(count) not in {int, float} or not math.isfinite(count) or count < 0 or
+                            (name != "neurons" and type(count) is not int) for name, count in value.items())):
+                    raise ValueError("Invalid inference provider usage")
                 continue
             if isinstance(value, str):
                 # Assistant output is intentionally bounded separately by the
@@ -1232,10 +1273,26 @@ class JobRegistry:
                 spec = json.loads(db.execute("SELECT body FROM job_tasks WHERE assignment=? AND task_id=?",
                                               (op["assignment"], op["task_id"])).fetchone()["body"])
                 execution = spec["execution"]
-                if (not isinstance(result.get("assistantText"), str) or
-                        result.get("reportedModel") != execution["model"] or
-                        not isinstance(result.get("finishReason"), str) or not result["finishReason"]):
-                    raise ValueError("Accepted inference result requires exact model, text, and finish reason")
+                if not isinstance(result.get("assistantText"), str):
+                    raise ValueError("Accepted inference result requires text")
+                if execution["provider"] == "oracle":
+                    if (result.get("reportedModel") != execution["model"] or result.get("modelEvidence") != "provider_reported" or
+                            result.get("terminationEvidence") != "provider_finish" or result.get("finishReason") not in {"stop", "end_turn", "length"}):
+                        raise ValueError("Oracle inference requires provider model and finish evidence")
+                elif execution["provider"] == "cloudflare":
+                    if (result.get("reportedModel") is not None or result.get("modelEvidence") != "pinned_endpoint" or
+                            result.get("terminationEvidence") != "expected_marker" or
+                            result.get("finishReason") not in {None, "stop", "end_turn", "length", "error"} or
+                            not isinstance(result.get("providerAccountId"), str) or
+                            not re.fullmatch(r"[a-f0-9]{32}", result["providerAccountId"])):
+                        raise ValueError("Cloudflare inference requires pinned endpoint and marker evidence")
+                usage = result.get("providerUsage")
+                if usage is not None:
+                    if (not isinstance(usage, dict) or len(usage) > 8 or
+                            set(usage) - {"prompt_tokens", "completion_tokens", "total_tokens", "neurons"} or
+                            any(type(value) not in {int, float} or not math.isfinite(value) or value < 0 or
+                                (key != "neurons" and type(value) is not int) for key, value in usage.items())):
+                        raise ValueError("Invalid inference provider usage")
             debit = result.get("creditDebit")
             if debit is not None:
                 if self.credit_admission is None or op["kind"] != "chat_session" or outcome != "accepted":
@@ -1288,16 +1345,23 @@ class JobRegistry:
                 spec = json.loads(task["body"])
                 execution = spec["execution"]
                 text_value = result.get("assistantText", "")
-                complete = (result.get("finishReason") in {"stop", "end_turn"} and
-                            len(text_value.encode("utf-8")) <= spec["output"]["maxBytes"] and
-                            spec["output"]["expectedMarker"] in text_value)
+                lines = text_value.splitlines()
+                final_line = next((line for line in reversed(lines) if line.strip()), "")
+                marker_complete = final_line == spec["output"]["expectedMarker"]
+                provider_complete = (execution["provider"] == "oracle" and result.get("terminationEvidence") == "provider_finish" and
+                                     result.get("finishReason") in {"stop", "end_turn"})
+                marker_completion = (execution["provider"] == "cloudflare" and result.get("terminationEvidence") == "expected_marker" and
+                                     result.get("modelEvidence") == "pinned_endpoint" and result.get("reportedModel") is None and
+                                     result.get("finishReason") not in {"length", "error"})
+                complete = (provider_complete or marker_completion) and marker_complete and len(text_value.encode("utf-8")) <= spec["output"]["maxBytes"]
                 if complete:
                     assistant_at = result.get("assistantAt", when)
                     if type(assistant_at) not in {int, float} or not math.isfinite(assistant_at) or assistant_at < task["dispatch_at"]:
                         raise ValueError("Invalid inference completion timestamp")
-                    db.execute("INSERT OR IGNORE INTO job_results(assignment,task_id,generation,text,assistant_at,reported_model,created_at) VALUES(?,?,?,?,?,?,?)",
+                    metadata = {key: result[key] for key in ("finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId") if key in result}
+                    db.execute("INSERT OR IGNORE INTO job_results(assignment,task_id,generation,text,assistant_at,reported_model,created_at,metadata) VALUES(?,?,?,?,?,?,?,?)",
                                (op["assignment"], op["task_id"], op["generation"], text_value,
-                                assistant_at, result["reportedModel"], when))
+                                assistant_at, result.get("reportedModel"), when, json.dumps(metadata, sort_keys=True)))
                     db.execute("UPDATE job_tasks SET reported_model=?,released_at=? WHERE assignment=? AND task_id=? AND generation=?",
                                (result["reportedModel"], when, op["assignment"], op["task_id"], op["generation"]))
                     db.execute("UPDATE attempts SET state='complete',released_at=? WHERE id=? AND released_at IS NULL",
@@ -1439,8 +1503,14 @@ class JobRegistry:
                 raise KeyError("Assignment not found")
             if not (shared or self._owner_matches(row, owner_principal_id, client_id)):
                 raise KeyError("Assignment not found")
-            results = db.execute("SELECT task_id,generation,text,assistant_at,reported_model,created_at FROM job_results WHERE assignment=? ORDER BY task_id,generation", (assignment_id,)).fetchall()
-            return {"assignmentId": assignment_id, "results": [dict(item) for item in results]}
+            results = db.execute("SELECT task_id,generation,text,assistant_at,reported_model,created_at,metadata FROM job_results WHERE assignment=? ORDER BY task_id,generation", (assignment_id,)).fetchall()
+            values = []
+            for item in results:
+                row = dict(item)
+                try: metadata = json.loads(row.pop("metadata") or "{}")
+                except (TypeError, json.JSONDecodeError): metadata = {}
+                values.append({**row, **metadata})
+            return {"assignmentId": assignment_id, "results": values}
 
     def reconcile_task(self, assignment_id, task_id, expected_revision,
                        owner_principal_id=None, client_id=None, now=None):

@@ -122,12 +122,189 @@ class JobRegistryTests(unittest.TestCase):
         })
         result = {"workerId": "oracle-worker", "outcome": "accepted", "result": {
             "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 4,
+            "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
+            "providerUsage": {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13},
         }}
         recorded = self.registry.record_result(operation["operationId"], result, now=4)
         self.assertEqual(recorded["state"], "complete")
         self.assertEqual(self.registry.get_assignment("inference-job")["state"], "complete")
-        self.assertEqual(self.registry.assignment_results("inference-job")["results"][0]["text"], "DONE")
+        saved = self.registry.assignment_results("inference-job")["results"][0]
+        self.assertEqual(saved["text"], "DONE")
+        self.assertEqual(saved["finishReason"], "stop")
+        self.assertEqual(saved["modelEvidence"], "provider_reported")
+        self.assertEqual(saved["providerUsage"]["total_tokens"], 13)
         self.assertTrue(self.registry.record_result(operation["operationId"], result, now=5)["replayed"])
+
+    def test_cloudflare_inference_requires_pinned_model_and_final_marker_evidence(self):
+        self.registry.register_account({
+            "accountId": "cf-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "cloudflare", "models": ["@cf/meta/model"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        value = task("cloudflare-inference", account="cf-a")
+        value["execution"] = {"mode": "inference", "accountId": "cf-a", "provider": "cloudflare",
+                              "model": "@cf/meta/model", "maxOutputTokens": 96}
+        body = assignment("cloudflare-job", "cloudflare-key", [value], accounts=["cf-a"])
+        self.registry.submit(body, now=2)
+        operation = self.registry.claim_operation("cf-worker", now=3)
+        recorded = self.registry.record_result(operation["operationId"], {
+            "workerId": "cf-worker", "outcome": "accepted", "result": {
+                "assistantText": "Answer\nDONE", "reportedModel": None, "assistantAt": 4,
+                "modelEvidence": "pinned_endpoint", "terminationEvidence": "expected_marker",
+                "providerAccountId": "0123456789abcdef0123456789abcdef",
+                "providerUsage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            },
+        }, now=4)
+        self.assertEqual(recorded["state"], "complete")
+        saved = self.registry.assignment_results("cloudflare-job")["results"][0]
+        self.assertIsNone(saved["reported_model"])
+        self.assertEqual(saved["modelEvidence"], "pinned_endpoint")
+        self.assertEqual(saved["providerAccountId"], "0123456789abcdef0123456789abcdef")
+        self.assertEqual(saved["providerUsage"]["completion_tokens"], 2)
+
+    def test_cloudflare_finish_length_overrides_terminal_marker(self):
+        self.registry.register_account({
+            "accountId": "cf-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "cloudflare", "models": ["@cf/meta/model"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        value = task("cloudflare-length", account="cf-a")
+        value["execution"] = {"mode": "inference", "accountId": "cf-a", "provider": "cloudflare",
+                              "model": "@cf/meta/model", "maxOutputTokens": 96}
+        self.registry.submit(assignment("cloudflare-length-job", "cloudflare-length-key", [value], accounts=["cf-a"]), now=2)
+        operation = self.registry.claim_operation("cf-worker", now=3)
+        result = {"workerId": "cf-worker", "outcome": "accepted", "result": {
+            "assistantText": "Answer\nDONE", "reportedModel": None, "finishReason": "length", "assistantAt": 4,
+            "modelEvidence": "pinned_endpoint", "terminationEvidence": "expected_marker",
+            "providerAccountId": "0123456789abcdef0123456789abcdef",
+        }}
+        self.assertEqual(self.registry.record_result(operation["operationId"], result, now=4)["state"], "blocked")
+        self.assertEqual(self.registry.assignment_results("cloudflare-length-job")["results"], [])
+
+    def test_oracle_inference_respects_durable_ten_per_minute_window(self):
+        self.registry.register_account({
+            "accountId": "oracle-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "localCapacity": 16, "registeredSessions": [], "inferenceProviders": [{
+                "provider": "oracle", "models": ["oracle/qwen3.5:2b"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        for index in range(10):
+            at = 10 + index
+            value = task(f"oracle-rate-{index}", account="oracle-a", scope=f"record:rate-{index}")
+            value["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                                  "model": "oracle/qwen3.5:2b", "maxOutputTokens": 96}
+            assignment_id = f"oracle-rate-job-{index}"
+            self.registry.submit(assignment(assignment_id, f"oracle-rate-key-{index}", [value], accounts=["oracle-a"]), now=at)
+            operation = self.registry.claim_operation("oracle-worker", now=at)
+            self.assertIsNotNone(operation)
+            self.registry.record_result(operation["operationId"], {"workerId": "oracle-worker", "outcome": "accepted", "result": {
+                "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": at + 1,
+                "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
+            }}, now=at + 1)
+        value = task("oracle-rate-10", account="oracle-a", scope="record:rate-10")
+        value["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                              "model": "oracle/qwen3.5:2b", "maxOutputTokens": 96}
+        self.registry.submit(assignment("oracle-rate-job-10", "oracle-rate-key-10", [value], accounts=["oracle-a"]), now=20)
+        self.assertIsNone(self.registry.claim_operation("oracle-worker", now=20))
+        status = self.registry.get_assignment("oracle-rate-job-10")
+        self.assertEqual(status["tasks"][0]["state"], "reserved")
+        self.assertIsNone(self.registry.claim_operation("oracle-worker", now=69))
+        operation = self.registry.claim_operation("oracle-worker", now=70)
+        self.assertIsNotNone(operation)
+
+    def test_oracle_and_cloudflare_dag_survives_restart_and_two_hour_gap(self):
+        self.registry.register_account({
+            "accountId": "oracle-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "oracle", "models": ["oracle/qwen3.5:2b"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        self.registry.register_account({
+            "accountId": "cf-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "cloudflare", "models": ["@cf/meta/model"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        first = task("oracle-research", account="oracle-a", scope="record:research-source")
+        first["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                              "model": "oracle/qwen3.5:2b", "maxOutputTokens": 96}
+        second = task("cloudflare-synthesis", account="cf-a", depends=["oracle-research"], scope="record:research-synthesis")
+        second["execution"] = {"mode": "inference", "accountId": "cf-a", "provider": "cloudflare",
+                               "model": "@cf/meta/model", "maxOutputTokens": 96}
+        body = assignment("mixed-research-job", "mixed-research-key", [first, second], accounts=["oracle-a", "cf-a"])
+        self.registry.submit(body, now=10)
+        operation = self.registry.claim_operation("worker", now=11)
+        self.assertEqual(operation["kind"], "run_inference")
+        self.assertEqual(operation["selectedAccountId"], "oracle-a")
+        self.registry.record_result(operation["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {
+            "assistantText": "Source notes\nDONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 12,
+            "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish", "providerHost": "ora8",
+        }}, now=12)
+        # Simulate a two-hour wait and supervisor process restart between DAG nodes.
+        reopened = JobRegistry(self.db)
+        operation = reopened.claim_operation("worker-after-restart", now=10 + 7200)
+        self.assertEqual(operation["kind"], "run_inference")
+        self.assertEqual(operation["selectedAccountId"], "cf-a")
+        reopened.record_result(operation["operationId"], {"workerId": "worker-after-restart", "outcome": "accepted", "result": {
+            "assistantText": "Summary\nDONE", "reportedModel": None, "assistantAt": 10 + 7201,
+            "modelEvidence": "pinned_endpoint", "terminationEvidence": "expected_marker",
+            "providerAccountId": "0123456789abcdef0123456789abcdef",
+        }}, now=10 + 7201)
+        self.assertEqual(reopened.get_assignment("mixed-research-job")["state"], "complete")
+        results = reopened.assignment_results("mixed-research-job")["results"]
+        self.assertEqual([row["task_id"] for row in results], ["cloudflare-synthesis", "oracle-research"])
+        self.assertEqual(next(row for row in results if row["task_id"] == "oracle-research")["providerHost"], "ora8")
+
+    def test_inference_cancel_retains_ambiguous_remote_execution(self):
+        self.registry.register_account({
+            "accountId": "oracle-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "oracle", "models": ["oracle/qwen3.5:2b"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        value = task("cancel-inference", account="oracle-a")
+        value["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                              "model": "oracle/qwen3.5:2b", "maxOutputTokens": 96}
+        self.registry.submit(assignment("cancel-inference-job", "cancel-inference-key", [value], accounts=["oracle-a"]), now=2)
+        operation = self.registry.claim_operation("oracle-worker", now=3)
+        cancelled = self.registry.cancel_assignment("cancel-inference-job", expected_revision=1, now=4)
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(self.registry.get_assignment("cancel-inference-job")["tasks"][0]["state"], "cancel_pending")
+        with self.assertRaisesRegex(RuntimeError, "Conflicting operation result"):
+            self.registry.record_result(operation["operationId"], {"workerId": "oracle-worker", "outcome": "accepted", "result": {
+                "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 5,
+                "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
+            }}, now=5)
+
+    def test_inference_dispatch_rechecks_disabled_and_changed_models(self):
+        self.registry.register_account({
+            "accountId": "oracle-a", "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "oracle", "models": ["oracle/qwen3.5:2b"], "maxOutputTokens": 128,
+            }],
+        }, now=1)
+        value = task("disabled-inference", account="oracle-a")
+        value["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                              "model": "oracle/qwen3.5:2b", "maxOutputTokens": 96}
+        self.registry.submit(assignment("disabled-inference-job", "disabled-inference-key", [value], accounts=["oracle-a"]), now=2)
+        self.registry.register_account({
+            "accountId": "oracle-a", "enabled": False, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "registeredSessions": [], "inferenceProviders": [{
+                "provider": "oracle", "models": ["oracle/qwen3.5:2b"], "maxOutputTokens": 128,
+            }],
+        }, now=3)
+        self.assertIsNone(self.registry.claim_operation("oracle-worker", now=4))
+        self.assertEqual(self.registry.get_assignment("disabled-inference-job")["tasks"][0]["state"], "queued")
 
     def test_inference_lease_expiry_is_ambiguous_and_never_redispatched(self):
         self.registry.register_account({
@@ -175,6 +352,7 @@ class JobRegistryTests(unittest.TestCase):
             "workerId": "oracle-worker", "outcome": "accepted", "result": {
                 "assistantText": "Partial answer without marker", "reportedModel": "oracle/qwen3.5:2b",
                 "finishReason": "length", "assistantAt": 4,
+                "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
             },
         }, now=4)
         self.assertEqual(recorded["state"], "blocked")

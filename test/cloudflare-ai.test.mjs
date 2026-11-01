@@ -136,3 +136,31 @@ test("Cloudflare inference makes one bounded attempt and reports ambiguous trans
   await assert.rejects(quota.run({ model: "@cf/meta/llama-3.1-8b-instruct", input: { prompt: "hello" } }), (error) => error.code === "no_eligible_account");
   assert.equal(quotaCalls, 1, "429 cools down the account and prevents another attempt");
 });
+
+test("Cloudflare job inference pins a credential and returns provider-account attribution", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "t2o-cloudflare-pinned-job-"));
+  const oldHome = process.env.HOME, oldConfig = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.HOME = join(root, "home"); process.env.TOKEN2OAUTH_CONFIG_DIR = join(root, "config");
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = oldConfig;
+  });
+  const store = new StateStore(); await store.init({ adminPassword: "temporary-cloudflare-pinned-test" });
+  const credentials = new CloudflareCredentialStore(store);
+  const model = "@cf/meta/llama-3.1-8b-instruct";
+  const first = await credentials.addCredential({ label: "first", accountId: "a".repeat(32), token: "secret-token-first", allowedModels: [model] });
+  const second = await credentials.addCredential({ label: "second", accountId: "b".repeat(32), token: "secret-token-second", allowedModels: [model] });
+  const calls = [];
+  const adapter = new CloudflareAIAdapter(credentials, { fetch: async (url, init) => {
+    calls.push({ url, init }); return Response.json({ success: true, result: { response: "Answer\nDONE" } });
+  } });
+  const receipt = await adapter.runForAccountWithReceipt(second.id, { model, input: { prompt: "write", max_tokens: 20 } });
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0].url).pathname, `/client/v4/accounts/${"b".repeat(32)}/ai/run/%40cf/meta/llama-3.1-8b-instruct`);
+  assert.equal(calls[0].init.headers.authorization, "Bearer secret-token-second");
+  assert.equal(receipt.credentialId, second.id);
+  assert.equal(receipt.providerAccountId, "b".repeat(32));
+  assert.deepEqual(receipt.result.result, { response: "Answer\nDONE" });
+  await credentials.updateCredential(first.id, { enabled: false });
+});

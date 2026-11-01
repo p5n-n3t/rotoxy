@@ -1,10 +1,12 @@
 import {ResourceRoutingRulesStore, boundedAccountCapacity} from "./resource-routing.js";
+import { routingRuleAllowsModel } from "./resource-routing.js";
+import { CloudflareAIAdapter, CloudflareCredentialStore } from "./cloudflare-ai.js";
 import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, lstat, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { PROVIDER_PROFILES } from "./provider-capabilities.js";
 import { createJobWorker, type JobBridge, type JobWorkerOptions, type PinnedJobsAdapter } from "./job-worker.js";
 import { JobInputError, validateJobToolArguments, type JobTaskInput, type JobToolName } from "./job-submit.js";
@@ -21,6 +23,7 @@ import { evaluateToolCall } from "./tool-policy.js";
 import { normalizeParkedQuestion } from "./worker-observation.js";
 import { WorkerGuidanceLedger, WorkerGuidanceService, type WorkerGuidanceInput, type WorkerGuidanceResult } from "./worker-guidance.js";
 import { safeClientId } from "./oauth-client-id.js";
+import { InferenceJobsAdapter, inferenceRequest } from "./providers/inference-jobs.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
@@ -28,6 +31,7 @@ const ACCOUNT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const SESSION_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const FRESH_PROVIDERS = ["claude", "codex", "auto", "pi"] as const;
+const ORACLE_SMALL_MODELS = new Set(["deepseek-r1:1.5b", "qwen3.5:2b"]);
 const STACK_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CONFIG = 64 * 1024;
 type RuntimeStateGroup = "supervision" | "oracle-pool";
@@ -47,7 +51,9 @@ export function runtimeStateRoot(group: RuntimeStateGroup, home = homedir()): st
 export function runtimeStatePath(group: RuntimeStateGroup, ...parts: string[]): string { return join(runtimeStateRoot(group), group, ...parts); }
 type RegisteredSession = { sessionId: string; accountId: string; model: string; workspaceId: string };
 type FreshProvisioningBinding = { accountId: string; workspaceId: string; stackId: string; provider: "claude" | "codex" | "auto" | "pi" };
-type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[]; freshProvisioningBindings?: FreshProvisioningBinding[] };
+type OracleInferenceBinding = { accountId: string; provider: "oracle"; maxOutputTokens: number };
+type InferenceResourceSnapshot = { provider: "oracle" | "cloudflare"; enabled: boolean; authorized: boolean; health: string; models: string[]; maxOutputTokens: number; capacity: number; oracleHosts?: string[] };
+type ProjectPolicy = { projectId: string; clientIds: string[]; accountIds: string[]; registeredSessions: RegisteredSession[]; freshProvisioningBindings?: FreshProvisioningBinding[]; inferenceBindings?: OracleInferenceBinding[] };
 /** An operator-opted-in shared provider workspace, distinct from project folders. */
 type SharedWorkspacePolicy = { projectId: string; membership: "consented_oauth" | "authenticated_mcp" };
 export interface SupervisorRuntimeConfig {
@@ -68,10 +74,13 @@ export interface SupervisorRuntimeOptions {
   recoveryDbPath?: string;
   oracleConfigPath?: string;
   oracleDbPath?: string;
+  oracleCachePath?: string;
   store: StateStore;
   bridgeOptions?: Partial<SupervisorBridgeOptions>;
   /** Injection seam for deterministic tests; production defaults to the pinned LightSprint adapter. */
   adapterFactory?: JobWorkerOptions["adapterFactory"];
+  inferenceExecutorFactory?: JobWorkerOptions["inferenceExecutorFactory"];
+  oracleInventoryReader?: () => Promise<unknown>;
   workerOptions?: Partial<Pick<JobWorkerOptions, "pollIntervalMs" | "requestTimeoutMs" | "adapterTimeoutMs" | "now" | "onDiagnostic">>;
 }
 
@@ -180,7 +189,7 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
       !Number.isInteger(raw.localLimits.maxOutputBytes) || Number(raw.localLimits.maxOutputBytes) < 1 || Number(raw.localLimits.maxOutputBytes) > 32_768) throw new Error("Supervisor limits exceed supported bounds");
   const projects: ProjectPolicy[] = raw.projects.map((candidate: unknown): ProjectPolicy => {
     if (!object(candidate)) throw new Error("Invalid project policy");
-    assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions", "freshProvisioningBindings"], "project");
+    assertKeys(candidate, ["projectId", "clientIds", "accountIds", "registeredSessions", "freshProvisioningBindings", "inferenceBindings"], "project");
     const projectId = candidate.projectId, rawClientIds = candidate.clientIds, rawAccountIds = candidate.accountIds, rawSessions = candidate.registeredSessions;
     if (!safeId(projectId) || !Array.isArray(rawClientIds) || rawClientIds.length > 50 || !rawClientIds.every(safeClientId) || new Set(rawClientIds).size !== rawClientIds.length ||
         !Array.isArray(rawAccountIds) || rawAccountIds.length > 50 || !rawAccountIds.every(safeAccountId) || new Set(rawAccountIds).size !== rawAccountIds.length || !Array.isArray(rawSessions)) throw new Error("Invalid project bindings");
@@ -207,8 +216,22 @@ export async function readSupervisorRuntimeConfig(path: string): Promise<Supervi
       });
       if (new Set(freshProvisioningBindings.map((item) => `${item.accountId}:${item.provider}`)).size !== freshProvisioningBindings.length) throw new Error("Each account/provider pair may have only one fresh-provisioning binding");
     }
+    let inferenceBindings: OracleInferenceBinding[] | undefined;
+    if (candidate.inferenceBindings !== undefined) {
+      if (!Array.isArray(candidate.inferenceBindings) || candidate.inferenceBindings.length > 50) throw new Error("Invalid inference bindings");
+      inferenceBindings = candidate.inferenceBindings.map((item: unknown): OracleInferenceBinding => {
+        if (!object(item)) throw new Error("Invalid inference binding");
+        assertKeys(item, ["accountId", "provider", "maxOutputTokens"], "inferenceBinding");
+        if (!safeAccountId(item.accountId) || !accountIds.includes(item.accountId) || item.provider !== "oracle" ||
+            !Number.isSafeInteger(item.maxOutputTokens) || Number(item.maxOutputTokens) < 1 || Number(item.maxOutputTokens) > 4096) {
+          throw new Error("Oracle inference bindings require a project account, fixed provider, and bounded output limit");
+        }
+        return { accountId: item.accountId, provider: "oracle", maxOutputTokens: Number(item.maxOutputTokens) };
+      });
+      if (new Set(inferenceBindings.map((item) => item.accountId)).size !== inferenceBindings.length) throw new Error("Duplicate inference binding account");
+    }
     return { projectId, clientIds: rawClientIds as string[], accountIds, registeredSessions,
-      ...(freshProvisioningBindings ? { freshProvisioningBindings } : {}) };
+      ...(freshProvisioningBindings ? { freshProvisioningBindings } : {}), ...(inferenceBindings ? { inferenceBindings } : {}) };
   });
   if (!projects.length || new Set(projects.map((item) => item.projectId)).size !== projects.length) throw new Error("Supervisor config needs unique projects");
   let sharedWorkspace: SharedWorkspacePolicy | undefined;
@@ -253,11 +276,22 @@ export class SupervisorRuntime implements SupervisorBackend {
    */
   private readonly monitorRegistrationByProject = new Map<string, { expected: number; sessions: number; authorizedViewers: number; remoteReads: number; registered: number; failed: number }>();
   private readonly workerGuidance: WorkerGuidanceService;
+  private readonly cloudflareCredentials: CloudflareCredentialStore;
+  private readonly cloudflareInference: CloudflareAIAdapter;
+  private readonly inferenceAdapter: InferenceJobsAdapter;
+  private inferenceSnapshotCache?: { at: number; value: Map<string, InferenceResourceSnapshot> };
+  private readonly cloudflareCatalogCache = new Map<string, { at: number; models: Set<string>; valid: boolean }>();
+  private oracleRefreshAttemptAt = 0;
 
   constructor(private config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
     this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
     this.supervisionDbPath = options.supervisionDbPath ?? runtimeStatePath("supervision", "inbox.sqlite");
     this.recoveryDbPath = options.recoveryDbPath ?? runtimeStatePath("supervision", "recovery.sqlite3");
+    this.cloudflareCredentials = new CloudflareCredentialStore(options.store);
+    this.cloudflareInference = new CloudflareAIAdapter(this.cloudflareCredentials, { maxTokens: 4096, maxInflightPerAccount: 1 });
+    this.inferenceAdapter = new InferenceJobsAdapter({ cloudflare: this.cloudflareInference,
+      oracleTokenFile: process.env.ROTOXY_ORACLE_API_TOKEN_FILE, timeoutMs: 120_000,
+      oracleAllowedHosts: async (accountId) => (await this.inferenceResources(true)).get(accountId)?.oracleHosts ?? [] });
     this.workerGuidance = new WorkerGuidanceService({
       ledger: new WorkerGuidanceLedger(options.store, options.configDir),
       findWorker: (projectId, workerId) => {
@@ -379,10 +413,128 @@ export class SupervisorRuntime implements SupervisorBackend {
   }
 
   private dispatchPolicyFingerprint = "";
+  private async readOracleInventory(request: { action: "read" | "refresh"; expectedCacheRevision?: string } = { action: "read" }): Promise<unknown> {
+    if (this.options.oracleInventoryReader) return this.options.oracleInventoryReader();
+    const args = ["-m", "snooze.oracle_model_admin", "--config", this.options.oracleConfigPath ?? runtimeStatePath("oracle-pool", "config.json"),
+      "--db", this.options.oracleDbPath ?? runtimeStatePath("oracle-pool", "queue.sqlite3"),
+      "--cache", this.options.oracleCachePath ?? resolve(this.options.store.dir, "oracle-model-inventory.json")];
+    return new Promise((resolvePromise, reject) => {
+      const child = nodeSpawn("/usr/bin/python3", args, { cwd: this.supervisorCwd, env: {
+        PATH: "/usr/local/bin:/usr/bin:/bin", HOME: homedir(), LANG: "C.UTF-8",
+      }, stdio: ["pipe", "pipe", "ignore"], shell: false });
+      const chunks: Buffer[] = []; let size = 0, settled = false;
+      const finish = (error?: Error, value?: unknown) => {
+        if (settled) return; settled = true; clearTimeout(timer);
+        if (error) reject(error); else resolvePromise(value);
+      };
+      const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new Error("oracle_inventory_timeout")); }, request.action === "refresh" ? 45_000 : 10_000);
+      child.stdout.on("data", (part: Buffer | string) => {
+        const data = Buffer.isBuffer(part) ? part : Buffer.from(part); size += data.length;
+        if (size > 256 * 1024) { child.kill("SIGKILL"); finish(new Error("oracle_inventory_too_large")); return; }
+        chunks.push(data);
+      });
+      child.on("error", () => finish(new Error("oracle_inventory_unavailable")));
+      child.on("close", (code) => {
+        if (code !== 0) return finish(new Error("oracle_inventory_unavailable"));
+        try { finish(undefined, JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+        catch { finish(new Error("oracle_inventory_invalid")); }
+      });
+      child.stdin.on("error", () => undefined);
+      child.stdin.end(JSON.stringify(request));
+    });
+  }
+
+  private async inferenceResources(force = false): Promise<Map<string, InferenceResourceSnapshot>> {
+    const now = Date.now();
+    if (!force && this.inferenceSnapshotCache && now - this.inferenceSnapshotCache.at < 5_000) return this.inferenceSnapshotCache.value;
+    const [credentials, rules] = await Promise.all([this.cloudflareCredentials.listCredentials(), new ResourceRoutingRulesStore(this.options.store, this.options.configDir).read()]);
+    const permitted = new Set(this.config.projects.flatMap(project => project.accountIds));
+    const found = new Map<string, InferenceResourceSnapshot>();
+    for (const credential of credentials) {
+      if (!permitted.has(credential.id)) continue;
+      const rule = rules.resources[credential.id];
+      const poolEnabled = rules.pools?.cloudflare?.enabled !== false;
+      const enabled = credential.enabled && poolEnabled && rule?.enabled !== false;
+      const cooling = (credential.cooldownUntil ?? 0) > now;
+      let catalog = this.cloudflareCatalogCache.get(credential.id);
+      if (enabled && !cooling && (!catalog || now - catalog.at > 300_000)) {
+        try {
+          const raw = await this.cloudflareInference.listModels(credential.id, 2);
+          const root = object(raw) ? raw : undefined;
+          const rows = Array.isArray(root?.result) ? root!.result : [];
+          const models = new Set(rows.flatMap((row: unknown) => object(row) && typeof row.name === "string" ? [row.name] : []));
+          catalog = { at: now, models, valid: root?.success === true };
+        } catch { catalog = { at: now, models: new Set<string>(), valid: false }; }
+        this.cloudflareCatalogCache.set(credential.id, catalog);
+      }
+      const models = enabled ? credential.allowedModels.filter(model => catalog?.models.has(model) && routingRuleAllowsModel(rule, model)) : [];
+      found.set(credential.id, { provider: "cloudflare", enabled,
+        authorized: true, health: !enabled || cooling ? "degraded" : catalog?.valid ? "healthy" : "unknown", models,
+        maxOutputTokens: 4096, capacity: Math.min(1, boundedAccountCapacity(rule?.capacity, 1)) });
+    }
+    const oracleBindings = this.config.projects.flatMap(project => project.inferenceBindings ?? [])
+      .filter(binding => permitted.has(binding.accountId));
+    if (oracleBindings.length) {
+      try {
+        let raw = await this.readOracleInventory();
+        let inventory = object(raw) ? raw : undefined;
+        let cacheAt = inventory && typeof inventory.cacheUpdatedAt === "number" ? inventory.cacheUpdatedAt : undefined;
+        let fresh = cacheAt !== undefined && now / 1000 >= cacheAt && now / 1000 - cacheAt <= 300;
+        const maintenanceInitiallyPaused = object(inventory?.maintenance) && inventory?.maintenance.paused === true;
+        if (!fresh && !maintenanceInitiallyPaused && this.oracleRefreshAttemptAt < now - 60_000 &&
+            typeof inventory?.cacheRevision === "string" && /^[A-Za-z0-9_-]{24}$/.test(inventory.cacheRevision)) {
+          this.oracleRefreshAttemptAt = now;
+          try {
+            raw = await this.readOracleInventory({ action: "refresh", expectedCacheRevision: inventory.cacheRevision });
+            inventory = object(raw) ? raw : undefined;
+            cacheAt = inventory && typeof inventory.cacheUpdatedAt === "number" ? inventory.cacheUpdatedAt : undefined;
+            fresh = cacheAt !== undefined && now / 1000 >= cacheAt && now / 1000 - cacheAt <= 300;
+          } catch { /* stale inventory remains ineligible; next ordinary refresh is throttled */ }
+        }
+        const inventoryHosts = Array.isArray(inventory?.hosts) ? inventory.hosts : [];
+        const maintenancePaused = object(inventory?.maintenance) && inventory?.maintenance.paused === true;
+        const healthyHosts = fresh && !maintenancePaused ? inventoryHosts.filter((host: unknown) => object(host) && host.enabled === true && host.hostStatus === "healthy" &&
+          typeof host.observedAt === "number" && now / 1000 >= host.observedAt && now / 1000 - host.observedAt <= 300 && Array.isArray(host.allowedModels) && Array.isArray(host.models)) as Array<Record<string, unknown>> : [];
+        const installedAllowed = new Set<string>();
+        for (const host of healthyHosts) {
+          const allowed = new Set(host.allowedModels as string[]);
+          for (const model of host.models as Array<Record<string, unknown>>) {
+            if (typeof model.name === "string" && ORACLE_SMALL_MODELS.has(model.name) && allowed.has(model.name) &&
+                typeof model.size === "number" && Number.isFinite(model.size) && model.size > 0) installedAllowed.add(`oracle/${model.name}`);
+          }
+        }
+        let tokenAvailable = false;
+        const tokenFile = process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+        if (tokenFile && isAbsolute(tokenFile)) {
+          try { const stat = await lstat(tokenFile); tokenAvailable = stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0 && stat.size > 0 && stat.size <= 4096; }
+          catch { tokenAvailable = false; }
+        }
+        for (const binding of oracleBindings) {
+          if (found.has(binding.accountId)) continue;
+          found.set(binding.accountId, { provider: "oracle", enabled: tokenAvailable && healthyHosts.length > 0,
+            authorized: tokenAvailable, health: healthyHosts.length > 0 ? "healthy" : "unknown",
+            models: [...installedAllowed].sort(), maxOutputTokens: binding.maxOutputTokens,
+            capacity: Math.min(5, healthyHosts.length), oracleHosts: healthyHosts.map(host => String(host.id)).filter(id => /^ora(?:1|3|5|6|7|8)$/.test(id)) });
+        }
+      } catch {
+        for (const binding of oracleBindings) if (!found.has(binding.accountId)) found.set(binding.accountId, {
+          provider: "oracle", enabled: false, authorized: false, health: "unknown", models: [],
+          maxOutputTokens: binding.maxOutputTokens, capacity: 0, oracleHosts: [],
+        });
+      }
+    }
+    this.inferenceSnapshotCache = { at: now, value: found };
+    return found;
+  }
+
   private async syncDispatchPolicy():Promise<void>{
-    const [state,rules]=await Promise.all([this.options.store.load(),new ResourceRoutingRulesStore(this.options.store,this.options.configDir).read()]);
+    const [state,rules,inference]=await Promise.all([this.options.store.load(),new ResourceRoutingRulesStore(this.options.store,this.options.configDir).read(),this.inferenceResources(true)]);
     const payloads=[...new Set(this.config.projects.flatMap(p=>p.accountIds))].map(accountId=>{
       const account=state.accounts.find(a=>a.id===accountId);
+      const inferenceResource=inference.get(accountId);
+      if(inferenceResource){return {accountId,enabled:inferenceResource.enabled,authorized:inferenceResource.authorized,
+        allowUnknownQuota:this.config.allowUnknownQuota,health:inferenceResource.health,quota:"unknown",localCapacity:Math.min(16,Math.max(1,inferenceResource.capacity)),
+        registeredSessions:[],inferenceProviders:inferenceResource.models.length?[{provider:inferenceResource.provider,models:inferenceResource.models,maxOutputTokens:inferenceResource.maxOutputTokens}]:[]};}
       const signal=accountSignal(account,nativeLightSprintTarget(state.config.upstreamUrl));
       const sessions=this.config.projects.flatMap(p=>p.registeredSessions).filter(s=>s.accountId===accountId);
       if(sessions.length>100)throw new Error("Supervisor config exceeds 100 sessions per account");
@@ -507,14 +659,26 @@ export class SupervisorRuntime implements SupervisorBackend {
     };
       const registeredModels = [...new Set(this.config.projects.flatMap(project => project.registeredSessions.map(session => session.model)))];
       const freshBindingsConfigured = this.config.projects.some((project) => (project.freshProvisioningBindings?.length ?? 0) > 0);
+      const inferenceBindingsConfigured = this.config.projects.some((project) => (project.inferenceBindings?.length ?? 0) > 0 ||
+        project.accountIds.some((id) => this.inferenceSnapshotCache?.value.has(id)));
       // Fleet discovery and collaboration work before the first worker is bound.
       // Empty fleets have no dispatch worker; do not invent an allowed model.
-      if (registeredModels.length || freshBindingsConfigured) {
+      if (registeredModels.length || freshBindingsConfigured || inferenceBindingsConfigured) {
       this.worker = createJobWorker({
         bridge: workerBridge,
         beforeClaim: () => this.syncDispatchPolicy(),
         adapterFactory: adapters,
         operationAdapterFactory: operationAdapters,
+        inferenceExecutorFactory: this.options.inferenceExecutorFactory ?? (() => this.inferenceAdapter),
+        isInferenceEligible: async (op) => {
+          const request = inferenceRequest(op);
+          if (!request) return false;
+          const resources = await this.inferenceResources(true);
+          const resource = resources.get(request.accountId);
+          return !!resource && resource.provider === request.provider && resource.enabled && resource.authorized &&
+            resource.health === "healthy" && resource.capacity > 0 && resource.models.includes(request.model) &&
+            request.maxOutputTokens <= resource.maxOutputTokens && this.config.allowUnknownQuota;
+        },
         isAccountEligible: async (accountId) => {
           const latest = await this.options.store.load();
           const rules=await new ResourceRoutingRulesStore(this.options.store,this.options.configDir).read();
@@ -575,20 +739,26 @@ export class SupervisorRuntime implements SupervisorBackend {
       if (requested.some((id) => !project.accountIds.includes(id))) throw new JobInputError("eligible accounts are outside this project binding");
       const state = await this.options.store.load();
       const nativeTarget = nativeLightSprintTarget(state.config.upstreamUrl);
+      const inferenceResources = await this.inferenceResources(true);
       const eligible = requested.filter((id) => {
         const signal = accountSignal(state.accounts.find((row) => row.id === id), nativeTarget);
-        return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota);
+        const inference = inferenceResources.get(id);
+        return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota) ||
+          !!inference && inference.enabled && inference.authorized && inference.health === "healthy" && inference.capacity > 0 && this.config.allowUnknownQuota;
       });
       if (!eligible.length) throw new JobInputError("no requested account is currently enabled, authorized, healthy, and quota-eligible");
       const requestedTasks = args.tasks as JobTaskInput[];
       const freshTasks = requestedTasks.filter((task): task is JobTaskInput & { execution: Extract<JobTaskInput["execution"], { mode: "fresh" }> } =>
         task.execution.mode === "fresh");
+      const inferenceTasks = requestedTasks.filter((task): task is JobTaskInput & { execution: Extract<JobTaskInput["execution"], { mode: "inference" }> } =>
+        task.execution.mode === "inference");
       let dispatchEligible = eligible;
       // Fresh work is account-pinned per task.  This lets a single durable job
       // fan out across verified account/workspace/stack tuples while preserving
       // ownership at the scheduler and provider boundary.  We deliberately do
       // not infer a model, provider slot limit, or quota from this binding.
       const freshBindingsByTask = new Map<string, FreshProvisioningBinding>();
+      const inferenceBindingsByTask = new Map<string, { accountId: string }>();
       if (freshTasks.length) {
         const bindings = project.freshProvisioningBindings ?? [];
         const cursorByProvider = new Map<FreshProvisioningBinding["provider"], number>();
@@ -607,15 +777,30 @@ export class SupervisorRuntime implements SupervisorBackend {
         // the account written into that task's execution binding.
         dispatchEligible = eligible;
       }
+      const inferenceCursor = new Map<string, number>();
+      for (const task of inferenceTasks) {
+        const key = `${task.execution.provider}:${task.execution.model}`;
+        const candidates = eligible.filter((accountId) => {
+          const resource = inferenceResources.get(accountId);
+          return resource?.provider === task.execution.provider && resource.enabled && resource.authorized && resource.health === "healthy" &&
+            resource.capacity > 0 && resource.models.includes(task.execution.model) && task.execution.maxOutputTokens <= resource.maxOutputTokens;
+        });
+        if (!candidates.length) throw new JobInputError(`no enabled, healthy, allowlisted ${task.execution.provider} resource supports ${task.execution.model} and the requested output limit`);
+        const cursor = inferenceCursor.get(key) ?? 0;
+        inferenceBindingsByTask.set(task.taskId, { accountId: candidates[cursor % candidates.length]! });
+        inferenceCursor.set(key, cursor + 1);
+      }
       const sessions = project.registeredSessions.filter((session) => dispatchEligible.includes(session.accountId));
       if (requestedTasks.some((task) => task.execution.mode === "existing-session") && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
-      if (!freshTasks.length && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
+      if (!freshTasks.length && !inferenceTasks.length && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
       let nextSession = 0;
       const tasks = requestedTasks.map((task) => {
         const output = task.output;
         if (output.kind !== "text") throw new JobInputError("the current supervisor supports bounded text output only");
         if (output.maxBytes > this.config.localLimits.maxOutputBytes) throw new JobInputError("text output exceeds the configured supervisor limit");
-        const markerLine = `\n\nInclude this exact completion marker on its own line: ${output.expectedMarker}`;
+        const markerLine = task.execution.mode === "inference"
+          ? `\n\nFinish with this exact completion marker as the final nonempty line. Do not add any text after it: ${output.expectedMarker}`
+          : `\n\nInclude this exact completion marker on its own line: ${output.expectedMarker}`;
         if (Buffer.byteLength(task.instructions + markerLine) > 16_384) throw new JobInputError("instructions plus completion marker exceed 16 KiB");
         if (task.execution.mode === "fresh") {
           const binding = freshBindingsByTask.get(task.taskId);
@@ -624,6 +809,13 @@ export class SupervisorRuntime implements SupervisorBackend {
             execution: { mode: "fresh", accountId: binding.accountId,
               workspaceId: binding.workspaceId, stackId: binding.stackId, provider: binding.provider },
             stackId: binding.stackId, provider: binding.provider };
+        }
+        if (task.execution.mode === "inference") {
+          const binding = inferenceBindingsByTask.get(task.taskId);
+          if (!binding) throw new JobInputError(`inference ${task.execution.provider} task is missing an eligible provider binding`);
+          return { ...task, instructions: task.instructions + markerLine,
+            execution: { mode: "inference", accountId: binding.accountId, provider: task.execution.provider,
+              model: task.execution.model, maxOutputTokens: task.execution.maxOutputTokens } };
         }
         const session = sessions[nextSession++ % sessions.length]!;
         return { ...task, instructions: task.instructions + markerLine,
@@ -652,6 +844,8 @@ export class SupervisorRuntime implements SupervisorBackend {
       const results = Array.isArray(row.results) ? row.results.filter((item: unknown) => object(item) && (!args.taskId || (item.taskId ?? item.task_id) === args.taskId)).map((item: Record<string, unknown>) => ({
         taskId: item.taskId ?? item.task_id, generation: item.generation, text: item.text,
         assistantAt: item.assistantAt ?? item.assistant_at, reportedModel: item.reportedModel ?? item.reported_model,
+        finishReason: item.finishReason, terminationEvidence: item.terminationEvidence, modelEvidence: item.modelEvidence,
+        providerUsage: item.providerUsage, providerHost: item.providerHost, providerAccountId: item.providerAccountId,
         createdAt: item.createdAt ?? item.created_at,
       })) : [];
       return boundedJson({ assignmentId: args.jobId, results });

@@ -89,6 +89,44 @@ test("ambiguous chat mutation is never replayed", async () => {
   assert.equal(resultBodies[0].outcome, "ambiguous");
 });
 
+test("inference operations use the explicit executor once and retain account and provider evidence", async () => {
+  const operation = { operationId: "inference-operation-123456", attemptId: "attempt-inference", generation: 1,
+    selectedAccountId: "cf-account", kind: "run_inference", input: { provider: "cloudflare",
+      model: "@cf/meta/model", prompt: "bounded prompt", maxOutputTokens: 64, expectedMarker: "DONE", dispatchAt: 1 } };
+  let fallback = 0; let calls = 0; let posted;
+  const bridge = { async request(_method, route, body) {
+    if (route.endsWith("/claim")) return operation;
+    if (route.endsWith("/result")) { posted = structuredClone(body); return {}; }
+    throw new Error("unexpected route");
+  } };
+  const worker = createJobWorker({ bridge, adapterFactory: () => { fallback++; return adapter("cf-account"); },
+    inferenceExecutorFactory: () => ({ invoke: async (request) => { calls++; assert.equal(request.accountId, "cf-account");
+      return ok(request.accountId, { assistantText: "Answer\nDONE", reportedModel: null, modelEvidence: "pinned_endpoint",
+        terminationEvidence: "expected_marker", assistantAt: Date.now() / 1_000, providerAccountId: "0123456789abcdef0123456789abcdef" }); } }),
+    isInferenceEligible: () => true, isAccountEligible: () => true, workerId: "worker-test", allowedModels: [], maxConcurrent: 1 });
+  worker.start(); try { await until(() => posted); } finally { await worker.stop(); }
+  assert.equal(calls, 1); assert.equal(fallback, 0); assert.equal(posted.outcome, "accepted");
+  assert.equal(posted.result.providerAccountId, "0123456789abcdef0123456789abcdef");
+  assert.equal(posted.result.reportedModel, null);
+});
+
+test("ambiguous inference transport is recorded once and never replayed", async () => {
+  const operation = { operationId: "inference-operation-ambiguous", attemptId: "attempt-inference", generation: 1,
+    selectedAccountId: "oracle-account", kind: "run_inference", input: { provider: "oracle",
+      model: "oracle/qwen3.5:2b", prompt: "bounded prompt", maxOutputTokens: 64, expectedMarker: "DONE", dispatchAt: 1 } };
+  let calls = 0; let posted; let claimed = false;
+  const bridge = { async request(_method, route, body) {
+    if (route.endsWith("/claim")) { if (claimed) return null; claimed = true; return operation; }
+    if (route.endsWith("/result")) { posted = structuredClone(body); return {}; }
+    throw new Error("unexpected route");
+  } };
+  const worker = createJobWorker({ bridge, adapterFactory: (id) => adapter(id),
+    inferenceExecutorFactory: () => ({ invoke: async (request) => { calls++; return { classification: "ambiguous", accountId: request.accountId, reason: "timeout" }; } }),
+    isInferenceEligible: () => true, isAccountEligible: () => true, workerId: "worker-test", allowedModels: [], maxConcurrent: 1 });
+  worker.start(); try { await until(() => posted); await worker.tick(); } finally { await worker.stop(); }
+  assert.equal(calls, 1); assert.equal(posted.outcome, "ambiguous");
+});
+
 test("operation adapter is selected only for a valid claimed chat operation and replaces the fallback", async () => {
   let claimed = false; let specialized = 0; let fallback = 0; let sends = 0;
   const bridge = { async request(_method, route, body) {

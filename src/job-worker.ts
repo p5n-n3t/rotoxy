@@ -47,11 +47,39 @@ export interface JobOperation {
   input: Record<string, unknown>;
 }
 
+export interface InferenceRequest {
+  operationId: string;
+  accountId: string;
+  provider: "oracle" | "cloudflare";
+  model: string;
+  prompt: string;
+  maxOutputTokens: number;
+  expectedMarker: string;
+}
+export interface InferenceResult extends JobResult<{
+  assistantText: string;
+  reportedModel: string | null;
+  modelEvidence: "provider_reported" | "pinned_endpoint";
+  terminationEvidence: "provider_finish" | "expected_marker";
+  finishReason?: string;
+  assistantAt: number;
+  providerUsage?: Record<string, number>;
+  providerHost?: string;
+  providerAccountId?: string;
+}> {}
+export interface InferenceExecutor {
+  invoke(request: InferenceRequest, signal?: AbortSignal): Promise<InferenceResult>;
+}
+
 export interface JobWorkerOptions {
   bridge: JobBridge;
   adapterFactory: (accountId: string, limits: { timeoutMs: number }) => PinnedJobsAdapter | Promise<PinnedJobsAdapter>;
   /** Called only for a structurally valid, durably claimed operation. When supplied for chat dispatch it must return undefined to reject an operation outside its trusted binding. */
   operationAdapterFactory?: (operation: JobOperation, limits: { timeoutMs: number }) => PinnedJobsAdapter | undefined | Promise<PinnedJobsAdapter | undefined>;
+  /** Explicit one-shot inference path; never adapted into a remote session. */
+  inferenceExecutorFactory?: (operation: JobOperation, limits: { timeoutMs: number }) => InferenceExecutor | undefined | Promise<InferenceExecutor | undefined>;
+  /** Provider-specific live eligibility, rechecked immediately before inference dispatch. */
+  isInferenceEligible?: (operation: JobOperation) => boolean | Promise<boolean>;
   /** Includes current enabled/auth/quota eligibility; this must be rechecked immediately before mutation. */
   isAccountEligible: (accountId: string) => boolean | Promise<boolean>;
   /** Observation eligibility: enabled and authorized only, ignoring quota and transient health. Falls back to isAccountEligible when absent. Observe operations use this; mutations always use isAccountEligible. */
@@ -306,6 +334,60 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
     try {
       const checkEligible = (op.kind === "observe_session" || op.kind === "inspect_task_agents") && options.isAccountObservable !== undefined
         ? options.isAccountObservable : options.isAccountEligible;
+      if (op.kind === "run_inference") {
+        if (!options.isInferenceEligible || !await options.isInferenceEligible(op)) {
+          errorClass = "inference_resource_unavailable"; return await submit(op, "rejected", {}, errorClass);
+        }
+        const inputKeys = Object.keys(input).sort().join(",");
+        const provider = input.provider;
+        const model = text(input.model, 160);
+        const prompt = text(input.prompt, 16_384);
+        const marker = text(input.expectedMarker, 256);
+        const maxOutputTokens = input.maxOutputTokens;
+        const dispatchAt = input.dispatchAt;
+        if (inputKeys !== "dispatchAt,expectedMarker,maxOutputTokens,model,prompt,provider" ||
+            (provider !== "oracle" && provider !== "cloudflare") || !model || !prompt || !marker ||
+            Buffer.byteLength(prompt, "utf8") > 16_384 ||
+            !Number.isSafeInteger(maxOutputTokens) || Number(maxOutputTokens) < 1 || Number(maxOutputTokens) > 4096 ||
+            typeof dispatchAt !== "number" || !Number.isFinite(dispatchAt) || !/^[A-Za-z0-9_-]{16,128}$/.test(op.operationId)) {
+          errorClass = "invalid_inference_operation"; return await submit(op, "rejected", {}, errorClass);
+        }
+        if (stopped || !running || (leaseDeadlines.get(op.operationId) ?? 0) - now() <= adapterTimeoutMs + requestTimeoutMs ||
+            !await options.isInferenceEligible(op)) {
+          errorClass = "inference_worker_stopping_or_resource_unavailable"; return await submit(op, "rejected", {}, errorClass);
+        }
+        const executor = await options.inferenceExecutorFactory?.(op, { timeoutMs: adapterTimeoutMs });
+        if (!executor) { errorClass = "inference_executor_unavailable"; return await submit(op, "rejected", {}, errorClass); }
+        mutationStarted = true;
+        const invoked = await executor.invoke({ operationId: op.operationId, accountId: op.selectedAccountId,
+          provider, model, prompt, maxOutputTokens: Number(maxOutputTokens), expectedMarker: marker });
+        outcome = invoked.classification;
+        if (outcome === "accepted" && invoked.value) {
+          const value = invoked.value;
+          if (typeof value.assistantText !== "string" || typeof value.assistantAt !== "number" ||
+              !Number.isFinite(value.assistantAt) || value.assistantAt < dispatchAt ||
+              value.modelEvidence !== "provider_reported" && value.modelEvidence !== "pinned_endpoint" ||
+              value.terminationEvidence !== "provider_finish" && value.terminationEvidence !== "expected_marker" ||
+              provider === "oracle" && (value.modelEvidence !== "provider_reported" || value.reportedModel !== model || value.terminationEvidence !== "provider_finish") ||
+              provider === "oracle" && value.providerHost !== undefined && !/^ora(?:1|3|5|6|7|8)$/.test(value.providerHost) ||
+              provider === "cloudflare" && (value.modelEvidence !== "pinned_endpoint" || value.reportedModel !== null || value.terminationEvidence !== "expected_marker" ||
+                typeof value.providerAccountId !== "string" || !/^[a-f0-9]{32}$/.test(value.providerAccountId))) {
+            outcome = "ambiguous"; errorClass = "inference_result_evidence_invalid";
+          } else {
+            result = { assistantText: value.assistantText, reportedModel: value.reportedModel,
+              modelEvidence: value.modelEvidence, terminationEvidence: value.terminationEvidence,
+              assistantAt: value.assistantAt,
+              ...(value.finishReason ? { finishReason: value.finishReason } : {}),
+              ...(value.providerUsage ? { providerUsage: value.providerUsage } : {}),
+              ...(value.providerHost ? { providerHost: value.providerHost } : {}),
+              ...(value.providerAccountId ? { providerAccountId: value.providerAccountId } : {}) };
+          }
+        } else {
+          if (outcome === "accepted") outcome = "ambiguous";
+          errorClass = text(invoked.reason, 80) ?? (outcome === "ambiguous" ? "inference_ambiguous" : "inference_rejected");
+        }
+        return await submit(op, outcome, result, errorClass);
+      }
       if (!await checkEligible(op.selectedAccountId)) { errorClass = "account_unavailable"; return await submit(op, outcome, result, errorClass); }
       const sessionId = text(op.sessionId ?? input.sessionId, 128);
       const message = op.kind === "chat_session" ? text(input.instructions, 20_000) : undefined;
