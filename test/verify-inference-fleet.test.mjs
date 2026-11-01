@@ -74,9 +74,9 @@ test("stubbed MCP job lifecycle verifies parallel tasks, dependency join, marker
   const body = { jobId, idempotencyKey: jobId, tasks: buildCanaryTasks(jobId, "oracle/qwen3.5:2b", "@cf/meta/model") };
   const counts = { job_submit: 0, job_status: 0, job_results: 0 };
   const completeRows = [
-    { taskId: "oracle-independent", state: "complete", selectedAccountId: "oracle", dependsOn: [] },
-    { taskId: "cloudflare-independent", state: "complete", selectedAccountId: "cf", dependsOn: [] },
-    { taskId: "oracle-dependency-join", state: "complete", selectedAccountId: "oracle", dependsOn: ["oracle-independent", "cloudflare-independent"] },
+    { taskId: "oracle-independent", state: "complete", selectedAccountId: "oracle", dispatchAt: 9, dependsOn: [] },
+    { taskId: "cloudflare-independent", state: "complete", selectedAccountId: "cf", dispatchAt: 9, dependsOn: [] },
+    { taskId: "oracle-dependency-join", state: "complete", selectedAccountId: "oracle", dispatchAt: 20, dependsOn: ["oracle-independent", "cloudflare-independent"] },
   ];
   const callTool = async (name, args) => {
     counts[name]++;
@@ -91,6 +91,8 @@ test("stubbed MCP job lifecycle verifies parallel tasks, dependency join, marker
       : { state: "complete", tasks: completeRows };
     if (name === "job_results") return { results: body.tasks.map(task => ({ taskId: task.taskId,
       text: `OK\n${task.output.expectedMarker}`, reportedModel: task.execution.provider === "oracle" ? task.execution.model : null,
+      requestStartedAt: task.taskId === "oracle-independent" ? 10 : task.taskId === "cloudflare-independent" ? 12 : 21,
+      assistantAt: task.taskId === "oracle-independent" ? 18 : task.taskId === "cloudflare-independent" ? 19 : 23,
       finishReason: task.execution.provider === "oracle" ? "stop" : null,
       terminationEvidence: task.execution.provider === "oracle" ? "provider_finish" : "expected_marker" })) };
     throw new Error("unexpected fake tool");
@@ -98,7 +100,7 @@ test("stubbed MCP job lifecycle verifies parallel tasks, dependency join, marker
   const result = await executeCanaryJobFlow({ callTool, projectId: "canary-project", jobId, body,
     oracleAccountId: "oracle", cloudflareAccountId: "cf", pollMs: 0, pauseFn: async () => {} });
   assert.equal(result.state, "complete");
-  assert.equal(result.parallelIndependentObserved, true);
+  assert.equal(result.parallelRequestIntervals.overlapObserved, true);
   assert.equal(result.tasks.every(task => task.markerMatched), true);
   assert.equal(result.idempotency, "same_assignment_returned_without_new_provider_operations");
   assert.equal(counts.job_submit, 2, "only the confirmed terminal duplicate is submitted to test idempotency");
@@ -113,15 +115,18 @@ test("blocked provider task stops polling and does not retry the job or wait on 
     callTool: async (name) => {
       if (name === "job_submit") { submits++; return { assignmentId: jobId, taskCount: 3, state: "queued" }; }
       if (name === "job_status") { statuses++; return { state: "held", tasks: [
-        { taskId: "oracle-independent", state: "complete", selectedAccountId: "oracle", dependsOn: [] },
-        { taskId: "cloudflare-independent", state: "blocked", selectedAccountId: "cf", dependsOn: [] },
+        { taskId: "oracle-independent", state: "complete", selectedAccountId: "oracle", dispatchAt: 3, dependsOn: [] },
+        { taskId: "cloudflare-independent", state: "blocked", selectedAccountId: "cf", dispatchAt: 3, dependsOn: [] },
         { taskId: "oracle-dependency-join", state: "queued", selectedAccountId: "oracle", dependsOn: ["oracle-independent", "cloudflare-independent"] },
       ] }; }
+      if (name === "job_results") return { results: [{ taskId: "oracle-independent", text: `result\n${body.tasks[0].output.expectedMarker}`,
+        requestStartedAt: 4, assistantAt: 5, reportedModel: "oracle/qwen3.5:2b", finishReason: "stop" }] };
       throw new Error("no results are available for a blocked job");
     }, pollMs: 60_000 });
   assert.equal(result.state, "blocked");
   assert.equal(statuses, 1);
   assert.equal(submits, 1);
+  assert.equal(result.tasks[0].markerMatched, true, "partial durable results remain visible after another provider blocks");
   assert.ok(result.blockers.some(message => message.includes("marker")));
 });
 

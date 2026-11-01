@@ -1181,7 +1181,7 @@ class JobRegistry:
         result = body.get("result", {})
         if not isinstance(result, dict) or len(json.dumps(result, separators=(",", ":")).encode()) > 32768:
             raise ValueError("Result must be a bounded object")
-        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "usage", "creditDebit", "finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId"}
+        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "requestStartedAt", "usage", "creditDebit", "finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId"}
         if set(result) - allowed_result:
             raise ValueError("Unsupported operation result fields")
         for key, value in result.items():
@@ -1235,9 +1235,9 @@ class JobRegistry:
                 for nested in value.values():
                     if not isinstance(nested, str) or len(nested) > 2048 or re.search(r"(?i)bearer\s+\S+|lsat_[A-Za-z0-9_-]+", nested):
                         raise ValueError("Invalid pull request reference")
-            elif key == "assistantAt":
+            elif key in {"assistantAt", "requestStartedAt"}:
                 if type(value) not in {int, float} or value < 0:
-                    raise ValueError("assistantAt must be a non-negative timestamp")
+                    raise ValueError(f"{key} must be a non-negative timestamp")
             elif value is not None: raise ValueError("Invalid result value")
         error_class = body.get("errorClass")
         if error_class is not None and (not isinstance(error_class, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", error_class)):
@@ -1275,6 +1275,14 @@ class JobRegistry:
                 execution = spec["execution"]
                 if not isinstance(result.get("assistantText"), str):
                     raise ValueError("Accepted inference result requires text")
+                request_started_at = result.get("requestStartedAt")
+                assistant_at = result.get("assistantAt")
+                dispatch_at = json.loads(op["input"]).get("dispatchAt")
+                if (type(request_started_at) not in {int, float} or not math.isfinite(request_started_at) or
+                        type(assistant_at) not in {int, float} or not math.isfinite(assistant_at) or
+                        type(dispatch_at) not in {int, float} or not math.isfinite(dispatch_at) or
+                        request_started_at < dispatch_at or assistant_at < request_started_at):
+                    raise ValueError("Inference request interval timestamps are invalid")
                 if execution["provider"] == "oracle":
                     if (result.get("reportedModel") != execution["model"] or result.get("modelEvidence") != "provider_reported" or
                             result.get("terminationEvidence") != "provider_finish" or result.get("finishReason") not in {"stop", "end_turn", "length"}):
@@ -1358,7 +1366,7 @@ class JobRegistry:
                     assistant_at = result.get("assistantAt", when)
                     if type(assistant_at) not in {int, float} or not math.isfinite(assistant_at) or assistant_at < task["dispatch_at"]:
                         raise ValueError("Invalid inference completion timestamp")
-                    metadata = {key: result[key] for key in ("finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId") if key in result}
+                    metadata = {key: result[key] for key in ("requestStartedAt", "finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId") if key in result}
                     db.execute("INSERT OR IGNORE INTO job_results(assignment,task_id,generation,text,assistant_at,reported_model,created_at,metadata) VALUES(?,?,?,?,?,?,?,?)",
                                (op["assignment"], op["task_id"], op["generation"], text_value,
                                 assistant_at, result.get("reportedModel"), when, json.dumps(metadata, sort_keys=True)))
@@ -1428,19 +1436,22 @@ class JobRegistry:
                     self.credit_admission.release_known_refusal(op["id"], known_preexecution_refusal=True)
             db.execute("UPDATE job_tasks SET state=? WHERE assignment=? AND task_id=? AND generation=?",
                        (state, op["assignment"], op["task_id"], op["generation"]))
-            if state == "complete":
+            if state in {"complete", "ambiguous", "blocked"}:
                 remaining = db.execute("SELECT COUNT(*) FROM job_tasks WHERE assignment=? AND state!='complete'",
                                        (op["assignment"],)).fetchone()[0]
-                if remaining == 0:
+                if state == "complete" and remaining == 0:
                     changed = db.execute("UPDATE assignments SET state='complete',revision=revision+1 WHERE id=? AND state='queued' AND approved=1",
                                          (op["assignment"],)).rowcount
                     if changed:
                         self._event(db, op["assignment"], "assignment_complete", {"state": "complete"}, when)
-            if state in {"ambiguous", "blocked"}:
-                # Only hold the assignment when no sibling task can still progress.
-                # The ambiguous/blocked task retains its reservations and locks.
-                if not self._has_runnable_tasks(db, op["assignment"]):
-                    db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
+                elif remaining and not self._has_runnable_tasks(db, op["assignment"]):
+                    # A sibling may have been blocked earlier while another task
+                    # was still running. Re-evaluate after every terminal receipt,
+                    # so the assignment cannot remain queued behind dead edges.
+                    changed = db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=? AND state='queued'",
+                                         (op["assignment"],)).rowcount
+                    if changed:
+                        self._event(db, op["assignment"], "assignment_held", {"state": "held", "reason": "no_runnable_tasks"}, when)
             self._event(db, op["assignment"], "operation_" + state, {"state": state, "taskId": op["task_id"],
                           "generation": op["generation"], "operationId": operation_id}, when)
             return {"operationId": operation_id, "state": state, "replayed": False}

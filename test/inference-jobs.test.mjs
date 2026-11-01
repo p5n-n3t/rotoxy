@@ -40,6 +40,8 @@ test("Cloudflare inference pins the credential and retains marker and usage prov
   assert.equal(result.value.terminationEvidence, "expected_marker");
   assert.equal(result.value.providerAccountId, "0123456789abcdef0123456789abcdef");
   assert.equal(result.value.providerUsage.completion_tokens, 7);
+  assert.equal(result.value.requestStartedAt, 123);
+  assert.equal(result.value.assistantAt, 123);
 });
 
 test("Oracle inference uses a fixed private origin, secured token file, and provider finish evidence", async () => {
@@ -75,6 +77,8 @@ test("Oracle inference uses a fixed private origin, secured token file, and prov
     assert.equal(result.value.finishReason, "stop");
     assert.equal(result.value.providerHost, "ora8");
     assert.equal(result.value.providerUsage.total_tokens, 7);
+    assert.equal(result.value.requestStartedAt, 456);
+    assert.equal(result.value.assistantAt, 456);
     const wrongHostAdapter = new InferenceJobsAdapter({ oracleTokenFile: tokenFile,
       oracleAllowedHosts: async () => ["ora8"], fetch: async () => Response.json({ model: "qwen3.5:2b",
         choices: [{ finish_reason: "stop", message: { content: "Answer\nDONE" } }] },

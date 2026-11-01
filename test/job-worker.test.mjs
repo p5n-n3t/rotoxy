@@ -102,12 +102,14 @@ test("inference operations use the explicit executor once and retain account and
   const worker = createJobWorker({ bridge, adapterFactory: () => { fallback++; return adapter("cf-account"); },
     inferenceExecutorFactory: () => ({ invoke: async (request) => { calls++; assert.equal(request.accountId, "cf-account");
       return ok(request.accountId, { assistantText: "Answer\nDONE", reportedModel: null, modelEvidence: "pinned_endpoint",
-        terminationEvidence: "expected_marker", assistantAt: Date.now() / 1_000, providerAccountId: "0123456789abcdef0123456789abcdef" }); } }),
+        terminationEvidence: "expected_marker", requestStartedAt: Date.now() / 1_000, assistantAt: Date.now() / 1_000,
+        providerAccountId: "0123456789abcdef0123456789abcdef" }); } }),
     isInferenceEligible: () => true, isAccountEligible: () => true, workerId: "worker-test", allowedModels: [], maxConcurrent: 1 });
   worker.start(); try { await until(() => posted); } finally { await worker.stop(); }
   assert.equal(calls, 1); assert.equal(fallback, 0); assert.equal(posted.outcome, "accepted");
   assert.equal(posted.result.providerAccountId, "0123456789abcdef0123456789abcdef");
   assert.equal(posted.result.reportedModel, null);
+  assert.ok(posted.result.requestStartedAt <= posted.result.assistantAt);
 });
 
 test("ambiguous inference transport is recorded once and never replayed", async () => {

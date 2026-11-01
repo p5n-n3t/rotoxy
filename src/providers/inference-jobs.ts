@@ -82,6 +82,9 @@ export class InferenceJobsAdapter implements InferenceExecutor {
   private async cloudflare(request: InferenceRequest, signal?: AbortSignal): Promise<InferenceResult> {
     if (!this.options.cloudflare) return { classification: "rejected", accountId: request.accountId, reason: "cloudflare_executor_unavailable" };
     try {
+      // This brackets the client request and response validation; it is not
+      // provider-side scheduling or GPU execution time.
+      const requestStartedAt = (this.options.now ?? Date.now)() / 1000;
       const receipt = await this.options.cloudflare.runForAccountWithReceipt(request.accountId, {
         model: request.model,
         input: { prompt: `${request.prompt}\n\nFinish with this exact marker as the final nonempty line: ${request.expectedMarker}`,
@@ -98,6 +101,7 @@ export class InferenceJobsAdapter implements InferenceExecutor {
       return { classification: "accepted", accountId: request.accountId,
         value: { assistantText, reportedModel: null, modelEvidence: "pinned_endpoint",
           terminationEvidence: "expected_marker", ...(finishReason ? { finishReason } : {}),
+          requestStartedAt,
           assistantAt: (this.options.now ?? Date.now)() / 1000,
           providerAccountId: receipt.providerAccountId,
           ...(usage(result?.usage) ? { providerUsage: usage(result?.usage) } : {}) } };
@@ -134,6 +138,7 @@ export class InferenceJobsAdapter implements InferenceExecutor {
     let dispatched = false;
     try {
       dispatched = true;
+      const requestStartedAt = (this.options.now ?? Date.now)() / 1000;
       const response = await (this.options.fetch ?? globalThis.fetch)(ORACLE_ORIGIN + "/v1/chat/completions", {
         method: "POST", redirect: "error", signal: controller.signal,
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
@@ -159,6 +164,7 @@ export class InferenceJobsAdapter implements InferenceExecutor {
       return { classification: "accepted", accountId: request.accountId,
         value: { assistantText: message, reportedModel: request.model, modelEvidence: "provider_reported",
           finishReason: choice.finish_reason, terminationEvidence: "provider_finish",
+          requestStartedAt,
           assistantAt: (this.options.now ?? Date.now)() / 1000,
           providerHost,
           ...(usage(body.usage) ? { providerUsage: usage(body.usage) } : {}) } };

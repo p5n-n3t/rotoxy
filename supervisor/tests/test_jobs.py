@@ -122,6 +122,7 @@ class JobRegistryTests(unittest.TestCase):
         })
         result = {"workerId": "oracle-worker", "outcome": "accepted", "result": {
             "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 4,
+            "requestStartedAt": 3.5,
             "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
             "providerUsage": {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13},
         }}
@@ -133,6 +134,7 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(saved["finishReason"], "stop")
         self.assertEqual(saved["modelEvidence"], "provider_reported")
         self.assertEqual(saved["providerUsage"]["total_tokens"], 13)
+        self.assertEqual(saved["requestStartedAt"], 3.5)
         self.assertTrue(self.registry.record_result(operation["operationId"], result, now=5)["replayed"])
 
     def test_cloudflare_inference_requires_pinned_model_and_final_marker_evidence(self):
@@ -151,7 +153,7 @@ class JobRegistryTests(unittest.TestCase):
         operation = self.registry.claim_operation("cf-worker", now=3)
         recorded = self.registry.record_result(operation["operationId"], {
             "workerId": "cf-worker", "outcome": "accepted", "result": {
-                "assistantText": "Answer\nDONE", "reportedModel": None, "assistantAt": 4,
+                "assistantText": "Answer\nDONE", "reportedModel": None, "assistantAt": 4, "requestStartedAt": 3.5,
                 "modelEvidence": "pinned_endpoint", "terminationEvidence": "expected_marker",
                 "providerAccountId": "0123456789abcdef0123456789abcdef",
                 "providerUsage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
@@ -178,7 +180,7 @@ class JobRegistryTests(unittest.TestCase):
         self.registry.submit(assignment("cloudflare-length-job", "cloudflare-length-key", [value], accounts=["cf-a"]), now=2)
         operation = self.registry.claim_operation("cf-worker", now=3)
         result = {"workerId": "cf-worker", "outcome": "accepted", "result": {
-            "assistantText": "Answer\nDONE", "reportedModel": None, "finishReason": "length", "assistantAt": 4,
+            "assistantText": "Answer\nDONE", "reportedModel": None, "finishReason": "length", "assistantAt": 4, "requestStartedAt": 3.5,
             "modelEvidence": "pinned_endpoint", "terminationEvidence": "expected_marker",
             "providerAccountId": "0123456789abcdef0123456789abcdef",
         }}
@@ -203,7 +205,7 @@ class JobRegistryTests(unittest.TestCase):
             operation = self.registry.claim_operation("oracle-worker", now=at)
             self.assertIsNotNone(operation)
             self.registry.record_result(operation["operationId"], {"workerId": "oracle-worker", "outcome": "accepted", "result": {
-                "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": at + 1,
+                "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": at + 1, "requestStartedAt": at,
                 "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
             }}, now=at + 1)
         value = task("oracle-rate-10", account="oracle-a", scope="record:rate-10")
@@ -244,7 +246,7 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(operation["kind"], "run_inference")
         self.assertEqual(operation["selectedAccountId"], "oracle-a")
         self.registry.record_result(operation["operationId"], {"workerId": "worker", "outcome": "accepted", "result": {
-            "assistantText": "Source notes\nDONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 12,
+            "assistantText": "Source notes\nDONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 12, "requestStartedAt": 11,
             "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish", "providerHost": "ora8",
         }}, now=12)
         # Simulate a two-hour wait and supervisor process restart between DAG nodes.
@@ -253,7 +255,7 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(operation["kind"], "run_inference")
         self.assertEqual(operation["selectedAccountId"], "cf-a")
         reopened.record_result(operation["operationId"], {"workerId": "worker-after-restart", "outcome": "accepted", "result": {
-            "assistantText": "Summary\nDONE", "reportedModel": None, "assistantAt": 10 + 7201,
+            "assistantText": "Summary\nDONE", "reportedModel": None, "assistantAt": 10 + 7201, "requestStartedAt": 10 + 7200,
             "modelEvidence": "pinned_endpoint", "terminationEvidence": "expected_marker",
             "providerAccountId": "0123456789abcdef0123456789abcdef",
         }}, now=10 + 7201)
@@ -280,9 +282,67 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(self.registry.get_assignment("cancel-inference-job")["tasks"][0]["state"], "cancel_pending")
         with self.assertRaisesRegex(RuntimeError, "Conflicting operation result"):
             self.registry.record_result(operation["operationId"], {"workerId": "oracle-worker", "outcome": "accepted", "result": {
-                "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 5,
+                "assistantText": "DONE", "reportedModel": "oracle/qwen3.5:2b", "finishReason": "stop", "assistantAt": 5, "requestStartedAt": 4,
                 "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
             }}, now=5)
+
+    def test_blocked_sibling_transitions_to_held_after_last_runnable_dependency_finishes(self):
+        for account, provider, model in (
+            ("oracle-a", "oracle", "oracle/qwen3.5:2b"),
+            ("cf-a", "cloudflare", "@cf/meta/model"),
+        ):
+            self.registry.register_account({
+                "accountId": account, "enabled": True, "authorized": True,
+                "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+                "registeredSessions": [], "inferenceProviders": [{
+                    "provider": provider, "models": [model], "maxOutputTokens": 128,
+                }],
+            }, now=1)
+        oracle_task = task("oracle-independent", account="oracle-a", scope="record:oracle-independent")
+        oracle_task["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                                     "model": "oracle/qwen3.5:2b", "maxOutputTokens": 64}
+        cf_task = task("cloudflare-independent", account="cf-a", scope="record:cloudflare-independent")
+        cf_task["execution"] = {"mode": "inference", "accountId": "cf-a", "provider": "cloudflare",
+                                 "model": "@cf/meta/model", "maxOutputTokens": 64}
+        join_task = task("oracle-dependency-join", account="oracle-a", depends=["oracle-independent", "cloudflare-independent"],
+                         scope="record:oracle-join")
+        join_task["execution"] = {"mode": "inference", "accountId": "oracle-a", "provider": "oracle",
+                                  "model": "oracle/qwen3.5:2b", "maxOutputTokens": 64}
+        body = assignment("mixed-blocked-sibling", "mixed-blocked-sibling-key",
+                          [oracle_task, cf_task, join_task], accounts=["oracle-a", "cf-a"])
+        self.registry.submit(body, now=2)
+        oracle_op = self.registry.claim_operation("oracle-worker", now=3)
+        cloudflare_op = self.registry.claim_operation("cloudflare-worker", now=3)
+        self.assertEqual(oracle_op["selectedAccountId"], "oracle-a")
+        self.assertEqual(oracle_op["provider"], "oracle")
+        self.assertEqual(cloudflare_op["selectedAccountId"], "cf-a")
+        self.assertEqual(cloudflare_op["provider"], "cloudflare")
+        blocked = self.registry.record_result(cloudflare_op["operationId"], {
+            "workerId": "cloudflare-worker", "outcome": "accepted", "result": {
+                "assistantText": "provider exhausted output budget\nDONE", "reportedModel": None,
+                "finishReason": "length", "assistantAt": 5, "requestStartedAt": 4,
+                "modelEvidence": "pinned_endpoint", "terminationEvidence": "expected_marker",
+                "providerAccountId": "0123456789abcdef0123456789abcdef",
+            },
+        }, now=5)
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertEqual(self.registry.get_assignment("mixed-blocked-sibling")["state"], "queued",
+                         "the active Oracle sibling may still make forward progress")
+        completed = self.registry.record_result(oracle_op["operationId"], {
+            "workerId": "oracle-worker", "outcome": "accepted", "result": {
+                "assistantText": "Oracle result\nDONE", "reportedModel": "oracle/qwen3.5:2b",
+                "finishReason": "stop", "assistantAt": 6, "requestStartedAt": 4,
+                "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
+            },
+        }, now=6)
+        self.assertEqual(completed["state"], "complete")
+        status = self.registry.get_assignment("mixed-blocked-sibling")
+        self.assertEqual(status["state"], "held")
+        self.assertEqual({row["taskId"]: row["state"] for row in status["tasks"]}, {
+            "oracle-independent": "complete", "cloudflare-independent": "blocked", "oracle-dependency-join": "queued",
+        })
+        self.assertEqual(self.registry.claim_operation("late-worker", now=7), None,
+                         "a dead dependency must not leave the assignment dispatchable")
 
     def test_inference_dispatch_rechecks_disabled_and_changed_models(self):
         self.registry.register_account({
@@ -351,7 +411,7 @@ class JobRegistryTests(unittest.TestCase):
         recorded = self.registry.record_result(operation["operationId"], {
             "workerId": "oracle-worker", "outcome": "accepted", "result": {
                 "assistantText": "Partial answer without marker", "reportedModel": "oracle/qwen3.5:2b",
-                "finishReason": "length", "assistantAt": 4,
+                "finishReason": "length", "assistantAt": 4, "requestStartedAt": 3.5,
                 "modelEvidence": "provider_reported", "terminationEvidence": "provider_finish",
             },
         }, now=4)

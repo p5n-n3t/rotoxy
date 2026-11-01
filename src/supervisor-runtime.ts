@@ -883,6 +883,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       const results = Array.isArray(row.results) ? row.results.filter((item: unknown) => object(item) && (!args.taskId || (item.taskId ?? item.task_id) === args.taskId)).map((item: Record<string, unknown>) => ({
         taskId: item.taskId ?? item.task_id, generation: item.generation, text: item.text,
         assistantAt: item.assistantAt ?? item.assistant_at, reportedModel: item.reportedModel ?? item.reported_model,
+        requestStartedAt: item.requestStartedAt,
         finishReason: item.finishReason, terminationEvidence: item.terminationEvidence, modelEvidence: item.modelEvidence,
         providerUsage: item.providerUsage, providerHost: item.providerHost, providerAccountId: item.providerAccountId,
         createdAt: item.createdAt ?? item.created_at,

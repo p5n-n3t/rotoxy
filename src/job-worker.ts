@@ -62,6 +62,8 @@ export interface InferenceResult extends JobResult<{
   modelEvidence: "provider_reported" | "pinned_endpoint";
   terminationEvidence: "provider_finish" | "expected_marker";
   finishReason?: string;
+  /** Client-side call start; paired with assistantAt for HTTP/validation interval evidence, not GPU timing. */
+  requestStartedAt: number;
   assistantAt: number;
   providerUsage?: Record<string, number>;
   providerHost?: string;
@@ -364,8 +366,11 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
         outcome = invoked.classification;
         if (outcome === "accepted" && invoked.value) {
           const value = invoked.value;
-          if (typeof value.assistantText !== "string" || typeof value.assistantAt !== "number" ||
+          if (typeof value.assistantText !== "string" || typeof value.requestStartedAt !== "number" ||
+              !Number.isFinite(value.requestStartedAt) || value.requestStartedAt < dispatchAt ||
+              typeof value.assistantAt !== "number" ||
               !Number.isFinite(value.assistantAt) || value.assistantAt < dispatchAt ||
+              value.assistantAt < value.requestStartedAt ||
               value.modelEvidence !== "provider_reported" && value.modelEvidence !== "pinned_endpoint" ||
               value.terminationEvidence !== "provider_finish" && value.terminationEvidence !== "expected_marker" ||
               provider === "oracle" && (value.modelEvidence !== "provider_reported" || value.reportedModel !== model || value.terminationEvidence !== "provider_finish") ||
@@ -376,6 +381,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
           } else {
             result = { assistantText: value.assistantText, reportedModel: value.reportedModel,
               modelEvidence: value.modelEvidence, terminationEvidence: value.terminationEvidence,
+              requestStartedAt: value.requestStartedAt,
               assistantAt: value.assistantAt,
               ...(value.finishReason ? { finishReason: value.finishReason } : {}),
               ...(value.providerUsage ? { providerUsage: value.providerUsage } : {}),

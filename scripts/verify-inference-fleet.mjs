@@ -202,7 +202,7 @@ export async function executeCanaryJobFlow({ callTool, projectId, jobId, body, o
     try { status = await callTool("job_status", { projectId, jobId }); }
     catch (error) { evidence.blockers.push(`read-only status lookup failed (${safeError(error).name}); provider work will not be replayed`); break; }
     const rows = rowsOf(status);
-    samples.push({ at: new Date().toISOString(), runningTaskIds: rows.filter(row => row.state === "running").map(row => row.taskId) });
+    samples.push({ at: new Date().toISOString(), taskStates: Object.fromEntries(rows.map(row => [row.taskId, row.state || "unknown"])) });
     if (isTerminal(status)) break;
     await pauseFn(pollMs);
   }
@@ -217,23 +217,25 @@ export async function executeCanaryJobFlow({ callTool, projectId, jobId, body, o
     return { ...task, state: row?.state || "unknown", selectedAccountId: row?.selectedAccountId || null,
       generation: row?.generation ?? null, dispatchAt: row?.dispatchAt ?? null, releasedAt: row?.releasedAt ?? null };
   });
-  evidence.parallelIndependentObserved = samples.some(sample => sample.runningTaskIds.includes("oracle-independent") && sample.runningTaskIds.includes("cloudflare-independent"));
-  if (evidence.tasks.find(task => task.taskId === "oracle-independent")?.selectedAccountId !== oracleAccountId ||
-      evidence.tasks.find(task => task.taskId === "cloudflare-independent")?.selectedAccountId !== cloudflareAccountId ||
-      evidence.tasks.find(task => task.taskId === "oracle-dependency-join")?.selectedAccountId !== oracleAccountId) {
+  const dispatchedTasks = evidence.tasks.filter(task => task.dispatchAt !== null && task.dispatchAt !== undefined);
+  if (dispatchedTasks.some(task => task.taskId === "oracle-independent" && task.selectedAccountId !== oracleAccountId) ||
+      dispatchedTasks.some(task => task.taskId === "cloudflare-independent" && task.selectedAccountId !== cloudflareAccountId) ||
+      dispatchedTasks.some(task => task.taskId === "oracle-dependency-join" && task.selectedAccountId !== oracleAccountId)) {
     evidence.blockers.push("task account pinning did not match requested Oracle/Cloudflare provider accounts");
   }
   const dependencyJoin = taskRows.find(row => row.taskId === "oracle-dependency-join");
   if (dependencyJoin && JSON.stringify(dependencyJoin.dependsOn) !== JSON.stringify(["oracle-independent", "cloudflare-independent"])) {
     evidence.blockers.push("dependency join edges were not returned as submitted");
   }
-  if (!evidence.parallelIndependentObserved) evidence.blockers.push("status polling did not observe both independent tasks running simultaneously");
-  if (evidence.state === "complete" || evidence.state === "completed") {
+  evidence.requestIntervalSemantics = "worker-side provider request start immediately before invocation through validated assistant receipt; includes network and local validation, not provider GPU timing";
+  if (evidence.state === "complete" || evidence.state === "completed" || hasTerminalFailure(status)) {
     const result = await callTool("job_results", { projectId, jobId });
     const resultRows = Array.isArray(result.results) ? result.results : [];
     for (const task of evidence.tasks) {
       const row = resultRows.find(item => item.taskId === task.taskId);
       task.markerMatched = typeof row?.text === "string" && row.text.split(/\r?\n/).filter(line => line.trim()).at(-1) === task.expectedMarker;
+      task.requestStartedAt = Number.isFinite(row?.requestStartedAt) ? row.requestStartedAt : null;
+      task.assistantAt = Number.isFinite(row?.assistantAt) ? row.assistantAt : null;
       task.reportedModel = row?.reportedModel ?? null;
       task.finishReason = row?.finishReason ?? null;
       task.terminationEvidence = row?.terminationEvidence ?? null;
@@ -241,10 +243,26 @@ export async function executeCanaryJobFlow({ callTool, projectId, jobId, body, o
       task.providerHost = row?.providerHost ?? null;
       task.providerAccountId = row?.providerAccountId ?? null;
     }
-    evidence.idempotency = "checking_same_request_after_terminal_completion";
-    const repeated = await callTool("job_submit", body);
-    if (repeated.assignmentId === jobId && repeated.taskCount === 3) evidence.idempotency = "same_assignment_returned_without_new_provider_operations";
-    else evidence.blockers.push("same-key submission did not return the original durable assignment");
+    const interval = taskId => {
+      const task = evidence.tasks.find(item => item.taskId === taskId);
+      return Number.isFinite(task?.requestStartedAt) && Number.isFinite(task?.assistantAt)
+        ? { taskId, start: task.requestStartedAt, end: task.assistantAt } : undefined;
+    };
+    const oracleInterval = interval("oracle-independent"), cloudflareInterval = interval("cloudflare-independent");
+    evidence.parallelRequestIntervals = oracleInterval && cloudflareInterval
+      ? { oracle: oracleInterval, cloudflare: cloudflareInterval,
+          overlapObserved: oracleInterval.start < cloudflareInterval.end && cloudflareInterval.start < oracleInterval.end }
+      : { oracle: oracleInterval ?? null, cloudflare: cloudflareInterval ?? null, overlapObserved: false };
+    if (evidence.parallelRequestIntervals.overlapObserved) evidence.parallelRequestsObserved = true;
+    else evidence.blockers.push("validated provider request intervals did not establish overlap");
+
+    const allTasksComplete = evidence.tasks.length === 3 && evidence.tasks.every(task => task.state === "complete" && task.markerMatched);
+    if ((evidence.state === "complete" || evidence.state === "completed") && allTasksComplete) {
+      evidence.idempotency = "checking_same_request_after_terminal_completion";
+      const repeated = await callTool("job_submit", body);
+      if (repeated.assignmentId === jobId && repeated.taskCount === 3) evidence.idempotency = "same_assignment_returned_without_new_provider_operations";
+      else evidence.blockers.push("same-key submission did not return the original durable assignment");
+    }
   }
   if (!evidence.tasks.every(task => task.markerMatched)) evidence.blockers.push("one or more exact terminal markers were not verified in durable results");
   const joinedTask = evidence.tasks.find(task => task.taskId === "oracle-dependency-join");
