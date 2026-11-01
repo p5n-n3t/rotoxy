@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("ORACLE_API_TOKEN", "test-token")
 sys.path.insert(0, os.path.dirname(__file__))
@@ -56,10 +56,13 @@ class McpEndpointTests(unittest.TestCase):
         self.assertIn("example.org", result["content"][0]["text"])
 
     def test_extraction_and_model_tool_dispatch(self):
-        with patch.object(oracle_api, "_safe_fetch", return_value=("example.org", "Example", "bounded extracted text")):
+        with patch.object(oracle_api, "_probe_extraction_worker", new=AsyncMock(return_value=False)), \
+             patch.object(oracle_api, "_safe_fetch", return_value=("example.org", "Example", "bounded extracted text")):
             extracted = self.post("/search/mcp", self.rpc(8, "tools/call", {"name": "extract_url", "arguments": {"url": "https://example.org/page"}})).json()["result"]
         self.assertFalse(extracted["isError"])
         self.assertIn("bounded extracted text", extracted["content"][0]["text"])
+        self.assertIn('"source_host": "example.org"', extracted["content"][0]["text"])
+        self.assertIn('"worker_id": "local"', extracted["content"][0]["text"])
 
         async def fake_chat(body, _token):
             self.assertEqual(body.model, "deepseek-r1:1.5b")

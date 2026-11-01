@@ -92,6 +92,11 @@ NODES = _load_nodes()
 _node_locks = {node["id"]: asyncio.Semaphore(1) for node in NODES}
 _extract_slots = asyncio.Semaphore(2)
 _search_slots = asyncio.Semaphore(2)
+_EXTRACTION_WORKER_PORT = 8878
+_EXTRACTION_WORKER_IDS = tuple(sorted(_NODE_IPS))
+_extraction_worker_slots = {node_id: asyncio.Semaphore(1) for node_id in _EXTRACTION_WORKER_IDS}
+_extraction_worker_rr = 0
+_extraction_worker_rr_lock = asyncio.Lock()
 _round_robin = 0
 _round_robin_lock = asyncio.Lock()
 
@@ -657,10 +662,10 @@ async def extract(body: ExtractRequest, _token: str = Depends(_require_auth)) ->
         raise HTTPException(status_code=503, detail="extraction_at_capacity")
     await _extract_slots.acquire()
     release_here = True
-    task = asyncio.create_task(asyncio.to_thread(_safe_fetch, body.url))
+    task = asyncio.create_task(_dispatch_extraction(body.url, _token))
     try:
         try:
-            host, title, text = await asyncio.wait_for(asyncio.shield(task), timeout=FETCH_TIMEOUT + 2)
+            host, title, text, worker_id = await asyncio.wait_for(asyncio.shield(task), timeout=FETCH_TIMEOUT + 8)
         except asyncio.TimeoutError:
             release_here = False
             task.add_done_callback(lambda _task: _extract_slots.release())
@@ -673,4 +678,86 @@ async def extract(body: ExtractRequest, _token: str = Depends(_require_auth)) ->
         if release_here:
             _extract_slots.release()
     final_url = body.url.split("#", 1)[0]
-    return JSONResponse({"url": final_url, "title": title, "text": text, "word_count": len(text.split())}, headers={"x-extraction-host": host, "cache-control": "no-store"})
+    return JSONResponse({"url": final_url, "source_host": host, "worker_id": worker_id, "title": title, "text": text, "word_count": len(text.split())}, headers={"x-extraction-host": host, "x-extraction-worker": worker_id, "cache-control": "no-store"})
+
+
+async def _limited_json(response: httpx.Response, maximum: int) -> dict[str, Any] | None:
+    chunks, total = [], 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > maximum:
+            return None
+        chunks.append(chunk)
+    try:
+        value = json.loads(b"".join(chunks))
+        return value if isinstance(value, dict) else None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+async def _probe_extraction_worker(node_id: str, token: str) -> bool:
+    if node_id not in _NODE_IPS:
+        return False
+    try:
+        timeout = httpx.Timeout(2.5, connect=1.2)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+            async with client.stream("GET", f"http://{_NODE_IPS[node_id]}:{_EXTRACTION_WORKER_PORT}/health", headers={"Authorization": f"Bearer {token}"}) as response:
+                if response.status_code != 200:
+                    return False
+                payload = await _limited_json(response, 4096)
+        return bool(payload and payload.get("status") == "ok" and payload.get("service") == "oracle-extraction-worker" and payload.get("available") is True)
+    except (httpx.HTTPError, OSError):
+        return False
+
+
+async def _call_extraction_worker(node_id: str, url: str, token: str) -> tuple[str, str, str, str]:
+    timeout = httpx.Timeout(FETCH_TIMEOUT + 3, connect=1.5)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+            async with client.stream("POST", f"http://{_NODE_IPS[node_id]}:{_EXTRACTION_WORKER_PORT}/internal/extract", headers={"Authorization": f"Bearer {token}"}, json={"url": url}) as response:
+                payload = await _limited_json(response, 256_000)
+                if response.status_code != 200:
+                    detail = payload.get("detail") if payload else None
+                    known_errors = {"url_destination_not_public", "url_not_allowed", "redirect_not_followed", "source_http_error", "content_type_not_supported", "source_too_large", "source_fetch_timeout", "source_fetch_failed", "extraction_worker_at_capacity"}
+                    status = response.status_code if response.status_code in {413, 415, 422, 503, 504} else 502
+                    safe_detail = detail if isinstance(detail, str) and detail in known_errors else "extraction_worker_error"
+                    raise HTTPException(status_code=status, detail=safe_detail)
+                if not payload:
+                    raise HTTPException(status_code=502, detail="invalid_extraction_worker_response")
+        source_host, title, text = payload.get("source_host"), payload.get("title"), payload.get("text")
+        if not isinstance(source_host, str) or not isinstance(title, str) or not isinstance(text, str):
+            raise HTTPException(status_code=502, detail="invalid_extraction_worker_response")
+        if len(source_host) > 253 or len(title) > 300 or len(text.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise HTTPException(status_code=502, detail="invalid_extraction_worker_response")
+        return source_host, title, text, node_id
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, OSError):
+        # The worker may have completed its GET before this API observed the
+        # connection failure. Do not replay against another node or locally.
+        raise HTTPException(status_code=502, detail="extraction_worker_unavailable") from None
+
+
+async def _dispatch_extraction(url: str, token: str) -> tuple[str, str, str, str]:
+    candidates = [node_id for node_id in _EXTRACTION_WORKER_IDS if not _extraction_worker_slots[node_id].locked()]
+    probes = await asyncio.gather(*(_probe_extraction_worker(node_id, token) for node_id in candidates))
+    healthy = {node_id for node_id, available in zip(candidates, probes) if available}
+    global _extraction_worker_rr
+    selected = None
+    async with _extraction_worker_rr_lock:
+        start = _extraction_worker_rr % len(_EXTRACTION_WORKER_IDS)
+        _extraction_worker_rr += 1
+        for offset in range(len(_EXTRACTION_WORKER_IDS)):
+            node_id = _EXTRACTION_WORKER_IDS[(start + offset) % len(_EXTRACTION_WORKER_IDS)]
+            slot = _extraction_worker_slots[node_id]
+            if node_id in healthy and not slot.locked():
+                await slot.acquire()
+                selected = node_id
+                break
+    if selected is None:
+        source_host, title, text = await asyncio.to_thread(_safe_fetch, url)
+        return source_host, title, text, "local"
+    try:
+        return await _call_extraction_worker(selected, url, token)
+    finally:
+        _extraction_worker_slots[selected].release()
