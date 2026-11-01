@@ -5,8 +5,8 @@ through ROTOXY. Preserve existing working APIs while completing these boundaries
 
 | Capability | Existing verified interface | Required addition |
 | --- | --- | --- |
-| Search and bounded extraction | Authenticated `https://search.ziopsyop.tech/search` and `/extract`; private SearXNG | Separate search MCP surface; verified multi-node extraction capacity and health-aware dispatch |
-| Model inference | Private `/v1/models`, `/v1/chat/completions`; ROTOXY `/providers/oracle/v1`; durable Oracle MCP tasks | Independent model MCP surface and durable dataset partition/collection workflow |
+| Search and bounded extraction | Authenticated public `/search`, `/extract`, `/search/mcp`; six guarded extraction workers; private SearXNG | Shared capacity visibility, comparative search-quality evidence |
+| Model inference | Public `/models/mcp`, `/v1/models`, `/v1/chat/completions`; ROTOXY `/providers/oracle/v1`; separate durable Oracle MCP queue | Durable dataset partition/collection and shared leases across consumers |
 
 The two MCP surfaces may share one process and authentication infrastructure.
 They must advertise different tools and capacity. Two processes or DNS names
@@ -69,9 +69,14 @@ three removed GPT-OSS 20B tags/verified aliases and five removed TEV duplicates.
 ORA8 retains one TEV copy. ORA1 subsequently downloaded qwen3.5:2b and
 deepseek-r1:1.5b; a direct bounded generation on qwen3.5:2b returned exact
 `ORA1_SMALL_OK` with HTTP 200 and finish reason `stop` in 11.97 seconds.
-ORA1 has not yet been enabled in the durable pool configuration. Do not count
-that direct execution as a pool-dispatch proof.
+ORA1 has not yet been enabled in the durable pool configuration. Subsequent
+six-host API tests prove routing through the independent model API, not
+dispatch through that older queue.
 
-Separate search/model MCP endpoints are implemented in source, under protocol
-review before deployment. Multi-node extraction and durable large-dataset jobs
-remain required; existing single-origin search/extraction does not prove either.
+Separate search/model MCP endpoints and guarded six-node extraction are now
+deployed and live-tested. See `2026-11-01-oracle-live-verification.md` for
+request overlap, worker attribution and rollout evidence. Durable large-dataset
+partition/collection and shared capacity leases across all clients remain
+required. ORA1 remains disabled in the older durable queue because historical
+ambiguous task outcomes block configuration application; it is enabled in the
+separate model API. Do not conflate these execution paths.

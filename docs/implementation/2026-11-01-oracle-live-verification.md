@@ -47,10 +47,31 @@ historical ambiguous outcomes. These were not retried, cleared or relabelled.
 Its configuration retains ora1 disabled until supported reconciliation and
 configuration application can complete. The independent API includes ora1.
 
-Search currently uses a private SearXNG instance; guarded extraction runs on
-ora3. Crawl4AI containers exist on ora1/ora3/ora5, but their browser subresource
-egress safety has not been established. Multi-node guarded HTTP extraction
-is a separate implementation, not a claim about the deployed release.
+Search uses a private SearXNG instance. Guarded HTTP extraction workers are
+now deployed on ora1/ora3/ora5/ora6/ora7/ora8, Tailnet port 8878, each with
+one extraction slot, a 512 MiB memory limit and read-only root filesystem.
+Crawl4AI containers exist on ora1/ora3/ora5, but their browser subresource
+egress safety has not been established; they are not used by this path.
+
+Worker source `aeaa3f7` passed full CI run `41324469597`. Deployment backup
+ID on each host is `20261101T160505Z-195001`, under that host's private
+`~/.local/state/rotoxy-oracle-extraction-workers/backups/` directory.
+
+The first live extraction run skipped ora1 in an initial health selection and
+selected ora3 twice. A subsequent call completed on ora1, and all six worker
+health checks passed. Source review exposed a fairness bug when advancing past
+an unhealthy host: the cursor advanced from the attempted position instead
+of the actual selection. Fix `1e62cc7` adds a regression test (16 tests pass).
+The fixed API was deployed with backup
+`/opt/jq-worker/oracle-api/backups/oracle-api-20261101T161228Z`.
+
+After that deployment, six consecutive public `/extract` requests retrieved
+Example Domain from ora1, ora3, ora5, ora6, ora7, ora8 in order. A public MCP
+`extract_url` call also returned the correct text and `worker_id: ora1`.
+These were real network fetches, not mocked responses. Responses include
+`source_host` separately from `worker_id`; attribution survives MCP encoding.
+API aggregate extraction concurrency remains two, independent of six installed
+worker slots. No six-way extraction throughput claim is made.
 
 ## Rollback
 
@@ -86,3 +107,17 @@ Gateway release/config backup:
 `/home/jq/.config/rotoxy/backups/oracle-web-20261101T155937Z`.
 The queue daemon and workforce monitor retain the previous release; their
 source was unchanged by this web-facade integration.
+
+## Runtime capacity verification
+
+All six Ollama containers now explicitly limit parallel requests and loaded
+models to one. ORA1's default context is 4096; the other five retain their
+existing 32768 defaults, while these gateway/queue requests specify 4096.
+The targeted ora1 change preserved its image and OpenWebUI container and
+passed exact `ORA1_RUNTIME_CAP_OK` with thinking disabled. Its first bounded
+check used default thinking and exhausted the small output budget without a
+final response; it was not recorded as success. See the ora1 runtime report.
+
+Fairness-fix source `1e62cc7` passed full CI run `41325081903` on Node 22/24
+and the Oracle API job. No production provider purchase or paid cloud-model
+launch was used for these Oracle checks.
