@@ -15,7 +15,7 @@ test('search OAuth is audience-isolated and exposes only permissioned Oracle sea
  const webTools={definitionsFor:async(client,scopes)=>[
    ...(scopes.has('web:search')?[{name:'web_search',inputSchema:{properties:{provider:{enum:['exa','oracle']}}}}]:[]),
    ...(scopes.has('web:extract')?[{name:'web_extract',inputSchema:{properties:{provider:{enum:['oracle']}}}}]:[])],
-  call:async(name,args,client)=>{calls.push({name,args,client});return {provider:'oracle',results:[{url:'https://example.com'}]};}};
+  call:async(name,args,client)=>{calls.push({name,args,client});return name==='web_extract'?{provider:'oracle',url:args.url,text:'public text',worker_id:'ora1'}:{provider:'oracle',results:[{url:'https://example.com'}]};}};
  const built=await buildApp(store,{webTools});const server=createServer(built.app);await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
  t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));if(old===undefined)delete process.env.ROTOXY_CONFIG_DIR;else process.env.ROTOXY_CONFIG_DIR=old;await rm(dir,{recursive:true,force:true});});
  await store.update(s=>{s.config.publicBaseUrl=base;s.config.basePath='';s.config.upstreamUrl='';});
@@ -26,7 +26,7 @@ test('search OAuth is audience-isolated and exposes only permissioned Oracle sea
   const redirect=base+'/callback';const c=await(await fetch(base+'/oauth/register',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({client_name:'search-check',redirect_uris:[redirect]})})).json();const v='s'.repeat(64);
   const consent=await fetch(base+'/oauth/authorize',{method:'POST',redirect:'manual',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:c.client_id,redirect_uri:redirect,response_type:'code',code_challenge:pkceS256(v),code_challenge_method:'S256',resource:base+path,scope,admin_password:password})});
   if(consent.status!==302)return {status:consent.status};
-  const code=new URL(consent.headers.get('location')).searchParams.get('code');const r=await fetch(base+'/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:c.client_id,redirect_uri:redirect,code,code_verifier:v,resource:base+path})});return {status:r.status,...await r.json()};
+  const code=new URL(consent.headers.get('location')).searchParams.get('code');const r=await fetch(base+'/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:c.client_id,redirect_uri:redirect,code,code_verifier:v,resource:base+path})});return {status:r.status,client_id:c.client_id,...await r.json()};
  }
  const search=await token('/search/mcp','mcp web:search');assert.equal(search.status,200);
  const init=await(await rpc('/search/mcp',search.access_token,'initialize',{protocolVersion:'2025-11-25'})).json();assert.match(init.result.instructions,/untrusted/);
@@ -37,4 +37,12 @@ test('search OAuth is audience-isolated and exposes only permissioned Oracle sea
  const main=await token('/mcp','mcp web:search');assert.equal((await rpc('/search/mcp',main.access_token,'tools/list')).status,401);
  assert.equal((await token('/search/mcp','mcp jobs:write')).status,400);
  assert.equal(calls.length,1);
+ const both=await token('/search/mcp','mcp web:search web:extract');
+ const fetched=await(await rpc('/search/mcp',both.access_token,'tools/call',{name:'fetch',arguments:{id:'https://example.com'}})).json();
+ const data=JSON.parse(fetched.result.content[0].text);assert.equal(data.id,'https://example.com');assert.equal(data.worker_id,'ora1');assert.deepEqual(calls[1].args,{url:'https://example.com',provider:'oracle'});
+ const refresh=resource=>fetch(base+'/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',client_id:both.client_id,refresh_token:both.refresh_token,resource})});
+ assert.equal((await refresh(base+'/mcp')).status,400,'refresh cannot broaden its audience');
+ const renewed=await refresh(base+'/search/mcp');assert.equal(renewed.status,200);const renewedToken=await renewed.json();
+ assert.equal((await rpc('/search/mcp',renewedToken.access_token,'tools/list')).status,200);
+ assert.equal((await refresh(base+'/search/mcp')).status,400,'refresh tokens rotate');
 });

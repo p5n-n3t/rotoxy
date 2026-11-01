@@ -383,6 +383,14 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(default=256, ge=1, le=MAX_PREDICT)
     temperature: float = Field(default=0.2, ge=0, le=1.5)
     stream: bool = False
+    allowed_hosts: list[str] | None = Field(default=None, min_length=1, max_length=6)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def restrict_hosts(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and (len(set(value)) != len(value) or any(host not in {node["id"] for node in NODES} for host in value)):
+            raise ValueError("invalid_host_restriction")
+        return value
 
     @field_validator("model")
     @classmethod
@@ -406,9 +414,9 @@ class ChatRequest(BaseModel):
         return value
 
 
-async def _reserve_node(model: str) -> dict[str, Any]:
+async def _reserve_node(model: str, allowed_hosts: list[str] | None = None) -> dict[str, Any]:
     global _round_robin
-    candidates = [node for node in NODES if model in node["models"]]
+    candidates = [node for node in NODES if model in node["models"] and (allowed_hosts is None or node["id"] in allowed_hosts)]
     if not candidates:
         raise HTTPException(status_code=404, detail="model_not_available")
     async with _round_robin_lock:
@@ -425,7 +433,7 @@ async def _reserve_node(model: str) -> dict[str, Any]:
 
 @app.post("/v1/chat/completions")
 async def chat(body: ChatRequest, _token: str = Depends(_require_auth)) -> JSONResponse:
-    node = await _reserve_node(body.model)
+    node = await _reserve_node(body.model, body.allowed_hosts)
     lock = _node_locks[node["id"]]
     try:
         async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT, trust_env=False) as client:
