@@ -28,6 +28,13 @@ ora8, ora1. Measured durations: 6.67, 5.95, 6.51, 7.38, 5.87, 0.88 seconds.
 This proves six-host routing and terminal results, **not six simultaneous
 inferences or shared leases across consumers**. Catalog excludes GPT-OSS 20B.
 
+A subsequent controlled parallel test sent six bounded Qwen requests together.
+All six returned exact `PARALLEL_ORACLE_OK` from distinct hosts. Durations:
+ora1 9.605s, ora6 7.845s, ora5 6.819s, ora3 7.128s, ora8 9.074s, ora7 7.447s.
+All six HTTP request intervals overlapped for 6.816 seconds; overall wall time
+was 9.605 seconds. This establishes overlapping successful routed requests,
+not a shared capacity lease with other clients or per-token execution timing.
+
 The first local Python public probe received HTTP 403 with its default
 User-Agent; curl and an identified integration User-Agent reached the service.
 The test was corrected before any model request. Cloudflare edge filtering
@@ -68,4 +75,14 @@ bounded plain-text HTTP. There is no paid fallback or blind retry.
 
 Source regression coverage checks scopes, client permissions, private file
 permissions, fixed destination, correct credential isolation, and failed-call
-non-replay. Root integration is not live until its tested release is deployed.
+non-replay. Root integration release `59adb6f` passed full CI run `41323811048`
+and is deployed in the gateway. Its real configured facade advertised Oracle
+and returned Python search results and Example Domain extraction. Gateway
+local and public health checks passed. Connected clients may need to refresh
+their tool catalog to see the newly enabled provider enum. A connector whose
+cached schema still lists only Exa was not counted as an Oracle MCP call proof.
+
+Gateway release/config backup:
+`/home/jq/.config/rotoxy/backups/oracle-web-20261101T155937Z`.
+The queue daemon and workforce monitor retain the previous release; their
+source was unchanged by this web-facade integration.
