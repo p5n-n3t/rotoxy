@@ -27,6 +27,9 @@ export interface CloudflareCredentialView {
 interface CloudflareCredential extends CloudflareCredentialView { secret: EncryptedSecret }
 interface CredentialDocument { version: 1; accounts: CloudflareCredential[] }
 const EMPTY: CredentialDocument = { version: 1, accounts: [] };
+// HTTP and durable-job adapters in one gateway share the same account slots.
+// This is deliberately not a claim of cross-process leasing.
+const PROCESS_CAPACITY = new Map<string, Map<string, number>>();
 export interface AddCloudflareCredential {
   label: string;
   accountId: string;
@@ -65,6 +68,7 @@ export class CloudflareCredentialStore {
   private readonly file: string;
   readonly routingRules: ResourceRoutingRulesStore;
   constructor(private readonly store: StateStore) { this.file = join(store.dir, "cloudflare-ai-credentials.json"); this.routingRules = new ResourceRoutingRulesStore(store); }
+  get capacityNamespace(): string { return this.file; }
 
   private async read(): Promise<CredentialDocument> {
     try {
@@ -181,13 +185,16 @@ export class CloudflareAIAdapter {
   private readonly maxTokens: number;
   private readonly maxInflight: number;
   private readonly now: () => number;
-  private readonly inflight = new Map<string, number>();
+  private readonly inflight: Map<string, number>;
   private readonly dispatched = new Map<string, number>();
   private cursor = 0;
   private recent: Array<{ accountId: string; model: string; at: number; durationMs: number; status: string; usage?: Record<string, number> }> = [];
   snapshot() { return { inflight: Object.fromEntries(this.inflight), recent: this.recent.map(row => ({ ...row, ...(row.usage ? { usage: { ...row.usage } } : {}) })) }; }
 
   constructor(private readonly credentials: CloudflareCredentialStore, options: CloudflareAIOptions = {}) {
+    const namespace = credentials.capacityNamespace;
+    this.inflight = PROCESS_CAPACITY.get(namespace) ?? new Map<string, number>();
+    PROCESS_CAPACITY.set(namespace, this.inflight);
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;

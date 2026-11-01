@@ -6,6 +6,25 @@ import { join } from "node:path";
 import { StateStore } from "../dist/store.js";
 import { CloudflareAIAdapter, CloudflareAIError, CloudflareCredentialStore } from "../dist/cloudflare-ai.js";
 
+test("separate HTTP and job adapter instances share a configured account slot", async t => {
+  const root = await mkdtemp(join(tmpdir(), "rx-cf-shared-capacity-"));
+  const old = process.env.ROTOXY_CONFIG_DIR; process.env.ROTOXY_CONFIG_DIR = root;
+  t.after(async () => { if (old === undefined) delete process.env.ROTOXY_CONFIG_DIR; else process.env.ROTOXY_CONFIG_DIR = old; await rm(root, { recursive: true, force: true }); });
+  const store = new StateStore(); await store.init({ adminPassword: "synthetic-shared-capacity-password" });
+  const credentials = new CloudflareCredentialStore(store);
+  const account = await credentials.addCredential({ label: "Shared", accountId: "a".repeat(32), token: "synthetic-shared-key", allowedModels: ["@cf/test/model"] });
+  let release, started; const entered = new Promise(resolve => { started = resolve; });
+  const first = new CloudflareAIAdapter(credentials, { fetch: async () => { started(); await new Promise(resolve => { release = resolve; }); return Response.json({success:true,result:{response:"OK"}}); } });
+  let otherCalls = 0;
+  const second = new CloudflareAIAdapter(new CloudflareCredentialStore(store), { fetch: async () => { otherCalls++; return Response.json({success:true,result:{response:"OK"}}); } });
+  const pending = first.runForAccount(account.id, {model:"@cf/test/model",input:{prompt:"test",max_tokens:8}});
+  await entered;
+  try { await assert.rejects(second.runForAccount(account.id, {model:"@cf/test/model",input:{prompt:"test",max_tokens:8}})); assert.equal(otherCalls,0); }
+  finally { release(); await pending; }
+  await second.runForAccount(account.id, {model:"@cf/test/model",input:{prompt:"test",max_tokens:8}});
+  assert.equal(otherCalls,1,"released slots become usable across adapters");
+});
+
 test("Cloudflare catalog pages read-only metadata, preserves selection, and stops repeated pages visibly", async t => {
   const root = await mkdtemp(join(tmpdir(), "rx-cf-catalog-pages-"));
   const previous = process.env.TOKEN2OAUTH_CONFIG_DIR;
