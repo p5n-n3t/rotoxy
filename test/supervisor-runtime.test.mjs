@@ -32,6 +32,23 @@ test("in-memory state stores need no filesystem-backed Cloudflare credential vau
   assert.doesNotThrow(() => new SupervisorRuntime(config, { configDir: "/tmp/rotoxy-memory-store", store }));
 });
 
+test("retired LightSprint sessions are not exposed or eligible in runtime worker inventory", async () => {
+  const state = {
+    config: { upstreamUrl: "https://app.lightsprint.ai/mcp" },
+    accounts: [
+      { id: "acct-a", provider: "lightsprint", enabled: true, stats: { state: "healthy" } },
+      { id: "acct-b", provider: "generic-bearer-mcp", enabled: true, stats: { state: "healthy" } },
+    ],
+  };
+  const runtime = new SupervisorRuntime(config, { configDir: "/tmp/rotoxy-retired-lightsprint", store: { load: async () => state },
+    oracleInventoryReader: async () => ({ hosts: [] }) });
+  runtime.started = true;
+  runtime.bridge = { request: async () => { assert.fail("worker inventory must not probe or dispatch providers"); } };
+  const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
+  assert.deepEqual(workers.accounts, []);
+  assert.equal(workers.workers.every(worker => worker.eligible === false), true);
+});
+
 test("worker concurrency adds eligible inference capacity within both ceilings", () => {
   assert.equal(boundedWorkerConcurrency(12, 0, [3]), 3, "inference-only fleets do not collapse to one worker");
   assert.equal(boundedWorkerConcurrency(12, 2, [2, 1]), 5, "session/fresh and inference capacities combine");
@@ -105,7 +122,7 @@ test("Oracle capability refresh evaluates freshness against the refreshed invent
   }
 });
 
-test("expired transient cooldown restores eligibility without clearing auth or quota blocks", async t=>{
+test("retired LightSprint session eligibility stays blocked regardless of account health", async t=>{
   const dir=await mkdtemp(join(tmpdir(),"rx-expired-cooldown-"));
   t.after(()=>rm(dir,{recursive:true,force:true}));
   const state=structuredClone(currentState);
@@ -113,17 +130,17 @@ test("expired transient cooldown restores eligibility without clearing auth or q
     supervisionDbPath:join(dir,"inbox.sqlite"),recoveryDbPath:join(dir,"recovery.sqlite"),
     oracleConfigPath:join(dir,"oracle.json"),oracleDbPath:join(dir,"oracle.sqlite"),store:{load:async()=>state}});
   runtime.started=true;
-  for(const [stats,eligible] of [
-    [{state:"cooldown",cooldownUntil:Date.now()-10000},true],
-    [{state:"cooldown",cooldownUntil:Date.now()+3600000},false],
-    [{state:"exhausted",cooldownUntil:Date.now()-10000},false],
-    [{state:"auth-failed",cooldownUntil:Date.now()-10000},false],
-    [{state:"healthy",cooldownUntil:Date.now()+3600000},false],
+  for(const stats of [
+    {state:"cooldown",cooldownUntil:Date.now()-10000},
+    {state:"cooldown",cooldownUntil:Date.now()+3600000},
+    {state:"exhausted",cooldownUntil:Date.now()-10000},
+    {state:"auth-failed",cooldownUntil:Date.now()-10000},
+    {state:"healthy",cooldownUntil:Date.now()+3600000},
   ]){
     state.accounts[0].stats=stats;
     const snapshot=await runtime.callTool("job_workers",{projectId:"project-a"},caller);
     assert.ok(Array.isArray(snapshot.inferenceResources), "inference capability view is present even when empty");
-    assert.equal(snapshot.workers.find(w=>w.accountId==="acct-a").eligible,eligible,stats.state);
+    assert.equal(snapshot.workers.find(w=>w.accountId==="acct-a").eligible,false,stats.state);
   }
 });
 
@@ -143,9 +160,8 @@ test("fresh provisioning config is strict, optional, and account-bound", async (
   runtime.started = true;
   const inventory = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
   const freshAccount = inventory.accounts.find((account) => account.accountId === "acct-a");
-  assert.equal(freshAccount.automaticProvisioning, true);
-  assert.equal(freshAccount.provisioningState, "fresh_ready");
-  assert.deepEqual(freshAccount.freshProvisioning, { workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" });
+  assert.equal(freshAccount, undefined, "retired accounts are excluded from active worker inventory");
+  assert.equal(inventory.workers.every((worker) => worker.eligible === false), true);
   await runtime.close();
 
   const multiProvider = structuredClone(config);
@@ -190,22 +206,15 @@ test("fresh job submit requires an exact eligible binding before bridge submissi
   freshSubmission.tasks[0].execution = { mode: "fresh", provider: "claude" };
 
   const unbound = makeRuntime(config);
-  await assert.rejects(unbound.callTool("job_submit", freshSubmission, caller), /explicitly bound eligible account and stack/);
-  assert.equal(bridgeCalls.length, 0, "unbound fresh jobs are refused before the bridge is contacted");
+  await assert.rejects(unbound.callTool("job_submit", freshSubmission, caller), /provider_retired/);
+  assert.equal(bridgeCalls.length, 0, "retired provider jobs are refused before the bridge is contacted");
   await unbound.close();
 
   const boundConfig = structuredClone(config);
   boundConfig.projects[0].freshProvisioningBindings = [{ accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" }];
   const bound = makeRuntime(boundConfig);
-  const receipt = await bound.callTool("job_submit", freshSubmission, caller);
-  assert.equal(receipt.state, "queued");
-  assert.equal(bridgeCalls.length, 1);
-  assert.deepEqual(bridgeCalls[0].body.eligibleAccountIds, ["acct-a", "acct-b"], "the task execution binding pins fresh provisioning while the job keeps its eligible fleet");
-  assert.equal(bridgeCalls[0].body.tasks[0].execution.mode, "fresh");
-  assert.equal(bridgeCalls[0].body.tasks[0].execution.workspaceId, "workspace-a");
-  assert.equal(bridgeCalls[0].body.tasks[0].stackId, "stack-a");
-  assert.equal(bridgeCalls[0].body.tasks[0].provider, "claude");
-  assert.match(bridgeCalls[0].body.tasks[0].instructions, /DONE-task-one/);
+  await assert.rejects(bound.callTool("job_submit", freshSubmission, caller), /provider_retired/);
+  assert.equal(bridgeCalls.length, 0, "a historical binding does not reactivate the retired provider");
   await bound.close();
 });
 
@@ -229,16 +238,8 @@ test("fresh job submit round-robins verified bindings while pinning every task t
   };
   const freshSubmission = structuredClone(submission);
   freshSubmission.tasks.forEach((task) => { task.execution = { mode: "fresh", provider: "claude" }; });
-  const receipt = await runtime.callTool("job_submit", freshSubmission, caller);
-  assert.equal(receipt.state, "queued");
-  assert.equal(bridgeCalls.length, 1);
-  const body = bridgeCalls[0].body;
-  assert.deepEqual(body.eligibleAccountIds, ["acct-a", "acct-b"]);
-  assert.deepEqual(body.tasks.map((task) => task.execution), [
-    { mode: "fresh", accountId: "acct-a", workspaceId: "workspace-a", stackId: "stack-a", provider: "claude" },
-    { mode: "fresh", accountId: "acct-b", workspaceId: "workspace-b", stackId: "stack-b", provider: "claude" },
-  ]);
-  assert.deepEqual(body.tasks.map((task) => task.stackId), ["stack-a", "stack-b"]);
+  await assert.rejects(runtime.callTool("job_submit", freshSubmission, caller), /provider_retired/);
+  assert.equal(bridgeCalls.length, 0);
   await runtime.close();
 });
 
@@ -277,104 +278,33 @@ async function waitComplete(runtime) {
   throw new Error(`job did not complete before test deadline: ${JSON.stringify(last)}`);
 }
 
-test("real Python IPC registers two accounts, completes pinned tasks, isolates callers, and resumes durable results", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "t2o-runtime-"));
+test("real Python IPC preserves job service while refusing retired LightSprint dispatch", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "rx-retired-provider-ipc-"));
   await chmod(dir, 0o700);
-  let runtime, restarted;
-  t.after(async () => {
-    try { await restarted?.close(); await runtime?.close(); }
-    finally { await rm(dir, { recursive: true, force: true }); }
-  });
+  t.after(() => rm(dir, { recursive: true, force: true }));
   const configPath = join(dir, "runtime.json");
   await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
-  assert.equal((await readSupervisorRuntimeConfig(configPath)).projects[0].projectId, "project-a");
-  assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments"), true);
-  assert.equal(isAllowedSupervisorRoute("POST", "/v1/accounts"), true);
-  assert.equal(isAllowedSupervisorRoute("GET", "/v1/assignments/job-one/results"), true);
-  assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments/job-one/cancel"), true);
-  assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments/job-one/reconcile"), true);
-  assert.equal(isAllowedSupervisorRoute("POST", "/v1/accounts/other"), false);
-  assert.equal(isAllowedSupervisorRoute("GET", "/admin/api/v1/assignments/job-one/../../other"), false);
-
-  const adapters = new Map();
-  const options = { configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"), supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite3"), oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"), store,
-    adapterFactory: (accountId) => { if (!adapters.has(accountId)) adapters.set(accountId, fakeAdapter(accountId)); return adapters.get(accountId); },
-    workerOptions: { pollIntervalMs: 20, adapterTimeoutMs: 1000 } };
-  runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
+  const retiredState = structuredClone(currentState);
+  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), {
+    configPath, configDir: dir, supervisorCwd: join(process.cwd(), "supervisor"),
+    supervisionDbPath: join(dir, "inbox.sqlite"), recoveryDbPath: join(dir, "recovery.sqlite3"),
+    oracleConfigPath: join(dir, "oracle-config.json"), oracleDbPath: join(dir, "oracle.sqlite"),
+    store: { load: async () => retiredState }, workerOptions: { pollIntervalMs: 20 },
+  });
   await runtime.start();
-  const registeredSupervision = await runtime.readSupervision("project-a", 0, 10);
-  assert.deepEqual(registeredSupervision.monitorRegistration, {
-    expected: 2, sessions: 2, authorizedViewers: 2, remoteReads: 2, registered: 2, failed: 0,
-  }, "two physical sessions remain two monitor targets even with two authorized clients");
-  assert.equal(registeredSupervision.workers.length, 2, "supervision does not duplicate workers per OAuth client");
-  const receipt = await runtime.callTool("job_submit", submission, caller);
-  assert.equal(receipt.assignmentId, "job-one");
-  assert.equal(receipt.state, "queued");
-  assert.deepEqual(await runtime.callTool("job_submit", submission, caller), receipt);
-  const submitted = await runtime.callTool("job_status", { projectId: "project-a", jobId: "job-one" }, caller);
-  assert.deepEqual(submitted.scheduling, submission.scheduling);
-  assert.deepEqual(submitted.tasks.map((task) => task.priority), [7, 2]);
-  const completed = await waitComplete(runtime);
-  assert.equal(completed.state, "complete");
-  assert.deepEqual(completed.tasks.map((task) => task.selectedAccountId), ["acct-a", "acct-b"]);
-  assert.deepEqual(completed.tasks.map((task) => task.sessionId), ["session-a", "session-b"]);
-  const results = await runtime.callTool("job_results", { projectId: "project-a", jobId: "job-one" }, caller);
-  assert.deepEqual(results.results.map((result) => result.taskId).sort(), ["task-one", "task-two"]);
-  assert.ok(results.results.every((result) => result.text.includes("DONE-task-")));
-  await assert.rejects(runtime.callTool("job_results", { projectId: "project-b", jobId: "job-one" }, { ...caller, projectId: "project-b" }), /job is not available/);
-  await assert.rejects(runtime.callTool("job_results", { projectId: "project-a", jobId: "job-one" }, { clientId: "client-b", projectId: "project-a" }));
+  t.after(() => runtime.close());
+  let assignmentWrites = 0;
+  const originalRequest = runtime.bridge.request.bind(runtime.bridge);
+  runtime.bridge.request = async (method, path, body, options) => {
+    if (method === "POST" && path === "/v1/assignments") assignmentWrites++;
+    return originalRequest(method, path, body, options);
+  };
+  await assert.rejects(runtime.callTool("job_submit", submission, caller), /provider_retired/);
   const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
-  assert.equal(workers.workers.length, 2);
-  assert.equal(workers.accounts.length, 3, "connected account inventory is distinct from dispatch binding");
-  const unbound = workers.accounts.find(account => account.accountId === "acct-c");
-  assert.equal(unbound.dispatchBound, false);
-  assert.equal(unbound.provisioningState, "not_bound");
-  assert.equal(unbound.providerSlotLimit, null);
-  assert.equal(unbound.availableSlots, null);
-  assert.ok(workers.accounts.every(account => !("secret" in account)));
-  const supervision = await runtime.readSupervision("project-a", 0, 10);
-  assert.equal(supervision.project, "project-a");
-  assert.ok(Array.isArray(supervision.events));
-  assert.ok(Array.isArray(supervision.models));
-  assert.equal(supervision.recovery.project, "project-a");
-  assert.equal(supervision.recovery.available, false, "the scoped snapshot uses the injected temporary recovery database");
-  const paused = await runtime.callTool("job_control", {projectId:"project-a", action:"pause_dispatch"}, caller);
-  assert.equal(paused.projectId,"project-a");
-  assert.equal(paused.state,"paused");
-  const dispatchResumed = await runtime.callTool("job_control", {projectId:"project-a", action:"resume_dispatch"}, caller);
-  assert.equal(dispatchResumed.state,"running");
-  assert.ok(dispatchResumed.revision > paused.revision);
-  currentState.accounts.find((account) => account.id === "acct-b").stats.state = "auth-failed";
-  const narrowed = await runtime.callTool("job_submit", { ...submission, jobId: "job-two", idempotencyKey: "idem-two", tasks: [submission.tasks[0]] }, caller);
-  assert.equal(narrowed.assignmentId, "job-two");
-  const narrowedStatus = await runtime.callTool("job_status", { projectId: "project-a", jobId: "job-two" }, caller);
-  assert.deepEqual(narrowedStatus.eligibleAccountIds, ["acct-a"]);
-  const inboxPage = await runtime.callTool("job_inbox", { projectId: "project-a", limit: 1 }, caller);
-  assert.equal(inboxPage.projectId, "project-a");
-  assert.equal(inboxPage.events.length, 1);
-  assert.equal(inboxPage.hasMore, true);
-  assert.match(inboxPage.cursor, /^[A-Za-z0-9_-]{32}$/);
-  const eventId = inboxPage.events[0].eventId;
-  assert.match(eventId, /^(repo|job):[1-9][0-9]{0,18}$/);
-  assert.deepEqual(await runtime.callTool("job_inbox_ack", { projectId: "project-a", eventId }, caller),
-    { projectId: "project-a", eventId, acknowledged: true });
-  await assert.rejects(runtime.callTool("job_inbox_ack", { projectId: "project-a", eventId },
-    { clientId: "client-b", projectId: "project-a" }));
-  await assert.rejects(runtime.callTool("job_inbox_ack", { projectId: "project-b", eventId },
-    { clientId: "client-a", projectId: "project-b" }));
-  await runtime.close();
-
-  restarted = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
-  await restarted.start();
-  const persisted = await restarted.callTool("job_results", { projectId: "project-a", jobId: "job-one" }, caller);
-  assert.equal(persisted.results.length, 2);
-  const inboxAfterCursor = await restarted.callTool("job_inbox", { projectId: "project-a", after: inboxPage.cursor, limit: 1 }, caller);
-  assert.equal(inboxAfterCursor.projectId, "project-a");
-  const persistedInbox = await restarted.callTool("job_inbox", { projectId: "project-a", limit: 100 }, caller);
-  assert.equal(persistedInbox.events.find((event) => event.eventId === eventId)?.acknowledged, true);
-  const resumed = await restarted.callTool("job_status", { projectId: "project-a", jobId: "job-one" }, caller);
-  assert.equal(resumed.state, "complete");
-  assert.ok(resumed.tasks.every((task) => task.state === "complete"));
+  assert.deepEqual(workers.accounts, []);
+  assert.equal(workers.workers.every(worker => worker.eligible === false), true);
+  assert.equal(assignmentWrites, 0, "retired work is rejected before assignment reaches Python IPC");
+  assert.equal(isAllowedSupervisorRoute("POST", "/v1/assignments"), true, "the shared job route remains available to supported executors");
 });
 
 test("readAdmin projects reported usage and deduplicates account cost by task generation", async (t) => {
@@ -598,15 +528,8 @@ test("reconcile_task action verifies project ownership and passes caller revisio
   assert.equal(reconcileCall.body.taskId, "task-1");
 });
 
-test("exhausted account shows ineligible for dispatch but isAccountObservable allows it", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "t2o-obs-predicate-"));
-  await chmod(dir, 0o700);
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const configPath = join(dir, "runtime.json");
-  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
-
-  // acct-a is quota-exhausted; all others are healthy
-  const exhaustedState = {
+test("retired LightSprint sessions cannot be observed or selected", async () => {
+  const state = {
     config: { upstreamUrl: "https://app.lightsprint.ai/mcp" },
     accounts: [
       { id: "acct-a", provider: "lightsprint", enabled: true, stats: { state: "exhausted" } },
@@ -614,60 +537,13 @@ test("exhausted account shows ineligible for dispatch but isAccountObservable al
       { id: "acct-c", provider: "lightsprint", enabled: true, stats: { state: "healthy" } },
     ],
   };
-
-  const results = [];
-  let claimCount = 0;
-  const observeOp = {
-    operationId: "obs-exhausted-predicate", attemptId: "attempt-obs-p", generation: 1,
-    selectedAccountId: "acct-a", kind: "observe_session", sessionId: "session-a",
-    input: { sessionId: "session-a", clientMessageId: "client-obs-p", dispatchAt: 100, expectedMarker: "DONE" },
-  };
-
-  const options = {
-    configPath, configDir: dir,
-    supervisorCwd: join(process.cwd(), "supervisor"),
-    supervisionDbPath: join(dir, "inbox.sqlite"),
-    recoveryDbPath: join(dir, "recovery.sqlite3"),
-    oracleConfigPath: join(dir, "oracle-config.json"),
-    oracleDbPath: join(dir, "oracle.sqlite"),
-    store: { async load() { return exhaustedState; } },
-    adapterFactory: (accountId) => fakeAdapter(accountId),
-    workerOptions: { pollIntervalMs: 20, adapterTimeoutMs: 1000 },
-  };
-
-  const runtime = new SupervisorRuntime(await readSupervisorRuntimeConfig(configPath), options);
-  await runtime.start();
-  t.after(() => runtime.close());
-
-  // Exhaust-quoted account must not be eligible for chat dispatch.
+  const runtime = new SupervisorRuntime(config, { configDir: process.cwd(), store: { load: async () => state },
+    oracleInventoryReader: async () => ({ hosts: [] }) });
+  runtime.started = true;
+  runtime.bridge = { request: async () => { assert.fail("worker inspection must not probe a provider"); } };
   const workers = await runtime.callTool("job_workers", { projectId: "project-a" }, caller);
-  const exhaustedWorker = workers.workers.find((w) => w.accountId === "acct-a");
-  assert.equal(exhaustedWorker?.eligible, false, "exhausted account must not be dispatch-eligible");
-  const healthyWorker = workers.workers.find((w) => w.accountId === "acct-b");
-  assert.equal(healthyWorker?.eligible, true, "healthy account must remain dispatch-eligible");
-
-  // Intercept bridge to inject an observe_session for the exhausted account and capture result.
-  const origRequest = runtime.bridge.request.bind(runtime.bridge);
-  runtime.bridge.request = async (method, path, body, opts) => {
-    if (path === "/v1/operations/claim") {
-      return claimCount++ === 0 ? observeOp : undefined;
-    }
-    if (path.endsWith("/result")) { results.push(structuredClone(body)); return {}; }
-    return origRequest(method, path, body, opts);
-  };
-
-  // Drive a tick so the worker processes the injected observe operation.
-  const deadline = Date.now() + 3_000;
-  while (results.length === 0 && Date.now() < deadline) {
-    await runtime.worker.tick();
-    if (results.length === 0) await new Promise((r) => setTimeout(r, 20));
-  }
-
-  assert.ok(results.length > 0, "observe_session must produce a result for exhausted account");
-  assert.equal(results[0].outcome, "accepted",
-    "observation from exhausted account must be accepted (isAccountObservable bypasses quota)");
-  assert.notEqual(results[0].errorClass, "account_unavailable",
-    "exhausted account must not be blocked from observing");
+  assert.deepEqual(workers.accounts, []);
+  assert.equal(workers.workers.every(worker => worker.eligible === false), true);
 });
 
 test("underscore-prefixed provider session IDs register and traversal remains rejected", async (t) => {

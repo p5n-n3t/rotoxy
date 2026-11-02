@@ -8,7 +8,7 @@ import { LightSprintWorkspaceContract } from "./lightsprint-workspace-contract.j
 
 export type JobProvider = "claude" | "codex" | "auto" | "pi";
 export type JobClassification = "accepted" | "rejected" | "ambiguous";
-export type JobReason = "auth" | "quota" | "rate_limit" | "not_found" | "account_unavailable" | "provider_mismatch" | "endpoint_mismatch" | "tool_error" | "protocol_error" | "transport_ambiguous" | "identity_mismatch" | "instructions_mismatch" | "response_too_large" | "policy_denied";
+export type JobReason = "auth" | "quota" | "rate_limit" | "not_found" | "account_unavailable" | "provider_mismatch" | "endpoint_mismatch" | "provider_retired" | "tool_error" | "protocol_error" | "transport_ambiguous" | "identity_mismatch" | "instructions_mismatch" | "response_too_large" | "policy_denied";
 
 export interface JobResult<T = unknown> {
   classification: JobClassification;
@@ -67,7 +67,7 @@ export interface ProvisioningContractDiscovery {
   status: "documented" | "unknown" | "unavailable";
   /** Account-scoped workspace declared by this credential's own MCP catalog. */
   workspaceId?: string;
-  reason?: "catalog_missing" | "catalog_malformed" | "contract_unrecognized" | "auth_failed" | "transport_failed" | "account_unavailable" | "catalog_unavailable";
+  reason?: "catalog_missing" | "catalog_malformed" | "contract_unrecognized" | "auth_failed" | "transport_failed" | "account_unavailable" | "catalog_unavailable" | "provider_retired";
 }
 
 const MAX_MCP_RESPONSE_BYTES = 1_048_576;
@@ -107,7 +107,7 @@ class HttpStatusError extends Error {
 }
 class ResponseTooLargeError extends Error {}
 class AccountUnavailableError extends Error {
-  constructor(readonly reason: "account_unavailable" | "provider_mismatch" | "endpoint_mismatch") { super("LightSprint account is not eligible"); }
+  constructor(readonly reason: "account_unavailable" | "provider_mismatch" | "endpoint_mismatch" | "provider_retired") { super("LightSprint account is not eligible"); }
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -590,18 +590,23 @@ export class LightSprintJobsAdapter {
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly factory: LightSprintMcpClientFactory;
   private readonly timeoutMs: number;
+  private readonly injectedTransport: boolean;
   private readonly verifiedInstructions = new Map<string, string>();
 
   constructor(private readonly store: StateStore, readonly accountId: string, private readonly options: LightSprintJobsOptions = {}) {
     validateId(accountId, "accountId");
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.factory = options.clientFactory ?? createLightSprintMcpClient;
+    // Explicit transport injection is retained only for deterministic adapter
+    // contract fixtures. The production/default path is retired fail-closed.
+    this.injectedTransport = options.fetch !== undefined || options.clientFactory !== undefined;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 120_000) throw new RangeError("timeoutMs is invalid");
   }
 
   /** Reads only MCP tools/list through this account's validated, credential-pinned client. */
   async discoverProvisioningContract(): Promise<ProvisioningContractDiscovery> {
+    if (!this.injectedTransport) return { ...unknownDiscovery(this.accountId, "provider_retired"), status: "unavailable" };
     let description: string | undefined;
     let malformed = false;
     let catalogMissing = false;
@@ -699,6 +704,7 @@ export class LightSprintJobsAdapter {
   }
 
   private async client(): Promise<LightSprintMcpClient> {
+    if (!this.injectedTransport) throw new AccountUnavailableError("provider_retired");
     const state = await this.store.load();
     const account: UpstreamAccount | undefined = state.accounts.find((item) => item.id === this.accountId);
     if (!account || account.enabled !== true) {
@@ -738,6 +744,7 @@ export class LightSprintJobsAdapter {
 
   private async api<T = unknown>(method: string, path: string, body?: Record<string, unknown>, transcript = false,
     trustedChatMutation = false, trustedWorkspaceId?: string, trustedFreshMutation = false): Promise<JobResult<T>> {
+    if (!this.injectedTransport) return rejected<T>(this.accountId, "provider_retired");
     let raw: unknown;
     try {
       const state = await this.store.load();

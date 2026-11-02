@@ -25,6 +25,21 @@ function ok(value) {
   return { structuredContent: value, isError: false };
 }
 
+test("default retired LightSprint adapter rejects reads and discovery before network or credential access", async () => {
+  let tokenReads = 0;
+  const retiredStore = {
+    async load() { return { config: { upstreamUrl: "https://app.lightsprint.ai/mcp" },
+      accounts: [{ id: ACCOUNT_ID, provider: "lightsprint", enabled: true }] }; },
+    async revealToken() { tokenReads++; throw new Error("retired provider must not read stored credentials"); },
+  };
+  const adapter = new LightSprintJobsAdapter(retiredStore, ACCOUNT_ID);
+  assert.equal((await adapter.readTask(TASK_ID)).classification, "rejected");
+  assert.equal((await adapter.readTask(TASK_ID)).reason, "provider_retired");
+  assert.equal((await adapter.discoverProvisioningContract()).status, "unavailable");
+  assert.equal((await adapter.discoverProvisioningContract()).reason, "provider_retired");
+  assert.equal(tokenReads, 0);
+});
+
 test("native MCP transport stays account-pinned and uses initialize/session/tool-call framing", async () => {
   const seen = [];
   const fetch = async (url, init) => {

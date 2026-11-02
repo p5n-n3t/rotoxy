@@ -147,17 +147,20 @@ function nativeLightSprintTarget(url: string): boolean {
   } catch { return false; }
 }
 function accountSignal(account: UpstreamAccount | undefined, nativeTarget: boolean) {
-  const providerOk = account?.provider === "lightsprint" || (account?.provider === "generic-bearer-mcp" && nativeTarget);
+  // Legacy session readiness only; inference providers have their own
+  // capability and eligibility path below.
+  const retired = account?.provider === "lightsprint" || account?.provider === "generic-bearer-mcp" && nativeTarget;
+  const providerOk = false;
   const enabled = account?.enabled === true;
   const authFailed = account?.stats?.state === "auth-failed" || account?.stats?.lastStatus === 401;
   const cooldownUntil = account?.stats?.cooldownUntil;
   const finiteCooldown = typeof cooldownUntil === "number" && Number.isFinite(cooldownUntil);
   const cooling = finiteCooldown && cooldownUntil > Date.now();
   const cooldownExpired = account?.stats?.state === "cooldown" && finiteCooldown && cooldownUntil <= Date.now();
-  const health = authFailed ? "auth_failed" : !cooling && (account?.stats?.state === "healthy" || account?.stats?.state === "exhausted" || cooldownExpired) ? "healthy" : "degraded";
+  const health = retired ? "degraded" : authFailed ? "auth_failed" : !cooling && (account?.stats?.state === "healthy" || account?.stats?.state === "exhausted" || cooldownExpired) ? "healthy" : "degraded";
   // A 429 is a rate-limit observation, not proof that account credits are depleted.
   const quota = account?.stats?.state === "exhausted" || account?.stats?.lastStatus === 402 ? "depleted" : "unknown";
-  return { providerOk, enabled, authorized: !!providerOk && !authFailed, health, quota };
+  return { providerOk, retired, enabled, authorized: !!providerOk && !authFailed, health, quota };
 }
 
 type CreditReadiness = { kind: "strict"; accounts: Map<string, { available: number | null; operationUpperBound: number | null; boundVerified: boolean }> } | { kind: "disabled" | "legacy" | "malformed" | "unavailable" };
@@ -313,6 +316,10 @@ export class SupervisorRuntime implements SupervisorBackend {
       },
       adapterFor: async (accountId) => {
         const timeoutMs = this.options.workerOptions?.adapterTimeoutMs ?? 30_000;
+        const latest = await this.options.store.load();
+        if (accountSignal(latest.accounts.find((row) => row.id === accountId), nativeLightSprintTarget(latest.config.upstreamUrl)).retired) {
+          return new LightSprintJobsAdapter(this.options.store, accountId, { timeoutMs });
+        }
         if (this.options.adapterFactory) return this.options.adapterFactory(accountId, { timeoutMs });
         let adapter = this.adapterCache.get(accountId);
         if (!adapter) { adapter = new LightSprintJobsAdapter(this.options.store, accountId, { timeoutMs }); this.adapterCache.set(accountId, adapter); }
@@ -586,6 +593,11 @@ export class SupervisorRuntime implements SupervisorBackend {
       return adapter;
     });
     const operationAdapters: JobWorkerOptions["operationAdapterFactory"] = async (op, limits) => {
+      const current = await this.options.store.load();
+      const currentAccount = current.accounts.find((row) => row.id === op.selectedAccountId);
+      if (accountSignal(currentAccount, nativeLightSprintTarget(current.config.upstreamUrl)).retired) {
+        return new LightSprintJobsAdapter(this.options.store, op.selectedAccountId, { timeoutMs: limits.timeoutMs });
+      }
       // This factory is reached only after the bridge has durably claimed the operation.
       // Bind its single chat mutation to one private runtime registration; never infer
       // authority from the operation's project/client fields or caller-supplied headers.
@@ -778,6 +790,9 @@ export class SupervisorRuntime implements SupervisorBackend {
       if (requested.some((id) => !project.accountIds.includes(id))) throw new JobInputError("eligible accounts are outside this project binding");
       const state = await this.options.store.load();
       const nativeTarget = nativeLightSprintTarget(state.config.upstreamUrl);
+      if (requested.some((id) => accountSignal(state.accounts.find((row) => row.id === id), nativeTarget).retired)) {
+        throw new JobInputError("provider_retired");
+      }
       const inferenceResources = await this.inferenceResources(true);
       const eligible = requested.filter((id) => {
         const signal = accountSignal(state.accounts.find((row) => row.id === id), nativeTarget);
