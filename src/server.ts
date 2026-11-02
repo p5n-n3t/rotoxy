@@ -2,6 +2,7 @@ import { createAdminNavigationRouter } from "./navigation-admin.js";
 import { createEndpointDirectoryRouter } from "./endpoint-directory.js";
 import { McpJobEvents, McpJobEventsError } from "./mcp-job-events.js";
 import { JobInputError } from "./job-submit.js";
+import { ClaudeWorkerRuntime } from "./claude-worker-runtime.js";
 import { createRunnerAdminRouter } from "./runner-admin.js";
 import { createOracleModelApi } from "./oracle-model-api.js";
 import { searchMcpHandler } from "./search-mcp.js";
@@ -57,9 +58,10 @@ export interface ServerOptions {
   webTools?: ConfiguredWebTools;
   /** Opt-in until a supported ChatGPT plugin completes event subscription QA. */
   mcpEvents?: boolean;
+  claudeWorker?: boolean;
 }
 
-export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "supervisorConfigPath" | "oracleTools" | "webTools" | "webToolsConfigPath" | "mcpEvents"> = {}) {
+export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "supervisorConfigPath" | "oracleTools" | "webTools" | "webToolsConfigPath" | "mcpEvents" | "claudeWorker"> = {}) {
   await store.init();
   const state = await store.load();
   const sessions = new AdminSessions();
@@ -78,6 +80,15 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const jobEvents = options.mcpEvents && options.supervisorBackend ? new McpJobEvents({ store, getStatus: async (args, clientId) => {
     const authorizationState = await store.load();
     if (!authorizationState.oauthClients.some(client => client.clientId === clientId)) throw new McpJobEventsError(-32001, "Client authorization unavailable", "authorization_failed");
+    if(args.jobId.startsWith('claude:')){
+      if(!claudeWorker)throw new McpJobEventsError(-32001,'Claude worker is unavailable','authorization_failed');
+      const taskId=args.jobId.slice(7);
+      const row=await claudeWorker.call('claude_task_status',{projectId:args.projectId,taskId},clientId) as Record<string,unknown>;
+      if(!row.found)throw new McpJobEventsError(-32001,'Claude attempt is unavailable','authorization_failed');
+      const state=row.status==='success'?'complete':row.status==='error'?'failed':row.status==='artifact_failed'?'blocked':String(row.status);
+      return {projectId:args.projectId,assignmentId:args.jobId,state,revision:row.updatedAt,
+        tasks:[{taskId,state,modelRequested:row.modelRequested,modelReported:row.modelReported}]};
+    }
     try { return await supervisor.callTool("job_status", args, clientId); }
     catch (error) {
       if (error instanceof JobInputError && ["project is not authorized for this OAuth client", "job is not available"].includes(error.message)) {
@@ -86,7 +97,11 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
       throw error;
     }
   } }) : undefined;
-  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools, { service: agentWorkspace, backend: options.supervisorBackend }, jobEvents);
+  const workerBinary=process.env.ROTOXY_CLAUDE_BINARY;
+  const workerCwds=(process.env.ROTOXY_CLAUDE_WORKER_CWDS??'').split(':').filter(Boolean);
+  const claudeWorker=options.claudeWorker && options.supervisorBackend && workerBinary && existsSync(workerBinary) && workerCwds.length ?
+    new ClaudeWorkerRuntime(store,agentWorkspace,options.supervisorBackend,[realpathSync(workerBinary)],workerCwds.map(path=>realpathSync(path))) : undefined;
+  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools, { service: agentWorkspace, backend: options.supervisorBackend }, jobEvents, claudeWorker);
   const ui = new (await import("./ui.js")).AdminUi(store, pool, sessions, { oauth, telemetry });
 
   const app = express();
@@ -159,7 +174,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
     res.status(500).json({ error: "internal_error" });
   });
 
-  return { app, store, pool, telemetry, sessions, supervisor, webTools, modelGateway, codexProfiles, agentWorkspace, jobEvents };
+  return { app, store, pool, telemetry, sessions, supervisor, webTools, modelGateway, codexProfiles, agentWorkspace, jobEvents, claudeWorker };
 }
 
 export async function startServer(options: ServerOptions = {}) {
@@ -171,7 +186,7 @@ export async function startServer(options: ServerOptions = {}) {
     supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)),
     store,
   }) : undefined;
-  const { app, codexProfiles, agentWorkspace, jobEvents } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, supervisorConfigPath: options.supervisorConfigPath, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath, mcpEvents: options.mcpEvents ?? process.env.ROTOXY_MCP_EVENTS_ENABLED === "1" });
+  const { app, codexProfiles, agentWorkspace, jobEvents, claudeWorker } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, supervisorConfigPath: options.supervisorConfigPath, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath, mcpEvents: options.mcpEvents ?? process.env.ROTOXY_MCP_EVENTS_ENABLED === "1", claudeWorker: options.claudeWorker ?? process.env.ROTOXY_CLAUDE_WORKER_ENABLED === "1" });
   const host = options.host || process.env.TOKEN2OAUTH_HOST || "127.0.0.1";
   const port = options.port || Number(process.env.TOKEN2OAUTH_PORT || 2030);
 
@@ -199,6 +214,7 @@ export async function startServer(options: ServerOptions = {}) {
   workspaceReconciler?.start();
   jobEvents?.start();
   server.once("close", () => { void jobEvents?.stop().catch(() => undefined); });
+  server.once("close", () => { void claudeWorker?.close().catch(()=>undefined); });
   server.once("close", () => { workspaceReconciler?.stop(); });
   if (codexProfiles) server.once("close", () => { void codexProfiles.close(); });
   if (runtime) server.once("close", () => { void runtime.close(); });

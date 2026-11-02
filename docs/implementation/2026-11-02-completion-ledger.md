@@ -248,3 +248,32 @@ Exact next actions: verify that client subscription/delivery/reaction; then
 integrate DAG Oracle work with stable-ID durable queue and terminal evidence,
 preserving host eligibility. Codex/Claude native resume wiring and the remaining
 completion gates above are still open. Do not implement another event engine.
+
+## Claude Code and direct Bedrock continuation
+
+User approved both paths under the existing AWS identity. New source connects the
+existing trusted runner/executor to the workspace attempt table through an additive
+owner/profile-bound Python ledger bridge. It exposes claude_workers, submit/status
+and owned cancellation, plus agentResources in job_workers. Shared AWS source is
+an owner-private settings reference; no credential is copied into ROTOXY state.
+Direct Messages and model-list routes use the three selected operator model IDs.
+The endpoint directory includes the Anthropic Messages base URL.
+
+Actual source gateway task claude-worker-bedrock-20261102-a completed through MCP
+and real CLI, exact marker and review artifact retrieved. Haiku requested/reported
+IDs match; CLI cost $0.001626. Direct Haiku SDK and gateway Messages requests also
+passed exact output checks. Opus/Sonnet are permitted, not newly execution-tested.
+No provider call was replayed. Owner-only source settings permissions were fixed.
+Private pre-migration backup: ~/.config/rotoxy/backups/claude-durable-1793646514.
+
+Worker policy is read-only tools, one process, explicit model, bounded timeout and
+$0.25 CLI budget (not a guaranteed billing limit). Results up to16KiB are retained;
+workspace artifacts preview them, not silently replace the full result. Native
+Claude attempts remain separate from the main Oracle/CF DAG. MCP Events can
+observe claude:<taskId>; a real ChatGPT reaction still needs client verification.
+
+Focused integrated Node subset49/49 passed before the final cancellation/result
+retention additions. Python bridge+legacy15/15 and result-retention Node12/12 pass.
+Final cancellation tests/CI/activation remain pending; current live still73cf0d0.
+See docs/verification/2026-11-02-bedrock-claude-workers.md. Do not duplicate the
+new existing-DB bridge or claim unrestricted coding/autonomous approval support.

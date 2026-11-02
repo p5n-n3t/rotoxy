@@ -9,7 +9,7 @@ const MAX_RESULT_BYTES = 512 * 1024;
 const PROFILE_ID = /^[A-Za-z0-9_-]{16,48}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:+/@-]{0,159}$/;
 
-type RunnerProfile = {
+export type RunnerProfile = {
   id: string; kind: "claude"; cwd: string; binary: string;
   enabled: boolean; allowedModels: string[];
 };
@@ -106,6 +106,10 @@ function profilesFromRegistry(value: unknown): RunnerProfile[] {
     if (raw.kind === "claude") profiles.push({ id: raw.id, kind: "claude", cwd: raw.cwd, binary: raw.binary, enabled: raw.enabled, allowedModels: raw.allowedModels as string[] });
   }
   return profiles;
+}
+
+export async function readClaudeRunnerProfiles(path: string): Promise<RunnerProfile[]> {
+  return profilesFromRegistry(await readPrivateRegistry(path));
 }
 
 /** Resolves trusted profile metadata and delegates all process ownership to ClaudeCodeJobs. */

@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from .agent_workspace import AgentWorkspace, WorkspaceError, _clean_text
+from .agent_workspace import AgentWorkspace, WorkspaceError, _clean_text, SECRET_PATTERNS
 
 ACTOR = "client:claude-worker-local"
 MAX_STDOUT = 256 * 1024
@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS claude_workspace_attempts (
 """
 
 _SAFE_ID = re.compile(r'^[A-Za-z0-9_\-\.]{1,128}$')
+_LEDGER_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
+_CLIENT_ID = re.compile(r'^[A-Za-z0-9._:-]{1,128}$')
+_PROFILE_ID = re.compile(r'^[A-Za-z0-9_-]{16,48}$')
+_MODEL_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:+/@-]{0,159}$')
+_DIGEST = re.compile(r'^[a-f0-9]{64}$')
+_ATTEMPT_KEY = re.compile(r'^claude-attempt-[1-9][0-9]{0,18}$')
+_LEDGER_STATES = {"intent", "running", "success", "ambiguous", "error", "artifact_failed"}
+_TERMINAL_STATES = {"success", "ambiguous", "error", "artifact_failed"}
 _SAFE_MODEL = "claude-sonnet-4-6"
 _ALLOWED_MODELS = {_SAFE_MODEL, "global.anthropic.claude-sonnet-4-6"}
 
@@ -43,8 +51,23 @@ def safe_id(v):
 
 def open_attempt_db(db_path):
     conn = sqlite3.connect(db_path, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("BEGIN IMMEDIATE")
     conn.execute(ATTEMPT_DB_SCHEMA)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(claude_workspace_attempts)")}
+    for name, definition in (
+        ("owner_client_id", "TEXT"),
+        ("profile_id", "TEXT"),
+        ("attempt_key", "TEXT"),
+        ("updated", "INTEGER"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE claude_workspace_attempts ADD COLUMN {name} {definition}")
+    conn.execute("UPDATE claude_workspace_attempts SET attempt_key='claude-attempt-' || id WHERE attempt_key IS NULL")
+    conn.execute("UPDATE claude_workspace_attempts SET updated=created WHERE updated IS NULL")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS claude_workspace_attempt_key ON claude_workspace_attempts(attempt_key)")
     conn.commit()
     return conn
 
@@ -53,12 +76,14 @@ def insert_intent(db_path, project_id, task_id, model_requested, prompt_digest):
     conn = open_attempt_db(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO claude_workspace_attempts "
             "(project_id, task_id, status, model_requested, prompt_digest, created) "
             "VALUES (?, ?, 'intent', ?, ?, ?)",
             (project_id, task_id, model_requested, prompt_digest, int(time.time()))
         )
+        conn.execute("UPDATE claude_workspace_attempts SET attempt_key=?,updated=? WHERE id=?",
+                     (f"claude-attempt-{cursor.lastrowid}", int(time.time()), cursor.lastrowid))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.rollback()
@@ -85,11 +110,177 @@ def update_attempt(db_path, project_id, task_id, status, model_reported=None,
     conn = open_attempt_db(db_path)
     conn.execute(
         "UPDATE claude_workspace_attempts SET status=?, model_reported=?, "
-        "total_cost_usd=?, result=? WHERE project_id=? AND task_id=?",
-        (status, model_reported, total_cost_usd, result, project_id, task_id)
+        "total_cost_usd=?, result=?,updated=? WHERE project_id=? AND task_id=?",
+        (status, model_reported, total_cost_usd, result, int(time.time()), project_id, task_id)
     )
     conn.commit()
     conn.close()
+
+
+def _attempt_id(row):
+    return row["attempt_key"]
+
+
+def _receipt(row):
+    return {"attemptId": _attempt_id(row), "status": row["status"],
+            "modelRequested": row["model_requested"], "modelReported": row["model_reported"],
+            "costUsd": row["total_cost_usd"], "result": row["result"],
+            "createdAt": row["created"], "updatedAt": row["updated"]}
+
+
+def _ledger_request(request, command, required, optional=()):
+    if not isinstance(request, dict) or request.get("command") != command or set(request) - {"command"} - set(required) - set(optional) or not set(required) <= set(request):
+        raise WorkspaceError("invalid_request")
+
+
+def _ledger_identity(request):
+    project = request.get("projectId")
+    task = request.get("taskId")
+    owner = request.get("ownerClientId")
+    if not isinstance(project, str) or not _LEDGER_ID.fullmatch(project): raise WorkspaceError("invalid_project_id")
+    if not isinstance(task, str) or not _LEDGER_ID.fullmatch(task): raise WorkspaceError("invalid_task_id")
+    if not isinstance(owner, str) or not _CLIENT_ID.fullmatch(owner): raise WorkspaceError("invalid_owner")
+    return project, task, owner
+
+
+def _read_bound_attempt(db, project, task, owner):
+    row = db.execute("SELECT * FROM claude_workspace_attempts WHERE project_id=? AND task_id=?", (project, task)).fetchone()
+    if row is None or row["owner_client_id"] != owner or not row["profile_id"]:
+        return None
+    return row
+
+
+def _reserve_attempt(db_path, request):
+    _ledger_request(request, "reserve", {"projectId", "taskId", "ownerClientId", "profileId", "modelRequested", "promptDigest"})
+    project, task, owner = _ledger_identity(request)
+    profile = request["profileId"]
+    model = request["modelRequested"]
+    digest = request["promptDigest"]
+    if not isinstance(profile, str) or not _PROFILE_ID.fullmatch(profile): raise WorkspaceError("invalid_profile_id")
+    if not isinstance(model, str) or not _MODEL_ID.fullmatch(model): raise WorkspaceError("invalid_model")
+    if not isinstance(digest, str) or not _DIGEST.fullmatch(digest): raise WorkspaceError("invalid_prompt_digest")
+    db = open_attempt_db(db_path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        existing = db.execute("SELECT * FROM claude_workspace_attempts WHERE project_id=? AND task_id=?", (project, task)).fetchone()
+        if existing:
+            # Legacy attempts and other owners are deliberately not adoptable.
+            if existing["owner_client_id"] != owner or existing["profile_id"] is None:
+                raise WorkspaceError("attempt_unavailable")
+            same_binding = (existing["profile_id"] == profile and existing["model_requested"] == model and existing["prompt_digest"] == digest)
+            if not same_binding: raise WorkspaceError("attempt_conflict")
+            db.execute("COMMIT")
+            return {"created": False, **_receipt(existing)}
+        now = int(time.time())
+        cursor = db.execute("INSERT INTO claude_workspace_attempts(project_id,task_id,status,model_requested,prompt_digest,created,owner_client_id,profile_id,updated) VALUES(?,?,'intent',?,?,?,?,?,?)",
+                            (project, task, model, digest, now, owner, profile, now))
+        attempt_id = f"claude-attempt-{cursor.lastrowid}"
+        db.execute("UPDATE claude_workspace_attempts SET attempt_key=? WHERE id=?", (attempt_id, cursor.lastrowid))
+        row = db.execute("SELECT * FROM claude_workspace_attempts WHERE id=?", (cursor.lastrowid,)).fetchone()
+        db.execute("COMMIT")
+        return {"created": True, **_receipt(row)}
+    except Exception:
+        if db.in_transaction: db.execute("ROLLBACK")
+        raise
+    finally:
+        db.close()
+
+
+def _status_attempt(db_path, request):
+    _ledger_request(request, "status", {"projectId", "taskId", "ownerClientId"})
+    project, task, owner = _ledger_identity(request)
+    db = open_attempt_db(db_path)
+    try:
+        row = _read_bound_attempt(db, project, task, owner)
+        return {"found": bool(row), **(_receipt(row) if row else {})}
+    finally:
+        db.close()
+
+
+def _update_attempt(db_path, request):
+    _ledger_request(request, "update", {"projectId", "taskId", "ownerClientId", "attemptId", "status"}, {"modelReported", "costUsd", "result"})
+    project, task, owner = _ledger_identity(request)
+    attempt_id = request["attemptId"]
+    target = request["status"]
+    if not isinstance(attempt_id, str) or not _ATTEMPT_KEY.fullmatch(attempt_id): raise WorkspaceError("invalid_attempt_id")
+    if target not in _LEDGER_STATES - {"intent"}: raise WorkspaceError("invalid_status")
+    model = request.get("modelReported")
+    cost = request.get("costUsd")
+    result = request.get("result")
+    if model is not None and (not isinstance(model, str) or not _MODEL_ID.fullmatch(model)): raise WorkspaceError("invalid_model")
+    if cost is not None and (type(cost) not in (int, float) or not math.isfinite(float(cost)) or cost < 0): raise WorkspaceError("invalid_cost")
+    if result is not None and (not isinstance(result, str) or len(result.encode('utf-8')) > 16 * 1024 or "\x00" in result): raise WorkspaceError("invalid_result")
+    clean_result = None
+    if result is not None:
+        clean_result = ''.join(' ' if (ord(c) < 32 and c not in '\n\r\t') or 0x7f <= ord(c) <= 0x9f else c for c in result).strip()
+        for pattern, replacement in SECRET_PATTERNS:
+            clean_result = pattern.sub(replacement, clean_result)
+    db = open_attempt_db(db_path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM claude_workspace_attempts WHERE project_id=? AND task_id=? AND attempt_key=?", (project, task, attempt_id)).fetchone()
+        if row is None or row["owner_client_id"] != owner or row["profile_id"] is None:
+            raise WorkspaceError("attempt_unavailable")
+        current = row["status"]
+        requested_values = {"model_reported": model, "total_cost_usd": float(cost) if cost is not None else None, "result": clean_result}
+        if current in _TERMINAL_STATES:
+            # Terminal receipts are idempotent only when every supplied field agrees.
+            if current != target or ("modelReported" in request and model != row["model_reported"]) or ("costUsd" in request and requested_values["total_cost_usd"] != row["total_cost_usd"]) or ("result" in request and clean_result != row["result"]):
+                raise WorkspaceError("attempt_terminal")
+            db.execute("COMMIT")
+            return _receipt(row)
+        allowed = {"intent": {"running", "success", "ambiguous", "error", "artifact_failed"},
+                   "running": {"success", "ambiguous", "error", "artifact_failed"}}
+        if target not in allowed.get(current, set()): raise WorkspaceError("invalid_transition")
+        db.execute("UPDATE claude_workspace_attempts SET status=?,model_reported=COALESCE(?,model_reported),total_cost_usd=COALESCE(?,total_cost_usd),result=COALESCE(?,result),updated=? WHERE id=?",
+                   (target, model, requested_values["total_cost_usd"], clean_result, int(time.time()), row["id"]))
+        updated = db.execute("SELECT * FROM claude_workspace_attempts WHERE id=?", (row["id"],)).fetchone()
+        db.execute("COMMIT")
+        return _receipt(updated)
+    except Exception:
+        if db.in_transaction: db.execute("ROLLBACK")
+        raise
+    finally:
+        db.close()
+
+
+def _reconcile_attempt(db_path, request):
+    _ledger_request(request, "reconcile", {"projectId", "taskId", "ownerClientId", "staleBefore"})
+    project, task, owner = _ledger_identity(request)
+    stale_before = request["staleBefore"]
+    if type(stale_before) is not int or stale_before < 0 or stale_before > int(time.time()): raise WorkspaceError("invalid_stale_before")
+    db = open_attempt_db(db_path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = _read_bound_attempt(db, project, task, owner)
+        if row is None:
+            db.execute("COMMIT")
+            return {"found": False}
+        if row["status"] in {"intent", "running"} and (row["updated"] or row["created"]) <= stale_before:
+            db.execute("UPDATE claude_workspace_attempts SET status='ambiguous',result='reconciled_after_restart',updated=? WHERE id=? AND status IN ('intent','running')",
+                       (int(time.time()), row["id"]))
+            row = db.execute("SELECT * FROM claude_workspace_attempts WHERE id=?", (row["id"],)).fetchone()
+        db.execute("COMMIT")
+        return {"found": True, **_receipt(row)}
+    except Exception:
+        if db.in_transaction: db.execute("ROLLBACK")
+        raise
+    finally:
+        db.close()
+
+
+def ledger_command(db_path, request):
+    if not os.path.isabs(db_path): raise WorkspaceError("invalid_database_path")
+    # Reuse AgentWorkspace's private directory/file and symlink checks. The ledger
+    # is an additional table inside that same database, never a second store.
+    AgentWorkspace(db_path)
+    if not isinstance(request, dict): raise WorkspaceError("invalid_request")
+    command = request.get("command")
+    if command == "reserve": return _reserve_attempt(db_path, request)
+    if command == "update": return _update_attempt(db_path, request)
+    if command == "status": return _status_attempt(db_path, request)
+    if command == "reconcile": return _reconcile_attempt(db_path, request)
+    raise WorkspaceError("invalid_command")
 
 
 def default_runner(argv, stdin_text, timeout_seconds):
@@ -369,14 +560,19 @@ def run_task(args, runner=None):
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="snooze.claude_workspace_worker")
     p.add_argument("--db", required=True)
-    p.add_argument("--project", required=True)
-    p.add_argument("--task", required=True)
-    p.add_argument("--claude-binary", required=True)
-    p.add_argument("--model", required=True)
-    p.add_argument("--max-budget-usd", type=float, required=True)
-    p.add_argument("--timeout-seconds", type=int, required=True)
+    p.add_argument("--ledger", action="store_true", default=False)
+    p.add_argument("--project")
+    p.add_argument("--task")
+    p.add_argument("--claude-binary")
+    p.add_argument("--model")
+    p.add_argument("--max-budget-usd", type=float)
+    p.add_argument("--timeout-seconds", type=int)
     p.add_argument("--execute", action="store_true", default=False)
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if not args.ledger:
+        missing = [name for name in ("project", "task", "claude_binary", "model", "max_budget_usd", "timeout_seconds") if getattr(args, name) is None]
+        if missing: p.error("legacy worker mode requires --project, --task, --claude-binary, --model, --max-budget-usd, and --timeout-seconds")
+    return args
 
 
 def validate_args(args):
@@ -415,6 +611,20 @@ def validate_args(args):
 
 def main():
     args = parse_args()
+    if args.ledger:
+        try:
+            raw = sys.stdin.buffer.read(64 * 1024 + 1)
+            if len(raw) > 64 * 1024: raise WorkspaceError("request_too_large")
+            request = json.loads(raw.decode("utf-8"))
+            result = ledger_command(args.db, request)
+        except WorkspaceError as e:
+            print(json.dumps({"error": e.code}, separators=(",", ":")))
+            sys.exit(2)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            print(json.dumps({"error": "invalid_request"}, separators=(",", ":")))
+            sys.exit(2)
+        print(json.dumps(result, separators=(",", ":"), ensure_ascii=False))
+        return
     errors = validate_args(args)
     if errors:
         for e in errors:

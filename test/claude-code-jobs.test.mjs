@@ -53,6 +53,7 @@ test("Claude Code job runs the trusted local CLI with structured output and stdi
   assert.ok(observed.args.includes("--bare"), "project hooks and repository MCP settings are not loaded implicitly");
   assert.deepEqual(observed.args.slice(observed.args.indexOf("--output-format"), observed.args.indexOf("--output-format") + 2), ["--output-format", "json"]);
   assert.ok(observed.args.includes("--permission-prompts") && observed.args.includes("none"));
+  assert.deepEqual(observed.args.slice(observed.args.indexOf('--tools'),observed.args.indexOf('--tools')+2),['--tools','Read,Glob,Grep']);
   assert.ok(observed.args.includes("--session-id"));
   assert.equal(observed.args.includes(prompt), false, "prompt bytes are sent through stdin rather than process arguments");
   assert.equal(observed.options.shell, false);

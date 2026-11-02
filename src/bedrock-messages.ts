@@ -3,6 +3,7 @@ import { AnthropicBedrock, AnthropicBedrockMantle } from "@anthropic-ai/bedrock-
 import type { StateStore } from "./store.js";
 import { ModelCredentialStore } from "./model-credentials.js";
 import { loadBedrockSettings, type BedrockSettings } from "./bedrock-catalog.js";
+import { loadBedrockCredentialSource } from "./bedrock-credential-source.js";
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const HARD_MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -178,11 +179,20 @@ export function createBedrockMessagesRouter(store: StateStore, options: BedrockM
     const configuration = resolveBedrockMessagesConfiguration(input);
     return { configuration, source };
   };
-  const clientFor = (configuration: BedrockMessagesConfiguration): MessageClient => {
+  const clientFor = async (configuration: BedrockMessagesConfiguration): Promise<MessageClient> => {
     const key = `${configuration.transport}:${configuration.region}`;
     let client = clients.get(key);
     if (!client) {
-      client = (options.clientFactory ?? ((config) => createBedrockMessagesClient(configuration, config.timeoutMs)))({
+      const source = await loadBedrockCredentialSource(process.env.ROTOXY_BEDROCK_CREDENTIAL_SOURCE);
+      client = (options.clientFactory ?? ((config) => {
+        const common = { awsRegion: configuration.region, baseURL: configuration.baseURL, timeout: config.timeoutMs, maxRetries: 0 as const };
+        if(configuration.transport === "invoke")return (source.AWS_ACCESS_KEY_ID
+          ? new AnthropicBedrock({ ...common, awsAccessKey: source.AWS_ACCESS_KEY_ID, awsSecretKey: source.AWS_SECRET_ACCESS_KEY!, awsSessionToken: source.AWS_SESSION_TOKEN })
+          : new AnthropicBedrock(common)) as unknown as MessageClient;
+        return (source.AWS_ACCESS_KEY_ID
+          ? new AnthropicBedrockMantle({ ...common, awsAccessKey: source.AWS_ACCESS_KEY_ID, awsSecretAccessKey: source.AWS_SECRET_ACCESS_KEY!, awsSessionToken: source.AWS_SESSION_TOKEN })
+          : new AnthropicBedrockMantle(common)) as unknown as MessageClient;
+      }))({
         transport: configuration.transport, region: configuration.region, baseURL: configuration.baseURL, timeoutMs, maxRetries: 0,
       });
       clients.set(key, client);
@@ -276,7 +286,8 @@ export function createBedrockMessagesRouter(store: StateStore, options: BedrockM
       }
       if (body.stream !== undefined && typeof body.stream !== "boolean") { cleanup(); return jsonError(res, 400, "invalid_request"); }
       serving = true;
-      void serve(req, res, clientFor(configuration), body, controller, () => timedOut, cleanup);
+      void clientFor(configuration).then(client => serve(req, res, client, body, controller, () => timedOut, cleanup))
+        .catch(() => { cleanup(); jsonError(res, 503, "bedrock_credentials_unavailable"); });
     });
   });
 

@@ -9,6 +9,7 @@ import { loadWebToolsConfig, validateWebToolsConfig } from "./web-tools-config.j
 import { join } from "node:path";
 import { lstat, readFile } from "node:fs/promises";
 import { page } from "./ui.js";
+import { loadBedrockSettings } from "./bedrock-catalog.js";
 
 export interface EndpointEntry {
   id: string; label: string; url: string; protocol: string; authentication: string;
@@ -59,6 +60,8 @@ export async function endpointDirectory(store: StateStore, options: { webToolsCo
     infer(provider.id,provider.label,selected.length>0,selected.flatMap(a=>a.allowedModels.map(model=>`${provider.id}/${model}`)));
   }
   infer("oracle","Oracle compute",oracleTokenAvailable,[]);
+  const bedrock=await loadBedrockSettings(store);
+  add("bedrock","Claude via Bedrock","/providers/claude/v1","Anthropic Messages","Scoped model Bearer token",Boolean(bedrock?.enabledModels.length),["GET /models","POST /messages"],bedrock?.enabledModels??[],"Direct Bedrock inference. Claude Code agent jobs use separate MCP operations. This catalog is an operator allowlist, not execution or entitlement proof.");
   add("unified","Unified inference","/v1","OpenAI-compatible","Scoped model Bearer token",ollama.some(a=>a.enabled)||cloudflare.some(a=>a.enabled)||accounts.some(a=>a.enabled),["GET /models","POST /chat/completions"]);
   return rows;
 }

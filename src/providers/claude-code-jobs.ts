@@ -50,6 +50,10 @@ export interface ClaudeCodeJobResult {
 export interface ClaudeCodeSpawnHandle { readonly runId: string; readonly promise: Promise<ClaudeCodeJobResult>; cancel(): void }
 
 export interface ClaudeCodeJobsOptions {
+  /** Host policy ceiling per invocation; CLI enforcement is not a billing guarantee. */
+  maxBudgetUsd?: number;
+  /** Trusted server policy; defaults to read-only repository inspection. */
+  tools?: readonly ("Read" | "Glob" | "Grep")[];
   /** Exact, trusted absolute executable paths installed by the host administrator. */
   allowedExecutables: readonly string[];
   /** Exact working directories for which the host administrator has granted execution. */
@@ -132,6 +136,8 @@ export class ClaudeCodeJobs {
     this.spawnProcess = options.spawnProcess ?? ((command, args, spawnOptions) => spawn(command, [...args], spawnOptions));
     this.terminationGraceMs = options.terminationGraceMs ?? CLAUDE_CODE_TERMINATION_GRACE_MS;
     if (!Number.isSafeInteger(this.terminationGraceMs) || this.terminationGraceMs < 50 || this.terminationGraceMs > 10_000) throw new TypeError("invalid termination grace");
+    if(options.maxBudgetUsd!==undefined && (!Number.isFinite(options.maxBudgetUsd)||options.maxBudgetUsd<=0||options.maxBudgetUsd>5))throw new TypeError('invalid Claude budget');
+    if(options.tools?.some(tool=>!["Read","Glob","Grep"].includes(tool)))throw new TypeError('invalid Claude tools');
     for (const candidate of [...options.allowedExecutables, ...options.allowedCwds]) if (!isAbsolute(candidate)) throw new TypeError("allowlisted paths must be absolute");
     for (const key of Object.keys(options.bedrockEnv ?? {})) if (!BEDROCK_ENV_KEYS.includes(key as (typeof BEDROCK_ENV_KEYS)[number])) throw new TypeError("unsupported Bedrock environment key");
   }
@@ -186,6 +192,8 @@ export class ClaudeCodeJobs {
     // --bare prevents project hooks, MCP configuration, plugins, and keychain reads;
     // --permission-prompts none denies tools that would require interactive approval.
     const args = ["--bare", "--print", "--output-format", "json", "--permission-prompts", "none"];
+    if(this.options.maxBudgetUsd!==undefined)args.push('--max-budget-usd',String(this.options.maxBudgetUsd));
+    args.push('--tools',(this.options.tools??['Read','Glob','Grep']).join(','));
     if (request.model) args.push("--model", request.model);
     if (request.resumeSessionId) args.push("--resume", request.resumeSessionId);
     else args.push("--session-id", sessionId);

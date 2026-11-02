@@ -85,7 +85,7 @@ function validateUpdateInput(input: Record<string, unknown>): string {
   return json;
 }
 
-async function runPython(executable: string, args: string[], stdin: string, options: AgentWorkspaceCommandOptions): Promise<string> {
+export async function runWorkspacePython(executable: string, args: string[], stdin: string, options: AgentWorkspaceCommandOptions): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { cwd: options.cwd, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
     const chunks: Buffer[] = [];
@@ -129,7 +129,7 @@ export class AgentWorkspaceService {
   private readonly execution: WorkspaceExecutionService;
 
   constructor(private readonly store: StateStore, private readonly backend?: SupervisorBackend, options: AgentWorkspaceServiceOptions = {}) {
-    this.runner = options.runner ?? runPython;
+    this.runner = options.runner ?? runWorkspacePython;
     this.execution = new WorkspaceExecutionService(store, backend);
   }
 

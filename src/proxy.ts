@@ -3,6 +3,7 @@ import { isWorkspaceExecutionToolName, WorkspaceExecutionError } from "./workspa
 import { ONBOARDING_TOOL_NAME, ONBOARDING_TOOL_DEFINITION, callOnboardingTool, OnboardingInputError } from "./agent-onboarding.js";
 import type { SupervisorBackend } from "./supervisor-api.js";
 import { McpJobEventsError, type McpJobEvents } from "./mcp-job-events.js";
+import { CLAUDE_WORKER_TOOLS, isClaudeWorkerTool, claudeWorkerScope, type ClaudeWorkerRuntime } from "./claude-worker-runtime.js";
 import { OracleTools, OracleToolError, ORACLE_TOOL_DEFINITIONS, isOracleToolName, oracleToolRequiredScope } from "./oracle-tools.js";
 import { Readable, Transform, pipeline } from "node:stream";
 import type { Request, Response } from "express";
@@ -174,6 +175,7 @@ export class McpProxy {
     private readonly webTools?: ConfiguredWebTools,
     private readonly workspace?: { service: AgentWorkspaceService; backend?: SupervisorBackend },
     private readonly jobEvents?: Pick<McpJobEvents, "call">,
+    private readonly claudeWorker?: Pick<ClaudeWorkerRuntime, "call">,
   ) {}
 
   handler = async (req: Request, res: Response) => {
@@ -675,7 +677,7 @@ export class McpProxy {
       }
     }
     const serviceTools = (!this.supervisor.enabled && !this.oracle && !this.webTools && !this.workspace?.backend?.authorizeWorkspace) ? [] :
-      [...(this.workspace?.backend?.authorizeWorkspace ? ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS.filter((d) => scopes.has(awRequiredScope(d.name as any))) : []), ...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : []), ...webDefinitions].map((definition) => ({ ...definition }));
+      [...(this.claudeWorker ? CLAUDE_WORKER_TOOLS.filter(d=>scopes.has(claudeWorkerScope(d.name))) : []), ...(this.workspace?.backend?.authorizeWorkspace ? ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS.filter((d) => scopes.has(awRequiredScope(d.name as any))) : []), ...(this.supervisor.enabled ? JOB_TOOL_DEFINITIONS.filter((d) => scopes.has(requiredJobScope(d.name))) : []), ...(this.oracle ? ORACLE_TOOL_DEFINITIONS.filter((d) => scopes.has(oracleToolRequiredScope(d.name))) : []), ...webDefinitions].map((definition) => ({ ...definition }));
     // The guide is a local MCP tool, so advertise it only to credentials that
     // can actually invoke MCP tools.  A tools/list entry must never promise a
     // capability that the same token will be denied at tools/call.
@@ -728,7 +730,7 @@ export class McpProxy {
     record: (input: { status?: number; attempts: number; errorClass?: string; message?: string }) => void,
   ): Promise<boolean> {
     if (req.method !== "POST" || !rpc) return false;
-    const local = rpc.messages.filter((message) => message.method === "tools/call" && (message.params?.name === ONBOARDING_TOOL_NAME || isAgentWorkspaceToolName(message.params?.name) || isJobToolName(message.params?.name) || isOracleToolName(message.params?.name) || message.params?.name === "web_search" || message.params?.name === "web_extract"));
+    const local = rpc.messages.filter((message) => message.method === "tools/call" && (isClaudeWorkerTool(message.params?.name) || message.params?.name === ONBOARDING_TOOL_NAME || isAgentWorkspaceToolName(message.params?.name) || isJobToolName(message.params?.name) || isOracleToolName(message.params?.name) || message.params?.name === "web_search" || message.params?.name === "web_extract"));
     if (!local.length) return false;
     const mixed = rpc.messages.some((message) => !local.includes(message));
     if (mixed) {
@@ -737,7 +739,7 @@ export class McpProxy {
       return true;
     }
     const scopeSet = new Set(typeof claims?.scope === "string" ? claims.scope.split(/\s+/).filter(Boolean) : []);
-    const scopeFor = (name: string) => name === ONBOARDING_TOOL_NAME ? "mcp" : isAgentWorkspaceToolName(name) ? awRequiredScope(name) : name === "web_search" ? "web:search" : name === "web_extract" ? "web:extract" : isOracleToolName(name) ? oracleToolRequiredScope(name) : requiredJobScope(name as JobToolName);
+    const scopeFor = (name: string) => isClaudeWorkerTool(name) ? claudeWorkerScope(name) : name === ONBOARDING_TOOL_NAME ? "mcp" : isAgentWorkspaceToolName(name) ? awRequiredScope(name) : name === "web_search" ? "web:search" : name === "web_extract" ? "web:extract" : isOracleToolName(name) ? oracleToolRequiredScope(name) : requiredJobScope(name as JobToolName);
     const missing = local.find((message) => !scopeSet.has(scopeFor(String(message.params!.name))));
     if (missing || !claims) {
       const responses = local.filter((message) => message.id !== undefined).map((message) => rpcError(message.id, -32003, "insufficient_scope", { requiredScope: scopeFor(String(message.params!.name)) }));
@@ -746,7 +748,7 @@ export class McpProxy {
       res.status(403).json(rpc.batch ? responses : responses[0]);
       return true;
     }
-    const unavailable = local.filter((message) => message.params?.name === ONBOARDING_TOOL_NAME ? false : isAgentWorkspaceToolName(message.params?.name) ? !this.workspace?.backend?.authorizeWorkspace : isOracleToolName(message.params?.name) ? !this.oracle : isJobToolName(message.params?.name) ? !this.supervisor.enabled : !this.webTools);
+    const unavailable = local.filter((message) => isClaudeWorkerTool(message.params?.name) ? !this.claudeWorker : message.params?.name === ONBOARDING_TOOL_NAME ? false : isAgentWorkspaceToolName(message.params?.name) ? !this.workspace?.backend?.authorizeWorkspace : isOracleToolName(message.params?.name) ? !this.oracle : isJobToolName(message.params?.name) ? !this.supervisor.enabled : !this.webTools);
     if (unavailable.length) {
       const responses = unavailable.filter((message) => message.id !== undefined).map((message) => rpcError(message.id, -32000, message.params?.name === "web_search" || message.params?.name === "web_extract" ? "web tools are not configured" : "durable supervisor is not configured"));
       record({ status: 503, attempts: 0, errorClass: "supervisor-unavailable" });
@@ -763,13 +765,25 @@ export class McpProxy {
           const text = callOnboardingTool(message.params?.arguments ?? {});
           if (message.id !== undefined) responses.push({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }] } });
         } else {
-          const value = isAgentWorkspaceToolName(name)
+          let value = isClaudeWorkerTool(name)
+            ? await this.claudeWorker!.call(name,message.params?.arguments??{},claims.client_id)
+            : isAgentWorkspaceToolName(name)
             ? await this.callWorkspace(name, message.params?.arguments ?? {}, claims.client_id)
             : isOracleToolName(name)
             ? await this.oracle!.call(name, message.params?.arguments ?? {}, claims.client_id)
             : name === "web_search" || name === "web_extract"
               ? await this.webTools!.call(name, message.params?.arguments ?? {}, claims.client_id)
               : await this.supervisor.callTool(name as JobToolName, message.params?.arguments ?? {}, claims.client_id);
+          if(name==='job_workers' && this.claudeWorker && value && typeof value==='object' && !Array.isArray(value)){
+            const baseValue=value as Record<string,unknown>;
+            const args=message.params?.arguments as Record<string,unknown>;
+            try{
+              const agents=await this.claudeWorker.call('claude_workers',{projectId:args.projectId},claims.client_id) as {workers?:unknown[]};
+              value={...baseValue,agentResources:agents.workers??[]};
+            }catch{
+              value={...baseValue,agentResources:[],agentResourcesStatus:'Claude worker registry could not be read; inference resources remain available.'};
+            }
+          }
           const text = JSON.stringify(value ?? null);
           if (Buffer.byteLength(text) > 1_048_576) throw new Error("result too large");
           if (message.id !== undefined) responses.push({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }] } });
