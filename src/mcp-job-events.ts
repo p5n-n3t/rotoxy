@@ -68,6 +68,10 @@ function eventData(row: JsonObject, args: { projectId: string; jobId: string }):
   return data;
 }
 function fingerprint(data: JsonObject): string { return createHash("sha256").update(canonical(data)).digest("hex"); }
+function needsInitialDelivery(data: JsonObject): boolean {
+  const actionable = new Set(["complete", "completed", "failed", "cancelled", "blocked", "ambiguous", "held", "paused", "emergency_stopped", "needs_approval", "needs_instructions"]);
+  return actionable.has(String(data.state ?? "")) || Array.isArray(data.tasks) && data.tasks.some(task => isObject(task) && actionable.has(String(task.state ?? "")));
+}
 function canonicalUrl(value: unknown): string {
   if (typeof value !== "string" || value.length > 2048) failInvalid("Callback URL is invalid");
   let url: URL;
@@ -228,7 +232,10 @@ export class McpJobEvents {
         }
         Object.assign(existing, { url: request.url, secret: encrypted, expiresAt });
       }
-      else box.subscriptions.push({ id, owner: clientId, name: EVENT_NAME, args: request.args, url: request.url, secret: encrypted, expiresAt, authorizationEpoch, lastFingerprint: fingerprint(data) });
+      else box.subscriptions.push({ id, owner: clientId, name: EVENT_NAME, args: request.args, url: request.url, secret: encrypted, expiresAt, authorizationEpoch,
+        // Capture a fast job that finished before its client subscribed. A
+        // refresh preserves its fingerprint, so it cannot repeat this catch-up.
+        lastFingerprint: needsInitialDelivery(data) ? "" : fingerprint(data) });
       if (existing) existing.authorizationEpoch = authorizationEpoch;
     });
     return { id, refreshBefore: new Date(expiresAt).toISOString(), cursor: null, truncated: false };

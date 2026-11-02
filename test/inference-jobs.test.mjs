@@ -114,3 +114,28 @@ test("Oracle inference uses a fixed private origin, secured token file, and prov
     assert.equal(wrongHost.reason, "oracle_worker_attribution_invalid");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("Oracle post-dispatch 408 and 5xx stay ambiguous while known preflight rejection does not retry", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rotoxy-oracle-status-"));
+  const tokenFile = join(dir, "api-token");
+  await writeFile(tokenFile, `${"T".repeat(32)}\n`, { mode: 0o600 });
+  await chmod(tokenFile, 0o600);
+  try {
+    for (const [status, classification] of [[408, "ambiguous"], [502, "ambiguous"], [504, "ambiguous"], [429, "rejected"]]) {
+      let calls = 0;
+      const adapter = new InferenceJobsAdapter({ oracleTokenFile: tokenFile, oracleAllowedHosts: async () => ["ora8"],
+        fetch: async (_url, init) => {
+          calls++;
+          assert.equal(init.method, "POST");
+          assert.equal(init.redirect, "error");
+          assert.match(init.headers.authorization, /^Bearer T{32}$/);
+          return new Response("private provider response body", { status });
+        } });
+      const result = await adapter.invoke({ ...inferenceRequest(operation("oracle", "oracle/qwen3.5:2b")), accountId: "oracle-cluster" });
+      assert.equal(result.classification, classification, `HTTP ${status}`);
+      assert.equal(result.reason, `oracle_http_${status}`);
+      assert.equal(calls, 1, "an ambiguous inference is never retried automatically");
+      assert.doesNotMatch(JSON.stringify(result), /private provider response body|T{32}/, "provider bodies and credentials are not surfaced");
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

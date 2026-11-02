@@ -154,7 +154,15 @@ export class InferenceJobsAdapter implements InferenceExecutor {
           max_tokens: request.maxOutputTokens, allowed_hosts: allowedHosts, messages: [{ role: "user", content:
             `${request.prompt}\n\nFinish with this exact marker as the final nonempty line: ${request.expectedMarker}` }] }),
       });
-      if (!response.ok) { await response.body?.cancel(); return { classification: "rejected", accountId: request.accountId, reason: `oracle_http_${response.status}` }; }
+      if (!response.ok) {
+        await response.body?.cancel();
+        // The API's 408/5xx responses can arrive after it dispatched to Ollama.
+        // Keep that outcome ambiguous so the durable job is not marked as a
+        // definite rejection and never replay this inference automatically.
+        const preflightRejections = new Set([400, 401, 403, 404, 422, 429]);
+        const classification = preflightRejections.has(response.status) ? "rejected" : "ambiguous";
+        return { classification, accountId: request.accountId, reason: `oracle_http_${response.status}` };
+      }
       const bytes = await boundedBody(response, ORACLE_BODY_LIMIT);
       let body: unknown;
       try { body = JSON.parse(bytes.toString("utf8")); } catch { return { classification: "ambiguous", accountId: request.accountId, reason: "oracle_response_invalid" }; }

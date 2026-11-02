@@ -218,5 +218,17 @@ TypeScript build passed. Integrated focused suite passed38/38; subsequently adde
 real-disk restart case passed with the entire event suite10/10. No live callback
 or resulting ChatGPT turn has been observed. Environment opt-in is currently off
 on the live03f9986 gateway. `6c95d76` is pushed and full CI41439361329 passed.
-New feedback code awaits its own commit/CI/activation and actual supported-client
-subscription test. Details: `../architecture/worker-feedback.md`.
+Feedback commit `bb4ad7b` passed full CI41443919065 and is activated. Public
+healthz is healthy; native MCP job_status still works and now reports the real
+requested inference model. Installed short-lived local test JWT proved events
+advertisement/catalog, job_wait and private callback rejection; zero subscriptions
+were registered. It is not proof of a real ChatGPT subscription or response.
+Rollback backup: `/home/jq/.local/state/rotoxy/releases/rollback-bb4ad7b-1793622313`.
+No paid calls, old monitor restart or production data purge occurred.
+
+Follow-up build and16 focused tests passed for fast-job subscription catch-up
+and post-dispatch Oracle timeout ambiguity. Do not replay a lost synchronous
+response: the main DAG does not yet use the separate durable Oracle queue's
+stable ID/status/result mapping. That bridge also requires queue finish evidence
+and host-binding reconciliation. Actual supported-client subscription and
+response remain the feedback acceptance gate. Details: `../architecture/worker-feedback.md`.

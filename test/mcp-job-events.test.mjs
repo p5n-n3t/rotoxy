@@ -70,6 +70,18 @@ test("events/list exposes one metadata-only durable job event", async (t) => {
   assert.equal(result.events[0].inputSchema.additionalProperties, false);
 });
 
+test('a job completed before subscription produces one catch-up event, not a missed completion',async t=>{
+  const f=await fixture();t.after(f.close);let deliveries=0;
+  const events=new McpJobEvents({store:f.store,getStatus:async()=>({projectId:'project-a',assignmentId:'job-a',state:'complete',revision:2}),webhookFetch:async(_url,init)=>{
+    const body=JSON.parse(init.body);if(body.type==='verification')return Response.json({challenge:body.challenge});
+    assert.equal(body.data.state,'complete');deliveries++;return new Response(null,{status:204});
+  }});
+  const args=subscribeArgs(secret());await events.call('events/subscribe',args,'client-a');
+  await events.tick();assert.equal(deliveries,1);
+  await events.call('events/subscribe',args,'client-a');await events.tick();
+  assert.equal(deliveries,1,'refresh does not replay the catch-up event');
+});
+
 test("admin token revocation invalidates persisted event subscriptions after restart", async t=>{
   const f=await fixture();t.after(f.close);
   const status={projectId:'project-a',assignmentId:'job-a',state:'queued',revision:1};

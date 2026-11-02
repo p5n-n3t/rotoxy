@@ -158,6 +158,12 @@ timestamps and configured cadence; no workers running is not supervisor failure.
 Approvals differ from questions. Backend inbox/event handling survives the client;
 unsupported chat wake-up remains an honest handoff, not a fake delivered turn.
 
+2026-11-02 documentation update: supported ChatGPT Work/Cloud plugins now have an
+official MCP Events subscription/webhook path. See [worker feedback](../architecture/worker-feedback.md).
+Do not duplicate the implemented event service or bounded `job_wait`, and do not
+extend this support claim to arbitrary chats or clients. A real subscribed client
+reaction remains a separate acceptance gate from callback receipt.
+
 Maintain MCP initialize instructions, `rotoxy_guide`, schemas/examples and optional
 skill together. Clients do not automatically install local skills through MCP.
 
