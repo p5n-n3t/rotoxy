@@ -140,3 +140,19 @@ session/resume IDs, cancellation of owned child only and ambiguous post-start
 failures. It is not wired into durable job dispatch and has no live-model proof.
 Luna now owns Codex explicit profile-pinned turn execution groundwork and synthetic
 tests; no native subscription execution is being launched.
+
+## CI restored
+
+GitHub run41429563666 passed for pushed9b7207b, providing complete CI evidence
+after the navigation/retirement test corrections. Earlier navigation commits had
+failed CI and are superseded. This is not runtime deployment evidence. Codex
+profile-pinned turn groundwork remains local under its own focused build/test.
+
+## Codex executor verification
+
+Profile-pinned turn groundwork build and focused tests passed12/12 after final
+security review. Installed protocol schema verified resume/turn fields. Resume
+checks exact thread ID and pins model/cwd/on-request/read-only; every turn also
+pins read-only sandbox with network disabled. No automatic approval or retry.
+Origin label is advisory until the server-side broker verifies it; therefore
+public/durable dispatch remains disabled. No real subscription task launched.

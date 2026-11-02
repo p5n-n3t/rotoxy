@@ -10,17 +10,19 @@ process.env.HOME = isolatedHome;
 process.env.TOKEN2OAUTH_CONFIG_DIR = join(isolatedHome, "config");
 const { CodexProfiles, StdioCodexTransport, CODEX_APP_SERVER_ARGS, renderCodexProfilesPage } = await import("../dist/codex-profiles.js");
 
-async function harness(t, responder = () => ({})) {
+async function harness(t, responder = () => ({}), configure = () => ({})) {
   const root = await mkdtemp(join(tmpdir(), "t2o-codex-profile-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const binary = join(root, "codex");
   await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(binary, 0o700);
   const calls = [], transports = [];
-  const profiles = new CodexProfiles({ codexBinary: binary, configDir: join(root, "config"), maxInFlight: 2, transportFactory: (_binary, dir) => {
+  const profiles = new CodexProfiles({ codexBinary: binary, configDir: join(root, "config"), maxInFlight: 2, ...configure(root), transportFactory: (_binary, dir) => {
     const transport = {
-      async request(method, params = {}) { calls.push({ id: dir.split("/").at(-1), method, params }); return responder(dir.split("/").at(-1), method, params); },
+      async request(method, params = {}) { calls.push({ id: dir.split("/").at(-1), method, params }); return responder(dir.split("/").at(-1), method, params, this); },
       notify(method, params) { calls.push({ method, params, notification: true }); },
       onNotification(listener) { this.listener = listener; return () => {}; },
+      onServerRequest(listener) { this.serverListener = listener; return () => {}; },
+      async respond(id, result) { this.responses ??= []; this.responses.push({ id, result }); },
       async close() { this.closed = true; },
     };
     transports.push(transport); return transport;
@@ -127,6 +129,114 @@ test("persists thread ownership and refuses cross-profile resume; never chooses 
   assert.equal(await reopened.profileForThread("thread-123"), first.id);
   assert.equal((await reopened.listProfiles()).length, 2);
   await reopened.close();
+});
+
+test("Codex execution pins an eligible profile, persists ownership before turn start, and leaves approvals pending", async (t) => {
+  let ownerProfileId, expectedCwd;
+  const h = await harness(t, async (_id, method, params, transport) => {
+    if (method === "account/read") return { account: { type: "chatgpt" } };
+    if (method === "model/list") return { data: [{ id: "model-a", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }] };
+    if (method === "account/rateLimits/read") return { rateLimits: { primary: { usedPercent: 20, windowDurationMins: 300 } } };
+    if (method === "thread/start") return { thread: { id: "thread-exec-1" } };
+    if (method === "turn/start") {
+      const owners = JSON.parse(await readFile(join(h.root, "config", "codex-thread-owners.json"), "utf8")).owners;
+      assert.equal(owners[params.threadId], ownerProfileId, "thread/profile binding is durable before turn launch");
+      assert.equal(params.effort, "medium");
+      assert.equal(params.model, "model-a");
+      assert.equal(params.cwd, expectedCwd);
+      assert.equal(params.approvalPolicy, "on-request");
+      assert.deepEqual(params.sandboxPolicy, { type: "readOnly", networkAccess: false });
+      assert.deepEqual(params.input, [{ type: "text", text: "Make the bounded change." }]);
+      transport.serverListener({ id: "approval-1", method: "item/commandExecution/requestApproval", params: { threadId: params.threadId, turnId: "turn-exec-1", command: "npm test" } });
+      transport.listener("item/agentMessage/delta", { threadId: params.threadId, turnId: "turn-exec-1", delta: "Work " });
+      transport.listener("item/agentMessage/delta", { threadId: params.threadId, turnId: "turn-exec-1", delta: "completed." });
+      transport.listener("turn/completed", { threadId: params.threadId, turn: { id: "turn-exec-1", status: "completed" } });
+      return { turn: { id: "turn-exec-1" } };
+    }
+    return {};
+  }, root => ({ allowedExecutionCwds: [join(root, "project")] }));
+  const profile = await h.profiles.registerProfile("Execution target");
+  const originProfile = await h.profiles.registerProfile("Caller origin");
+  ownerProfileId = profile.id;
+  const cwd = join(h.root, "project"); await (await import("node:fs/promises")).mkdir(cwd);
+  expectedCwd = cwd;
+  const handle = h.profiles.startExecution({
+    profileId: profile.id, cwd, modelId: "model-a", reasoningEffort: "medium", prompt: "Make the bounded change.",
+    origin: { callerId: "mcp-client-1", protectedProfileIds: [originProfile.id] }, timeoutMs: 5000,
+  });
+  const result = await handle.promise;
+  assert.equal(result.profileId, profile.id);
+  assert.equal(result.threadId, "thread-exec-1");
+  assert.equal(result.turnId, "turn-exec-1");
+  assert.equal(result.text, "Work completed.");
+  assert.equal(result.status, "completed");
+  assert.deepEqual(handle.pendingRequests.map(({ id, method }) => ({ id, method })), [{ id: "approval-1", method: "item/commandExecution/requestApproval" }]);
+  assert.equal(h.transports[0].responses, undefined, "execution groundwork does not approve or deny server requests");
+  const start = h.calls.find(call => call.method === "thread/start");
+  assert.equal(start.params.approvalPolicy, "on-request");
+  assert.equal(start.params.sandbox, "read-only");
+  assert.equal(h.calls.some(call => call.method === "turn/interrupt"), false);
+});
+
+test("Codex execution rejects protected-origin target and unowned thread without starting a turn", async (t) => {
+  const h = await harness(t, (_id, method) => {
+    if (method === "account/read") return { account: { type: "chatgpt" } };
+    if (method === "model/list") return { data: [{ id: "model-a", supportedReasoningEfforts: ["medium"] }] };
+    if (method === "account/rateLimits/read") return { rateLimits: { primary: { usedPercent: 1 } } };
+    return {};
+  }, root => ({ allowedExecutionCwds: [join(root, "project")] }));
+  const profile = await h.profiles.registerProfile("Target");
+  const cwd = join(h.root, "project"); await (await import("node:fs/promises")).mkdir(cwd);
+  const base = { profileId: profile.id, cwd, modelId: "model-a", reasoningEffort: "medium", prompt: "Run", origin: { callerId: "caller-a", protectedProfileIds: [profile.id] } };
+  await assert.rejects(h.profiles.startExecution(base).promise, /invalid_request/);
+  await assert.rejects(h.profiles.startExecution({ ...base, origin: { callerId: "caller-a", protectedProfileIds: ["11111111-1111-4111-8111-111111111111"] }, threadId: "foreign-thread" }).promise, /thread_ownership/);
+  assert.equal(h.calls.some(call => call.method === "turn/start"), false);
+});
+
+test("Codex cancellation interrupts only the profile-owned active turn and reports ambiguity", async (t) => {
+  const h = await harness(t, (_id, method, params) => {
+    if (method === "account/read") return { account: { type: "chatgpt" } };
+    if (method === "model/list") return { data: [{ id: "model-a", supportedReasoningEfforts: ["medium"] }] };
+    if (method === "account/rateLimits/read") return { rateLimits: { primary: { usedPercent: 1 } } };
+    if (method === "thread/resume") return { thread: { id: params.threadId } };
+    if (method === "turn/start") return { turn: { id: "turn-owned" } };
+    if (method === "turn/interrupt") return { turn: { id: params.turnId, status: "interrupted" } };
+    return {};
+  }, root => ({ allowedExecutionCwds: [join(root, "project")] }));
+  const profile = await h.profiles.registerProfile("Target");
+  const cwd = join(h.root, "project"); await (await import("node:fs/promises")).mkdir(cwd);
+  await h.profiles.bindThread("owned-thread", profile.id);
+  const handle = h.profiles.startExecution({
+    profileId: profile.id, cwd, modelId: "model-a", reasoningEffort: "medium", prompt: "Wait",
+    threadId: "owned-thread", origin: { callerId: "caller-a", protectedProfileIds: ["11111111-1111-4111-8111-111111111111"] }, timeoutMs: 5000,
+  });
+  for (let i = 0; i < 50 && !h.calls.some(call => call.method === "turn/start"); i++) await new Promise(resolve => setTimeout(resolve, 10));
+  await handle.cancel();
+  await assert.rejects(handle.promise, /turn_outcome_ambiguous/);
+  const resumed = h.calls.find(call => call.method === "thread/resume");
+  assert.deepEqual(resumed.params, { threadId: "owned-thread", model: "model-a", cwd, approvalPolicy: "on-request", sandbox: "read-only" });
+  assert.deepEqual(h.calls.filter(call => call.method === "turn/interrupt").map(call => call.params), [{ threadId: "owned-thread", turnId: "turn-owned" }]);
+});
+
+test("Codex turn timeout interrupts the owned turn and never retries an ambiguous launch", async (t) => {
+  const h = await harness(t, (_id, method, params) => {
+    if (method === "account/read") return { account: { type: "chatgpt" } };
+    if (method === "model/list") return { data: [{ id: "model-a", supportedReasoningEfforts: ["medium"] }] };
+    if (method === "account/rateLimits/read") return { rateLimits: { primary: { usedPercent: 1 } } };
+    if (method === "thread/start") return { thread: { id: "timeout-thread" } };
+    if (method === "turn/start") return { turn: { id: "timeout-turn" } };
+    if (method === "turn/interrupt") return { turn: { id: params.turnId, status: "interrupted" } };
+    return {};
+  }, root => ({ allowedExecutionCwds: [join(root, "project")] }));
+  const profile = await h.profiles.registerProfile("Target");
+  const cwd = join(h.root, "project"); await (await import("node:fs/promises")).mkdir(cwd);
+  const handle = h.profiles.startExecution({
+    profileId: profile.id, cwd, modelId: "model-a", reasoningEffort: "medium", prompt: "Wait",
+    origin: { callerId: "caller-a", protectedProfileIds: ["11111111-1111-4111-8111-111111111111"] }, timeoutMs: 1000,
+  });
+  await assert.rejects(handle.promise, /turn_outcome_ambiguous/);
+  assert.equal(h.calls.filter(call => call.method === "turn/start").length, 1);
+  assert.deepEqual(h.calls.filter(call => call.method === "turn/interrupt").map(call => call.params), [{ threadId: "timeout-thread", turnId: "timeout-turn" }]);
 });
 
 test("rejects command names, non-Codex binaries and path traversal IDs", async (t) => {

@@ -65,6 +65,40 @@ export interface CodexProfilesOptions {
   now?: () => number;
   rpcTimeoutMs?: number;
   maxInFlight?: number;
+  /** Exact working directories an execution caller is allowed to select. */
+  allowedExecutionCwds?: readonly string[];
+}
+
+export interface CodexExecutionOriginBinding {
+  /** Advisory caller label supplied by the integration; it is not a broker-verified identity. */
+  callerId: string;
+  /** Profiles belonging to the caller/origin that may not be used as the execution target. */
+  protectedProfileIds: readonly string[];
+}
+
+export interface CodexExecutionRequest {
+  profileId: string;
+  cwd: string;
+  modelId: string;
+  reasoningEffort: string;
+  prompt: string;
+  origin: CodexExecutionOriginBinding;
+  threadId?: string;
+  timeoutMs?: number;
+}
+
+export interface CodexPendingApprovalRequest { id: string | number; method: string; params: Record<string, unknown> }
+export interface CodexExecutionResult { profileId: string; threadId: string; turnId: string; modelId: string; reasoningEffort: string; text: string; status: "completed" }
+export interface CodexExecutionHandle {
+  readonly promise: Promise<CodexExecutionResult>;
+  readonly pendingRequests: readonly CodexPendingApprovalRequest[];
+  cancel(): Promise<void>;
+}
+
+export class CodexExecutionError extends Error {
+  constructor(readonly code: "invalid_request" | "profile_ineligible" | "thread_ownership" | "thread_start_ambiguous" | "turn_start_ambiguous" | "turn_outcome_ambiguous" | "turn_invalid") {
+    super(code); this.name = "CodexExecutionError";
+  }
 }
 
 interface ProfileAuditEntry { action: "profile_removed"; profileId: string; at: number }
@@ -235,6 +269,8 @@ export class CodexProfiles {
   private readonly snapshots = new Map<string, CodexProfileSnapshot>();
   private readonly logins = new Map<string, PendingLogin>();
   private readonly threadOwners = new Map<string, string>();
+  private readonly activeTurns = new Map<string, { profileId: string; turnId: string }>();
+  private readonly startingTurns = new Set<string>();
   private readonly profileOperations = new Map<string, number>();
   private readonly removingProfiles = new Set<string>();
 
@@ -561,6 +597,179 @@ export class CodexProfiles {
       .filter((s) => !this.removingProfiles.has(s.profileId) && s.authMode === "chatgpt" && s.capturedAt <= now && now - s.capturedAt <= maxAgeMs && s.models.some((m) => m.id === modelId) && s.rateWindows.length > 0 && s.rateWindows.every((w) => w.usedPercent !== undefined) && !s.rateWindows.some((w) => w.exhausted))
       .sort((a, b) => Math.max(...a.rateWindows.map(w => w.usedPercent!)) - Math.max(...b.rateWindows.map(w => w.usedPercent!)) || (a.profileId < b.profileId ? -1 : a.profileId > b.profileId ? 1 : 0))
       .map((s) => s.profileId);
+  }
+
+  /**
+   * Start one explicitly profile-pinned turn. This is groundwork only: callers
+   * must provide their own origin binding and a host-allowlisted working directory.
+   */
+  startExecution(request: CodexExecutionRequest): CodexExecutionHandle {
+    const pendingRequests: CodexPendingApprovalRequest[] = [];
+    let cancellationRequested = false;
+    let cancelAction: (() => Promise<void>) | undefined;
+    const promise = this.executeTurn(request, () => cancellationRequested, (action) => { cancelAction = action; }, pendingRequests);
+    return {
+      promise,
+      get pendingRequests() { return pendingRequests.map((item) => ({ ...item, params: { ...item.params } })); },
+      cancel: async () => {
+        cancellationRequested = true;
+        await cancelAction?.();
+      },
+    };
+  }
+
+  private async executeTurn(
+    request: CodexExecutionRequest,
+    isCancelled: () => boolean,
+    setCancelAction: (action: (() => Promise<void>) | undefined) => void,
+    pendingRequests: CodexPendingApprovalRequest[],
+  ): Promise<CodexExecutionResult> {
+    const origin = request?.origin;
+    if (!request || !PROFILE_ID.test(request.profileId) || typeof request.cwd !== "string" || !isAbsolute(request.cwd) ||
+        typeof request.modelId !== "string" || !safeString(request.modelId, 160) ||
+        typeof request.reasoningEffort !== "string" || !safeString(request.reasoningEffort, 80) ||
+        typeof request.prompt !== "string" || !request.prompt.trim() || Buffer.byteLength(request.prompt, "utf8") > MAX_FRAME_BYTES ||
+        !origin || typeof origin.callerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(origin.callerId) ||
+        !Array.isArray(origin.protectedProfileIds) || origin.protectedProfileIds.length === 0 || origin.protectedProfileIds.length > 64 ||
+        origin.protectedProfileIds.some((id) => typeof id !== "string" || !PROFILE_ID.test(id)) || origin.protectedProfileIds.includes(request.profileId) ||
+        (request.threadId !== undefined && !/^[A-Za-z0-9_-]{1,160}$/.test(request.threadId)) ||
+        (request.timeoutMs !== undefined && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1000 || request.timeoutMs > 15 * 60_000))) {
+      throw new CodexExecutionError("invalid_request");
+    }
+    if (!this.options.allowedExecutionCwds?.includes(request.cwd)) throw new Error("Codex execution working directory is not allowed");
+    const canonicalCwd = await realpath(request.cwd).catch(() => "");
+    const cwdInfo = canonicalCwd ? await stat(canonicalCwd).catch(() => undefined) : undefined;
+    if (canonicalCwd !== request.cwd || !cwdInfo?.isDirectory()) throw new Error("Codex execution working directory is not allowed");
+    if (isCancelled()) throw new Error("Codex execution was cancelled before start");
+
+    return this.withProfileOperation(request.profileId, async () => {
+      const snapshot = await this.refreshProfile(request.profileId);
+      const candidates = await this.eligibleProfiles(request.modelId, 60_000);
+      if (!candidates.includes(request.profileId)) throw new CodexExecutionError("profile_ineligible");
+      const model = snapshot.models.find((item) => item.id === request.modelId);
+      if (!model?.reasoningEfforts?.includes(request.reasoningEffort)) throw new CodexExecutionError("profile_ineligible");
+      if (isCancelled()) throw new Error("Codex execution was cancelled before start");
+
+      const transport = await this.transport(request.profileId);
+      let threadId = request.threadId;
+      if (threadId) {
+        if (await this.profileForThread(threadId) !== request.profileId) throw new CodexExecutionError("thread_ownership");
+        let resumed: Record<string, unknown>;
+        try {
+          resumed = await this.request(transport, "thread/resume", {
+            threadId, model: request.modelId, cwd: canonicalCwd, approvalPolicy: "on-request", sandbox: "read-only",
+          });
+        } catch { throw new CodexExecutionError("thread_start_ambiguous"); }
+        if (record(resumed.thread)?.id !== threadId) throw new CodexExecutionError("thread_start_ambiguous");
+      } else {
+        let started: Record<string, unknown>;
+        try {
+          started = await this.request(transport, "thread/start", {
+            model: request.modelId, cwd: canonicalCwd, approvalPolicy: "on-request", sandbox: "read-only",
+          });
+        }
+        catch { throw new CodexExecutionError("thread_start_ambiguous"); }
+        const thread = record(started.thread);
+        threadId = safeString(thread?.id, 160);
+        if (!threadId || !/^[A-Za-z0-9_-]{1,160}$/.test(threadId)) throw new CodexExecutionError("thread_start_ambiguous");
+        // Persist profile ownership before the next remote mutation (turn/start).
+        await this.bindThread(threadId, request.profileId);
+      }
+      if (isCancelled()) throw new Error("Codex execution was cancelled before turn start");
+      if (this.activeTurns.has(threadId) || this.startingTurns.has(threadId)) throw new CodexExecutionError("turn_invalid");
+
+      const early: Array<{ method: string; params: Record<string, unknown> }> = [];
+      let turnId: string | undefined;
+      let output = "";
+      let complete: ((event: { state: "completed" | "failed"; text: string }) => void) | undefined;
+      let unlistenNotification = () => {};
+      let unlistenServerRequest = () => {};
+      const onNotification = (method: string, params: Record<string, unknown>) => {
+        if (params.threadId !== threadId) return;
+        if (!turnId) { early.push({ method, params }); return; }
+        if (params.turnId !== turnId && record(params.turn)?.id !== turnId) return;
+        if (method === "item/agentMessage/delta") {
+          const delta = params.delta;
+          if (typeof delta !== "string" || Buffer.byteLength(output + delta, "utf8") > MAX_FRAME_BYTES) {
+            complete?.({ state: "failed", text: "" }); return;
+          }
+          output += delta;
+        } else if (method === "turn/completed") {
+          const turn = record(params.turn);
+          complete?.({ state: turn?.status === "completed" ? "completed" : "failed", text: output });
+        }
+      };
+      unlistenNotification = transport.onNotification(onNotification);
+      if (transport.onServerRequest) unlistenServerRequest = transport.onServerRequest((incoming) => {
+        if (incoming.params.threadId !== threadId) return;
+        if (turnId && incoming.params.turnId !== turnId) return;
+        if (pendingRequests.length >= 16 || pendingRequests.some((item) => item.id === incoming.id)) return;
+        // Approval requests remain pending for a future explicit broker; this slice never answers them.
+        pendingRequests.push({ id: incoming.id, method: incoming.method, params: { ...incoming.params } });
+      });
+
+      this.startingTurns.add(threadId);
+      let startedTurn: Record<string, unknown>;
+      try {
+        startedTurn = await this.request(transport, "turn/start", {
+          threadId, model: request.modelId, cwd: canonicalCwd, effort: request.reasoningEffort,
+          approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false },
+          input: [{ type: "text", text: request.prompt }],
+        });
+      } catch {
+        this.startingTurns.delete(threadId);
+        unlistenNotification(); unlistenServerRequest();
+        throw new CodexExecutionError("turn_start_ambiguous");
+      }
+      const turn = record(startedTurn.turn);
+      turnId = safeString(turn?.id, 160);
+      if (!turnId || !/^[A-Za-z0-9_-]{1,160}$/.test(turnId)) {
+        this.startingTurns.delete(threadId);
+        unlistenNotification(); unlistenServerRequest();
+        throw new CodexExecutionError("turn_start_ambiguous");
+      }
+      this.startingTurns.delete(threadId);
+      this.activeTurns.set(threadId, { profileId: request.profileId, turnId });
+      setCancelAction(async () => {
+        try { await this.interruptOwnedTurn(request.profileId, threadId!, turnId!, transport); }
+        finally { complete?.({ state: "failed", text: "" }); }
+      });
+
+      return new Promise<CodexExecutionResult>((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          clearTimeout(timer);
+          unlistenNotification(); unlistenServerRequest();
+          if (this.activeTurns.get(threadId!)?.turnId === turnId) this.activeTurns.delete(threadId!);
+          setCancelAction(undefined);
+        };
+        const finish = (event: { state: "completed" | "failed"; text: string }) => {
+          if (settled) return;
+          settled = true; cleanup();
+          if (event.state !== "completed" || !event.text.trim() || Buffer.byteLength(event.text, "utf8") > MAX_FRAME_BYTES) {
+            reject(new CodexExecutionError("turn_outcome_ambiguous")); return;
+          }
+          resolve({ profileId: request.profileId, threadId: threadId!, turnId: turnId!, modelId: request.modelId, reasoningEffort: request.reasoningEffort, text: event.text, status: "completed" });
+        };
+        complete = finish;
+        const interruptAndReject = async () => {
+          try { await this.interruptOwnedTurn(request.profileId, threadId!, turnId!, transport); } catch { /* The timeout remains ambiguous. */ }
+          finish({ state: "failed", text: "" });
+        };
+        const timer = setTimeout(() => { void interruptAndReject(); }, request.timeoutMs ?? 10 * 60_000);
+        if (isCancelled()) { void interruptAndReject(); return; }
+        for (const event of early) onNotification(event.method, event.params);
+      });
+    });
+  }
+
+  private async interruptOwnedTurn(profileId: string, threadId: string, turnId: string, transport: CodexTransport): Promise<void> {
+    if (await this.profileForThread(threadId) !== profileId || this.activeTurns.get(threadId)?.turnId !== turnId) throw new Error("Codex turn ownership could not be verified");
+    let response: Record<string, unknown>;
+    try { response = await this.request(transport, "turn/interrupt", { threadId, turnId }); }
+    catch { throw new Error("Codex turn interruption is ambiguous"); }
+    const turn = record(response.turn);
+    if (turn?.id !== undefined && turn.id !== turnId) throw new Error("Codex interrupt response does not match the owned turn");
   }
 
   async bindThread(threadId: string, profileId: string): Promise<void> {
