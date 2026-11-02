@@ -12,7 +12,7 @@ completion and assignment completion. The old workforce monitor does not consume
 that event stream: it monitors retired sessions. Its existence is not proof of
 Oracle monitoring-to-resumption delivery.
 
-Release `bb4ad7b` is activated with event opt-in enabled. Existing native MCP
+Release `73cf0d0` is activated with event opt-in enabled (superseding `bb4ad7b`). Existing native MCP
 OAuth access still works. A local, short-lived scoped test JWT verified event
 capability discovery, the event catalog, `job_wait` and rejection of a private
 callback. It did not establish a new client OAuth login or a real ChatGPT reaction.
@@ -55,7 +55,7 @@ does not prove ChatGPT's resulting action. Status events coalesce observations;
 the job event ledger remains the detailed audit history. Replay cursors are not
 advertised for this event.
 
-Follow-up fixes cover a fast job completing before subscription (one catch-up
+Activated follow-up fixes cover a fast job completing before subscription (one catch-up
 status event, preserved through refresh) and Oracle HTTP 408/5xx uncertainty.
 A proxy timeout after dispatch must stay ambiguous, not become a definite failed
 execution that invites unsafe replay. The synchronous inference API cannot

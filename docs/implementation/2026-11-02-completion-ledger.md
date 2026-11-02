@@ -232,3 +232,19 @@ response: the main DAG does not yet use the separate durable Oracle queue's
 stable ID/status/result mapping. That bridge also requires queue finish evidence
 and host-binding reconciliation. Actual supported-client subscription and
 response remain the feedback acceptance gate. Details: `../architecture/worker-feedback.md`.
+
+## Activated feedback follow-up
+
+Running code/CLI: `73cf0d021ac3d8d8aae45ab2eb5c496889665262`.
+Full CI41445419922 passed; targeted follow-up16/16 passed. Rollback backup:
+`/home/jq/.local/state/rotoxy/releases/rollback-73cf0d0-1793622858`.
+No active operations/tasks existed at restart. Public healthz and the existing
+native MCP guide work after activation; guide advertises bounded waiting, MCP
+Events and slow-Oracle uncertainty. No real event subscription has been created.
+The operator has been asked to perform the supported Work/Cloud subscription
+step for the completed Oracle test job; do not fabricate its callback or reaction.
+
+Exact next actions: verify that client subscription/delivery/reaction; then
+integrate DAG Oracle work with stable-ID durable queue and terminal evidence,
+preserving host eligibility. Codex/Claude native resume wiring and the remaining
+completion gates above are still open. Do not implement another event engine.
