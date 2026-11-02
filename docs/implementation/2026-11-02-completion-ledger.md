@@ -283,3 +283,20 @@ assumed /usr/bin/node. Use process.execPath in fixtures; the real Bedrock canari
 are not the failing cases. Root also moved model/profile preflight ahead of attempt
 reservation and redacts exact loaded AWS credential values before result storage.
 Latest runtime build passed; full corrected CI is required before activation.
+
+### Claude/Bedrock release gate closed — 2026-11-02
+
+Running code:7e4290d094a26a18f08236d0420ab8629feb7734. CI41510207022 green
+(741 Node tests per runtime22/24,548 supervisor Python tests,Oracle API green).
+Installed real Claude task succeeded, matching Haiku model and review artifact;
+CLI-reported cost$0.001566. Installed direct Bedrock catalog(3 models) and Messages
+exact-response execution passed. Publichealthz200; CLI endpoint directory updated.
+Private backup rollback-7e4290d-1793647859 preserves old service/links/config/DBs.
+No fresh external OAuth login or visual QA claimed; built-in browser disabled.
+
+Remaining product work is separate: Claude workspace tasks are not main job_submit
+DAG tasks; worker policy is read-only Read/Glob/Grep at capacity1. Actual ChatGPT
+event callback/reaction, unrestricted coding policy, full mixed-provider planning,
+and historical retired-provider purge are not complete. Next integrate the existing
+Claude execution contract with the main scheduler before claiming automatic
+mixed-provider Claude dispatch; preserve private attempts and do not replay them.

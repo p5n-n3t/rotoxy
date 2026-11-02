@@ -87,3 +87,39 @@ advertised tools instead of passing these IDs to `job_status` or `job_wait`.
 This implementation does not establish automatic native-chat resumption, full
 mixed-provider planning, or code-editing worker policy. Existing Oracle and
 Cloudflare DAG execution remains separate and unchanged.
+
+## Installed release verification
+
+Activated commit `7e4290d094a26a18f08236d0420ab8629feb7734` after
+[CI 41510207022](https://github.com/p5n-n3t/rotoxy/actions/runs/41510207022)
+passed: 741 Node tests on each of Node 22 and 24, 548 Python supervisor tests,
+and the Oracle API job. The previous fixture-only CI failure is retained in the
+ledger; the portable fixture fix is included.
+
+The gateway process working directory and both CLI symlinks reference this
+release. Public `/healthz` returned HTTP 200 after startup.
+`rotoxy-cli endpoints` lists the Bedrock Anthropic Messages endpoint.
+
+Operation `claude-worker-installed-20261102-a` then passed against the installed
+gateway with its real authorization backend: trusted profile discovery, stored
+workspace task creation, durable submit/status, actual Haiku execution, exact
+result marker, matching reported model, and review artifact. Claude reported
+$0.001566. Its direct catalog contained three selected models; the installed
+Messages route also passed exact-result inference (18 input, 11 output tokens).
+This used a temporary local scoped JWT for an existing registered OAuth client,
+not a fresh external OAuth consent test. The temporary model token was revoked.
+A test-harness argument validation failure occurred before task creation or launch;
+the corrected harness used the same reservation after confirming no attempt existed.
+No ambiguous provider operation was replayed. A separate $0.26 estimate was reserved
+for this installed verification; the CLI limit is not a guaranteed billing ceiling.
+
+The built-in browser reported local browser use disabled in Work settings. No
+authenticated dashboard screenshot or actual ChatGPT event reaction is claimed.
+
+Rollback material is private at
+`~/.local/state/rotoxy/releases/rollback-7e4290d-1793647859/`: previous service
+drop-in, CLI link targets, private configuration copies, and consistent SQLite
+backups. To roll back code, restore that service drop-in and CLI links, then run
+user-systemd daemon-reload and restart only `rotoxy-gateway.service`. Keep Funnel
+and unrelated services unchanged. Do not overwrite current databases from backup
+without reconciling work created after this release.
