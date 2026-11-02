@@ -28,8 +28,10 @@ test("Cloudflare inference pins the credential and retains marker and usage prov
       account = id;
       forwardedSignal = signal;
       assert.equal(input.model, "@cf/meta/model");
+      assert.deepEqual(input.input.messages, [{ role: "user", content: "Answer briefly\n\nFinish with this exact marker as the final nonempty line: DONE" }]);
       assert.equal(input.input.max_tokens, 100);
-      assert.match(input.input.prompt, /final nonempty line: DONE/);
+      assert.equal(input.input.temperature, 0);
+      assert.equal(input.input.prompt, undefined, "the selected chat-model request uses the messages form that passed the direct canary");
       return { credentialId: id, providerAccountId: "0123456789abcdef0123456789abcdef",
         result: { success: true, result: { response: "Answer\nDONE", usage: { prompt_tokens: 4, completion_tokens: 7, total_tokens: 11 } } } };
     } },

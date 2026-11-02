@@ -87,8 +87,8 @@ export class InferenceJobsAdapter implements InferenceExecutor {
       const requestStartedAt = (this.options.now ?? Date.now)() / 1000;
       const receipt = await this.options.cloudflare.runForAccountWithReceipt(request.accountId, {
         model: request.model,
-        input: { prompt: `${request.prompt}\n\nFinish with this exact marker as the final nonempty line: ${request.expectedMarker}`,
-          max_tokens: request.maxOutputTokens },
+        input: { messages: [{ role: "user", content: `${request.prompt}\n\nFinish with this exact marker as the final nonempty line: ${request.expectedMarker}` }],
+          max_tokens: request.maxOutputTokens, temperature: 0 },
       }, signal);
       const outer = object(receipt.result) ? receipt.result : undefined;
       const result = object(outer?.result) ? outer!.result as Record<string, unknown> : outer;
