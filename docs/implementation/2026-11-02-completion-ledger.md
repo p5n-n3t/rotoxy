@@ -166,7 +166,7 @@ now discovers8 healthy CF resources and eligible Oracle pool. Production proof
 rx-desktop-access-20261102-a completed and result retrieved via this MCP caller.
 See ../verification/2026-11-02-production-worker-access.md. Source mixedcanary all3
 complete (1.590s request overlap). Nebius encrypted onboarding+30-model catalog
-passed; no Nebius inference/automatic selection. Two$0.001 conservative CF
+passed; no Nebius inference/automatic selection. Two $0.001 conservative CF
 verification reservations; no purchases/topups. No historical purge.
 
 Origin broker newfiles remain untracked owned delegate output, not built/committed

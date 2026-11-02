@@ -8,7 +8,7 @@ not been activated. This was a deployment gap, not a request for a new per-proje
 provider workspace.
 
 Activated immutable gateway release `03f9986062f5a01df11b39015dc1cd4ed33e9fef`
-after CI run41431559610 passed Node22, Node24 and oracle-api checks, and the new
+after CI run 41431559610 passed Node 22, Node 24 and oracle-api checks, and the new
 source mixed-provider canary completed all three tasks. Dependency lock matches
 the former installation. CLI links were updated to the same release and their
 executable permissions corrected. Gateway health is healthy; existing OAuth
@@ -22,13 +22,13 @@ varies with fresh host observations; discovery is not a reservation.
 
 - Source mixed job `rx-mixed-20261102-c`: Oracle and Cloudflare independent tasks
   plus Oracle dependency join all completed with exact markers. Request intervals
-  overlapped for1.590 seconds. These intervals include HTTP/local validation and
+  overlapped for 1.590 seconds. These intervals include HTTP/local validation and
   are not provider GPU timing. Dependency ordering does not inject prior outputs.
-- Cloudflare chat-message-format canary: exact marker,29 reported tokens.
+- Cloudflare chat-message-format canary: exact marker, 29 reported tokens.
   Published token rates imply an estimate, not a provider-reported bill.
 - Live production MCP job `rx-desktop-access-20261102-a`: accepted and completed;
   retrieved `ROTOXY_DESKTOP_ACCESS_OK`, provider-reported model
-  `oracle/qwen3.5:2b`, hostora5,81 reported tokens, finish_reason stop.
+  `oracle/qwen3.5:2b`, host ora5, 81 reported tokens, finish_reason stop.
 - The first production submit was rejected at eligibility validation. Read-only
   database inspection confirmed zero assignments before same-key resubmission.
   No ambiguous mutation was replayed. Never infer guaranteed capacity from the
@@ -37,7 +37,7 @@ varies with fresh host observations; discovery is not a reservation.
 Detailed canary reports and the two conservative $0.001 verification reservations
 are owner-private under `~/.local/state/rotoxy/verification/`. No purchases/top-ups.
 Nebius was added to the existing encrypted generic provider store. Its custom
-endpoint authenticated and listed30 models; no models were automatically selected
+endpoint authenticated and listed 30 models; no models were automatically selected
 and no Nebius inference was executed. The operator-reported $50 is not a verified
 balance; this onboarding does not prove durable Nebius job dispatch.
 
