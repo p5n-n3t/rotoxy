@@ -118,6 +118,8 @@ def inspect_sqlite(path: Path, account_ids: set[str], session_ids: set[str]) -> 
                         item = stack.pop()
                         if isinstance(item, dict):
                             embedded_accounts, embedded_sessions, embedded_provider = record_ids(item)
+                            if embedded_provider:
+                                provider_values.add(embedded_provider)
                             if embedded_accounts & account_ids or embedded_sessions & session_ids:
                                 row_accounts.update(embedded_accounts & account_ids)
                                 row_sessions.update(embedded_sessions & session_ids)
