@@ -74,3 +74,13 @@ pending and must not be claimed complete.
 Retirement script is read-only preview. Its `--apply` explicitly refuses because
 cross-store dependency classification and journaled restore are not implemented.
 No production purge, paid test, runtime deployment or new Claude process occurred.
+
+## Source checkpoint de50128
+
+- E01 shared directory committed/pushed as `389d22a`; focused provider/CLI/directory
+  checks passed 13/13, final directory API/CLI parity regression passed 1/1.
+- C02 preview committed/pushed in `1f93315` + mixed-sibling correction `de50128`;
+  synthetic preview tests passed 3/3. Apply remains explicitly unsupported.
+- Active provider retirement fence is currently delegated, uncommitted and under
+  focused verification. Retrieve its result before staging those files.
+- No new paid calls, runtime purge or deployment. Astra is not needed currently.
