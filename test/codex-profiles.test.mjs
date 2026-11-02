@@ -8,7 +8,7 @@ import { join } from "node:path";
 const isolatedHome = await mkdtemp(join(tmpdir(), "t2o-codex-profile-home-"));
 process.env.HOME = isolatedHome;
 process.env.TOKEN2OAUTH_CONFIG_DIR = join(isolatedHome, "config");
-const { CodexProfiles, CODEX_APP_SERVER_ARGS, renderCodexProfilesPage } = await import("../dist/codex-profiles.js");
+const { CodexProfiles, StdioCodexTransport, CODEX_APP_SERVER_ARGS, renderCodexProfilesPage } = await import("../dist/codex-profiles.js");
 
 async function harness(t, responder = () => ({})) {
   const root = await mkdtemp(join(tmpdir(), "t2o-codex-profile-test-"));
@@ -156,4 +156,51 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => { const 
   assert.deepEqual(childEnv.args, ["app-server", "--stdio"]);
   assert.equal(childEnv.home, profile.profileDir);
   assert.equal(childEnv.leakedKey, null);
+});
+
+test("App Server stdio distinguishes requests, responses, and notifications with one-shot opaque-ID replies", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "t2o-codex-rpc-routing-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const binary = join(root, "codex");
+  const log = join(root, "stdin.jsonl");
+  const script = `#!/usr/bin/env node
+const fs=require("node:fs"); const readline=require("node:readline");
+readline.createInterface({input:process.stdin}).on("line",line=>{
+ const req=JSON.parse(line); fs.appendFileSync(${JSON.stringify(log)},line+"\\n");
+ if(req.method==="initialize"){
+  process.stdout.write(JSON.stringify({id:String(req.id),result:{wrongType:true}})+"\\n");
+  process.stdout.write(JSON.stringify({method:"account/updated",params:{available:true}})+"\\n");
+  process.stdout.write(JSON.stringify({id:"opaque/request:1",method:"item/commandExecution/requestApproval",params:{command:"npm test"}})+"\\n");
+  process.stdout.write(JSON.stringify({id:"opaque/request:2",method:"item/fileChange/requestApproval",params:{path:"src/a.ts"}})+"\\n");
+  process.stdout.write(JSON.stringify({id:req.id,result:{initialized:true}})+"\\n");
+ }
+});
+`;
+  await writeFile(binary, script, { mode: 0o700 }); await chmod(binary, 0o700);
+  const transport = new StdioCodexTransport(binary, root, 1);
+  t.after(() => transport.close());
+  let notification;
+  let serverRequest;
+  const notified = new Promise(resolve => { notification = resolve; });
+  const requested = new Promise(resolve => { serverRequest = resolve; });
+  transport.onNotification((method, params) => notification({ method, params }));
+  transport.onServerRequest((request) => serverRequest(request));
+  assert.deepEqual(await transport.request("initialize"), { initialized: true }, "string response IDs do not resolve numeric client requests");
+  assert.deepEqual(await notified, { method: "account/updated", params: { available: true } });
+  const incoming = await requested;
+  assert.equal(incoming.id, "opaque/request:1");
+  assert.equal(incoming.method, "item/commandExecution/requestApproval");
+  assert.deepEqual(incoming.params, { command: "npm test" });
+
+  await transport.respond(incoming.id, { decision: "decline" });
+  await assert.rejects(transport.respond(incoming.id, { decision: "accept" }), /unknown or already answered/);
+  await assert.rejects(transport.respond({ unsafe: true }, {}), /ID is invalid/);
+  await assert.rejects(transport.respond("not-pending", {}), /unknown or already answered/);
+  const writes = (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const replies = writes.filter(message => message.id === "opaque/request:1");
+  assert.deepEqual(replies, [{ id: "opaque/request:1", result: { decision: "decline" } }]);
+  assert.deepEqual(writes.find(message => message.id === "opaque/request:2"), {
+    id: "opaque/request:2", error: { code: -32000, message: "Codex App Server request limit reached" },
+  });
+  assert.equal(writes.filter(message => message.method === "initialize").length, 1);
 });

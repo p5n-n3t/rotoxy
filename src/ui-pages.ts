@@ -1,3 +1,4 @@
+import { activeAccountState } from "./retired-providers.js";
 /**
  * Admin console pages for tools, diagnostics and security. Renderers are pure:
  * they take already-collected data and return HTML with every dynamic value
@@ -41,6 +42,7 @@ export interface ToolsPageInput {
 }
 
 export function renderToolsPage({ base, state, catalog, notice }: ToolsPageInput): string {
+  state = activeAccountState(state);
   const gatewayTools = [
     ...JOB_TOOLS.map(name => ({ name, scope: requiredJobScope(name), service: "Distributed jobs" })),
     ...ORACLE_TOOL_DEFINITIONS.map(tool => ({ name: tool.name, scope: oracleToolRequiredScope(tool.name), service: "Private workers" })),
@@ -82,7 +84,7 @@ export function renderToolsPage({ base, state, catalog, notice }: ToolsPageInput
 
   const orphanDenied = [...denied].filter((name) => !catalog.some((t) => t.name === name));
   const endpointNote = policy?.endpoints?.length
-    ? `<p class="tiny muted">Endpoint allowlists are active for: ${policy.endpoints.map((ep) => `<code>${esc(ep.tool || "lightsprint_api")}</code> (${ep.rules.length} rules)`).join(", ")}. Manage them with <code>rotoxy tools policy</code>.</p>`
+    ? `<p class="tiny muted">Endpoint allowlists are active for: ${policy.endpoints.map((ep) => `<code>${esc(ep.tool || "upstream tool")}</code> (${ep.rules.length} rules)`).join(", ")}. Manage them with <code>rotoxy tools policy</code>.</p>`
     : "";
 
   return `<main class="wrap">${adminNav(base, "tools")}${flash(notice)}<section class="grid">

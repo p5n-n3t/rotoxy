@@ -1,3 +1,4 @@
+import { retiredAccount } from "./retired-providers.js";
 /**
  * Runtime tool-inventory collection: speaks just enough MCP (initialize,
  * notifications/initialized, paginated tools/list) with ONE upstream
@@ -78,6 +79,7 @@ export async function refreshAccountCapabilities(
   const state = await store.load();
   const account = state.accounts.find((a) => a.id === accountId);
   if (!account) throw new Error("account not found");
+  if (retiredAccount(account,state)) return {capturedAt:Date.now(),ok:false,complete:false,error:"provider_retired",tools:[]};
   const startedAt = Date.now();
   const result = await collect(state, account, await store.revealToken(account));
   telemetry?.recordGateway({
@@ -197,6 +199,7 @@ export interface ToolCatalogEntry {
 export function toolCatalog(state: PersistedState): ToolCatalogEntry[] {
   const byName = new Map<string, ToolCatalogEntry & { hashes: Set<string> }>();
   for (const account of state.accounts) {
+    if (retiredAccount(account,state)) continue;
     const caps = state.capabilities?.[account.id];
     if (!caps) continue;
     for (const tool of caps.tools) {

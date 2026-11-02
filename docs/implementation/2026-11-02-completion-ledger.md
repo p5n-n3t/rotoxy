@@ -30,7 +30,7 @@ Keep this ledger current; a source commit is not a deployed milestone.
 | E01 | Parent: shared authenticated directory, dashboard and CLI | C01 | Local implementation/test in progress; provider MCP scopes pending | Scoped discovery and API isolation; no hypothetical working routes |
 | E02 | Provider worker: Nebius encrypted onboarding and model choices | E01 | Pending | Real metadata + bounded inference, separate API/job selection |
 | E03 | Luna: Cloudflare receipt/cancellation; live canary diagnosis remains | C01 | Local receipt tests passed; live pending | Missing-marker/truncation/abort tests; new live job only |
-| W01 | Agent worker: Codex execution and server approval transport | A01, C01 | Pending | Thread/turn receipts, approvals, cancel/restart, origin protection |
+| W01 | Luna: Codex server approval transport; durable execution still pending | A01, C01 | Transport groundwork under verification | Thread/turn receipts, approvals, cancel/restart, origin protection |
 | W02 | Agent worker: Claude execution and owned-process reconciliation | A01, C01 | Pending | Bedrock task artifact, session/approval/error/recovery evidence |
 | O01 | Oracle worker: shared capacity broker, catalogs, enrollment | A01 | Pending | Direct + ROTOXY concurrency isolation; added host without code change |
 | O02 | Oracle worker: even/adaptive batches and model policy | O01 | Pending | Ordered chunk artifacts, model eligibility, fairness, no duplicate work |
@@ -84,3 +84,17 @@ No production purge, paid test, runtime deployment or new Claude process occurre
 - Active provider retirement fence is currently delegated, uncommitted and under
   focused verification. Retrieve its result before staging those files.
 - No new paid calls, runtime purge or deployment. Astra is not needed currently.
+
+## Retirement and Codex transport continuation
+
+- `9e9bc92` commits retired provider execution guards; focused adapter/runtime
+  suites passed 46/46, including no Python assignment creation and preserved Oracle
+  inference eligibility. Six obsolete session-success tests now assert retirement.
+- Parent extended active-view filtering to legacy account counts, inventories,
+  probes and tool refresh; local retirement/UI integration passed 15/15.
+- Luna implemented Codex transport server-request handling and one-time response
+  support; no approval is automatically answered. This is not an executor.
+- Final single build succeeded; Codex/retirement tests passed 10/10. The concurrent
+  build was stopped by its owner. Host memory/swap pressure slowed verification.
+- Runtime remains unchanged; no native subscription worker launched after the
+  operator account switch, no paid test, purge or deployment.

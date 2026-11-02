@@ -1,3 +1,4 @@
+import { retiredAccount } from "./retired-providers.js";
 import type { NextFunction, Request, Response, Router } from "express";
 import express from "express";
 import { verifyPassword } from "./crypto.js";
@@ -443,7 +444,7 @@ strategySelect.addEventListener("change", () => {
     const state = await this.store.load();
     const base = state.config.publicBaseUrl.replace(/\/$/, "");
     const requested = typeof req.body.accountId === "string" ? req.body.accountId : undefined;
-    const targets = state.accounts.filter((a) => a.enabled && (!requested || a.id === requested));
+    const targets = state.accounts.filter((a) => !retiredAccount(a,state) && a.enabled && (!requested || a.id === requested));
     let ok = 0;
     // Sequential on purpose: avoid a burst of upstream sessions.
     for (const account of targets) {

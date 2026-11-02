@@ -1,3 +1,4 @@
+import { retiredAccount } from "./retired-providers.js";
 import type {
   GatewayConfig,
   PersistedState,
@@ -80,6 +81,7 @@ export class CredentialPool {
    * retain the historical any-upstream behavior.
    */
   isCompatibleAccount(account: UpstreamAccount, state: PersistedState): boolean {
+    if (retiredAccount(account, state)) return false;
     if (!WEB_RESOURCE_PROVIDERS.has(account.provider)) return true;
     const profile = providerProfile(account.provider);
     if (!profile) return false;
@@ -328,6 +330,7 @@ export class CredentialPool {
     const state = await this.store.load();
     const account = state.accounts.find((a) => a.id === accountId);
     if (!account) throw new Error("account not found");
+    if (retiredAccount(account, state)) return { accountId, label: account.label, ok: false, error: "provider_retired" };
     if (!account.enabled) {
       return { accountId, label: account.label, ok: false, error: "account is disabled" };
     }
@@ -390,14 +393,14 @@ export class CredentialPool {
     // Deliberately sequential: a health check must not create an avoidable
     // provider-side burst or rate-limit the whole credential pool.
     for (const account of state.accounts) {
-      if (account.enabled) results.push(await this.probeAccount(account.id));
+      if (account.enabled && !retiredAccount(account, state)) results.push(await this.probeAccount(account.id));
     }
     return results;
   }
 
   snapshot(state: PersistedState) {
     const now = Date.now();
-    return state.accounts.map((a) => ({
+    return state.accounts.filter(a=>!retiredAccount(a,state)).map((a) => ({
       id: a.id,
       label: a.label,
       provider: a.provider,

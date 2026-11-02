@@ -49,8 +49,13 @@ export interface CodexTransport {
   request(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>>;
   notify(method: string, params?: Record<string, unknown>): void;
   onNotification(listener: (method: string, params: Record<string, unknown>) => void): () => void;
+  onServerRequest?(listener: (request: CodexServerRequest) => void): () => void;
+  respond?(id: CodexRequestId, result: unknown): Promise<void>;
   close(): Promise<void>;
 }
+
+export type CodexRequestId = string | number;
+export interface CodexServerRequest { id: CodexRequestId; method: string; params: Record<string, unknown> }
 
 export interface CodexProfilesOptions {
   /** Trusted absolute path supplied by local configuration; only its fixed app-server args are executed. */
@@ -85,11 +90,13 @@ function privateEnv(profileDir: string): NodeJS.ProcessEnv {
   return env;
 }
 
-class StdioCodexTransport implements CodexTransport {
+export class StdioCodexTransport implements CodexTransport {
   private readonly child: ChildProcessWithoutNullStreams;
   private frameBuffer = Buffer.alloc(0);
   private readonly pending = new Map<number, { resolve(value: Record<string, unknown>): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   private readonly listeners = new Set<(method: string, params: Record<string, unknown>) => void>();
+  private readonly serverRequestListeners = new Set<(request: CodexServerRequest) => void>();
+  private readonly serverRequests = new Map<string, CodexRequestId>();
   private nextId = 1;
   private closed = false;
 
@@ -117,24 +124,51 @@ class StdioCodexTransport implements CodexTransport {
     if (Buffer.byteLength(line) > MAX_FRAME_BYTES) { this.failAll("Codex App Server frame exceeded limit"); void this.close(); return; }
     let message: Record<string, unknown>;
     try { const parsed = JSON.parse(line); const obj = record(parsed); if (!obj) return; message = obj; } catch { return; }
-    if (typeof message.id === "number") {
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id); clearTimeout(pending.timer);
-      const result = record(message.result);
-      if (result) pending.resolve(result);
-      else pending.reject(new Error("Codex App Server request failed"));
-      return;
-    }
     if (typeof message.method === "string") {
       const params = record(message.params) || {};
+      if (Object.hasOwn(message, "id")) {
+        const id = message.id;
+        if (!this.validRequestId(id)) return;
+        const key = this.requestKey(id);
+        if (this.serverRequests.has(key)) return;
+        if (this.serverRequests.size >= this.maxInFlight) {
+          this.writeFrame({ id, error: { code: -32000, message: "Codex App Server request limit reached" } });
+          return;
+        }
+        this.serverRequests.set(key, id);
+        for (const listener of this.serverRequestListeners) {
+          try { listener({ id, method: message.method, params }); } catch { /* Leave the request pending for a controlled response. */ }
+        }
+        return;
+      }
       for (const listener of this.listeners) listener(message.method, params);
+      return;
     }
+    if (!Object.hasOwn(message, "id") || !this.validRequestId(message.id) || typeof message.id !== "number") return;
+    const pending = this.pending.get(message.id);
+    if (!pending) return;
+    this.pending.delete(message.id); clearTimeout(pending.timer);
+    const result = record(message.result);
+    if (result) pending.resolve(result);
+    else pending.reject(new Error("Codex App Server request failed"));
+  }
+
+  private validRequestId(value: unknown): value is CodexRequestId {
+    return typeof value === "number" ? Number.isSafeInteger(value) && value >= 0
+      : typeof value === "string" && value.length > 0 && value.length <= 160 && !/[\u0000-\u001f\u007f]/.test(value);
+  }
+
+  private requestKey(id: CodexRequestId): string { return `${typeof id}:${String(id)}`; }
+
+  private writeFrame(message: Record<string, unknown>): void {
+    if (this.closed) throw new Error("Codex App Server is closed");
+    this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   private failAll(message: string): void {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(message)); }
     this.pending.clear();
+    this.serverRequests.clear();
   }
 
   request(method: string, params: Record<string, unknown> = {}, timeoutMs = CODEX_RPC_TIMEOUT_MS): Promise<Record<string, unknown>> {
@@ -152,6 +186,19 @@ class StdioCodexTransport implements CodexTransport {
   notify(method: string, params: Record<string, unknown> = {}): void {
     if (this.closed) throw new Error("Codex App Server is closed");
     this.child.stdin.write(`${JSON.stringify({ method, params })}\n`);
+  }
+
+  onServerRequest(listener: (request: CodexServerRequest) => void): () => void {
+    this.serverRequestListeners.add(listener); return () => this.serverRequestListeners.delete(listener);
+  }
+
+  async respond(id: CodexRequestId, result: unknown): Promise<void> {
+    if (!this.validRequestId(id)) throw new Error("Codex App Server request ID is invalid");
+    if (result === undefined) throw new Error("Codex App Server response result is required");
+    const key = this.requestKey(id);
+    if (!this.serverRequests.has(key)) throw new Error("Codex App Server request is unknown or already answered");
+    this.serverRequests.delete(key);
+    this.writeFrame({ id, result });
   }
 
   onNotification(listener: (method: string, params: Record<string, unknown>) => void): () => void {
