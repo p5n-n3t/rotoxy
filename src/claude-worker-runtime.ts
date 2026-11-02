@@ -77,7 +77,11 @@ export class ClaudeWorkerRuntime {
    try {
     const handle=await dispatch.start(input);this.active.set(handle.runId,handle);
     void handle.promise.finally(()=>this.active.delete(handle.runId)).catch(()=>undefined);
-    return handle;
+    return {...handle,promise:handle.promise.then(result=>{
+      let text=result.text;
+      for(const value of [env.AWS_ACCESS_KEY_ID,env.AWS_SECRET_ACCESS_KEY,env.AWS_SESSION_TOKEN])if(value&&value.length>=12)text=text.split(value).join('[REDACTED]');
+      return {...result,text};
+    })};
    } finally {this.pendingStarts--;}
   }});
   return this.service;
@@ -113,6 +117,8 @@ export class ClaudeWorkerRuntime {
   }
   if(name!=='claude_task_submit'||this.closed)throw Error('claude_worker_unavailable');
   if(typeof args.model!=='string'||!args.model)throw Error('explicit_claude_model_required');
+  const profile=(await readClaudeRunnerProfiles(join(this.store.dir,'runner-profiles.json'))).find(row=>row.id===args.profileId);
+  if(!profile?.enabled||!this.allowedExecutables.includes(profile.binary)||!this.allowedCwds.includes(profile.cwd)||!profile.allowedModels.includes(args.model))throw Error('claude_profile_or_model_not_allowed');
   if(this.active.size+this.pendingStarts>=1||this.submitting)throw Error('claude_worker_capacity_unavailable');
   this.submitting=true;
   try{

@@ -12,7 +12,7 @@ test('real workspace bridge dispatches trusted fake CLI once, retains result aft
  const store=new StateStore();if(old===undefined)delete process.env.ROTOXY_CONFIG_DIR;else process.env.ROTOXY_CONFIG_DIR=old;
  await store.init({adminPassword:'synthetic-claude-runtime-password'});await chmod(dir,0o700);
  const binary=join(dir,'claude');const counter=join(dir,'launch-count');
- await writeFile(binary,`#!/usr/bin/node\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);let input='';for await(const chunk of process.stdin)input+=chunk;fs.appendFileSync(${JSON.stringify(counter)},'launch\\n');console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'ROTOXY_CLAUDE_RUNTIME_OK',session_id:args[args.indexOf('--session-id')+1],model:'test-bedrock-model',total_cost_usd:0}));\n`,{mode:0o700});
+ await writeFile(binary,`#!${process.execPath}\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);let input='';for await(const chunk of process.stdin)input+=chunk;fs.appendFileSync(${JSON.stringify(counter)},'launch\\n');console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'ROTOXY_CLAUDE_RUNTIME_OK',session_id:args[args.indexOf('--session-id')+1],model:'test-bedrock-model',total_cost_usd:0}));\n`,{mode:0o700});
  // Node treats this extensionless fixture as CommonJS; a package scope selects ESM.
  await writeFile(join(dir,'package.json'),'{"type":"module"}');
  const profile={id:'claude-runtime-test',kind:'claude',label:'Test Claude',cwd:dir,binary,enabled:true,allowedModels:['test-bedrock-model'],probeState:'available',probeCheck:'version',probeAt:1,probeOutput:'synthetic'};
@@ -25,6 +25,8 @@ test('real workspace bridge dispatches trusted fake CLI once, retains result aft
  await workspace.update('project-a',actor,{action:'task_create',taskId:'task-a',title:'Check fixture',description:'Return marker',expectedRevision:snap.revision,idempotencyKey:'task-a'});
  const runtime=new ClaudeWorkerRuntime(store,workspace,backend,[binary],[dir]);t.after(async()=>{await runtime.close();await rm(dir,{recursive:true,force:true});});
  const workers=await runtime.call('claude_workers',{projectId:'project-a'},'client-a');assert.equal(workers.workers.length,1);
+ await assert.rejects(runtime.call('claude_task_submit',{projectId:'project-a',taskId:'task-a',profileId:profile.id,model:'not-permitted'},'client-a'),/model_not_allowed/);
+ assert.equal((await workspace.snapshot('project-a',actor)).tasks[0].state,'queued','invalid model does not consume the task attempt');
  const result=await runtime.call('claude_task_submit',{projectId:'project-a',taskId:'task-a',profileId:profile.id,model:'test-bedrock-model'},'client-a');assert.equal(result.accepted,true);
  let status;
  for(let i=0;i<30;i++){status=await runtime.call('claude_task_status',{projectId:'project-a',taskId:'task-a'},'client-a');if(!['intent','running'].includes(status.status))break;await new Promise(r=>setTimeout(r,50));}
@@ -42,7 +44,7 @@ test('cancelled fake CLI becomes ambiguous and blocks the task without a duplica
  const store=new StateStore();if(old===undefined)delete process.env.ROTOXY_CONFIG_DIR;else process.env.ROTOXY_CONFIG_DIR=old;
  await store.init({adminPassword:'synthetic-claude-cancel-password'});await chmod(dir,0o700);
  const binary=join(dir,'claude');const counter=join(dir,'launch-count');
- await writeFile(binary,`#!/usr/bin/node\nimport fs from 'node:fs';\nfs.appendFileSync(${JSON.stringify(counter)},'launch\\n');\nsetInterval(()=>{},1000);\n`,{mode:0o700});
+ await writeFile(binary,`#!${process.execPath}\nimport fs from 'node:fs';\nfs.appendFileSync(${JSON.stringify(counter)},'launch\\n');\nsetInterval(()=>{},1000);\n`,{mode:0o700});
  await writeFile(join(dir,'package.json'),' {"type":"module"} ');
  const profile={id:'claude-cancel-test',kind:'claude',label:'Cancel test',cwd:dir,binary,enabled:true,allowedModels:['test-bedrock-model'],probeState:'available',probeCheck:'version',probeAt:1,probeOutput:'synthetic'};
  await writeFile(join(dir,'runner-profiles.json'),JSON.stringify({version:1,profiles:[profile]}),{mode:0o600});

@@ -277,3 +277,9 @@ retention additions. Python bridge+legacy15/15 and result-retention Node12/12 pa
 Final cancellation tests/CI/activation remain pending; current live still73cf0d0.
 See docs/verification/2026-11-02-bedrock-claude-workers.md. Do not duplicate the
 new existing-DB bridge or claim unrestricted coding/autonomous approval support.
+
+Claude worker CI41509466823 failed on two synthetic CLI tests because their shebang
+assumed /usr/bin/node. Use process.execPath in fixtures; the real Bedrock canaries
+are not the failing cases. Root also moved model/profile preflight ahead of attempt
+reservation and redacts exact loaded AWS credential values before result storage.
+Latest runtime build passed; full corrected CI is required before activation.
