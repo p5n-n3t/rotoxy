@@ -135,7 +135,7 @@ test("sparse review-only boards use a compact four-state bar and a two-column ta
   assert.match(html, /<details class="aw-task-description"><summary>Task description<\/summary>/);
   assert.match(html, /<section class="aw-conversation"/);
   assert.match(html, /<details class="aw-work-disclosure"><summary>Activity/);
-  assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
+  assert.doesNotMatch(html, /<details[^>]*class="aw-[^"]*"[^>]*\bopen\b/);
   assert.doesNotMatch(html, /<script\b/i);
 });
 

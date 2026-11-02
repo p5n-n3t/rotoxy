@@ -16,15 +16,15 @@ One gateway and administrative control plane for provider access, distributed ta
 
 ## Operating Context
 
-Desktop or small-server installation; MCP clients including Claude Code and Codex; LightSprint workspaces; three tailnet-connected Oracle model hosts. Provider quotas, active inference, occupied sessions, and concurrency limits are separate measurements.
+Desktop or small-server installation; MCP clients including Claude Code and Codex; Codex and Claude runner profiles; API inference pools; six tailnet-connected Oracle model hosts. Provider quotas, active inference, occupied sessions, and concurrency limits are separate measurements.
 
 ## Capabilities and Constraints
 
-Existing gateway OAuth, credential pooling, account affinity, and tool policies are preserved. The integration branch has verified small multi-account text jobs and graceful runtime restart reconciliation. Full generic coding orchestration, automatic paid recovery, deployment, all-client registration, and new branding remain incomplete. No undocumented web-chat wake protocol, invented credit conversions, fake traffic, or fabricated capacity.
+Existing gateway OAuth, credential pooling, account affinity, and tool policies are preserved. Historical integration evidence includes small distributed text jobs and restart reconciliation; the current completion ledger tracks replacement worker adapters. Full generic coding orchestration, automatic paid recovery, deployment, all-client registration, and new branding remain incomplete. No undocumented web-chat wake protocol, invented credit conversions, fake traffic, or fabricated capacity.
 
 ## Brand Commitments
 
-The user requests a substantive high-end redesign, its own logo, cohesive theme, and collateral, with LightSprint Claude Opus 5.5 as design lead. ROTOXY compatibility must remain. Canonical product name and repository are ROTOXY and p5n-n3t/rotoxy. The present dashboard is an anti-reference for visual richness, not a model to imitate.
+The user requests a substantive high-end redesign, its own logo, cohesive theme, and collateral, using capable verified models selectively for design work. ROTOXY compatibility must remain. Canonical product name and repository are ROTOXY and p5n-n3t/rotoxy. The present dashboard is an anti-reference for visual richness, not a model to imitate.
 
 ## Evidence on Hand
 

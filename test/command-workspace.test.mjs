@@ -104,7 +104,7 @@ test("workspace command centre is authenticated and renders bounded real resourc
   assert.match(html, /@media\(max-width:390px\)/);
   assert.match(html, /id="rx-main-content"/);
   assert.match(html, /data-workspace-app/);
-  assert.match(html, /aria-current="page">Workspace<\/a>/);
+  assert.match(html, /aria-current="page">Resource map<\/a>/);
   assert.match(html, /Primary MCP/);
   assert.match(html, /Edge models/);
   assert.doesNotMatch(html, /mock-mcp-secret-value|mock-model-secret-value|mock-cloudflare-secret|private prompt|must-not-leak/);

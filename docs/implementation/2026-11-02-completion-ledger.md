@@ -122,3 +122,21 @@ unverified. Navigation source/build/focused tests passed10/10 and is pushed3f039
 Luna now owns new `src/providers/claude-code-jobs.ts` and its synthetic tests only;
 no paid launch or runtime integration is authorized by that module's existence.
 Parent owns Oracle model catalog deduplication and growable host attribution tests.
+
+## Complete run and targeted corrections
+
+Full post-retirement Node run completed691 tests:686 passed,5 failed. Failures
+were two navigation expectations and three retired-provider behavior expectations.
+Resource map link restored; disclosure assertion limited to task panels; direct
+retired MCP operations must fail without network; legacy readiness cannot become
+available through credit readings. Affected suites and new Claude executor tests
+passed35/35 after build at `/tmp/rotoxy-final-followups.log`.
+The last globally green suite was before these retirement/navigation changes.
+Do not call the complete suite green until a fresh full pass.
+
+Claude CLI executor groundwork is locally verified with a fake executable: trusted
+canonical paths, explicit Bedrock environment, stdin prompt, bounded output/time,
+session/resume IDs, cancellation of owned child only and ambiguous post-start
+failures. It is not wired into durable job dispatch and has no live-model proof.
+Luna now owns Codex explicit profile-pinned turn execution groundwork and synthetic
+tests; no native subscription execution is being launched.

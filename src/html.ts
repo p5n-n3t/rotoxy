@@ -29,6 +29,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     { key: "settings", label: "Settings", href: "/admin/settings" },
   ] },
   { label: "Workspaces", items: [
+    { key: "workspace", label: "Resource map", href: "/admin/workspace" },
     { key: "agents", label: "Agent workspace", href: "/admin/agents" },
     { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" },
     { key: "codex", label: "ChatGPT & Codex", href: "/admin/codex" },
