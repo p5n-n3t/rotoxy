@@ -156,3 +156,20 @@ checks exact thread ID and pins model/cwd/on-request/read-only; every turn also
 pins read-only sandbox with network disabled. No automatic approval or retry.
 Origin label is advisory until the server-side broker verifies it; therefore
 public/durable dispatch remains disabled. No real subscription task launched.
+
+## Production access repair
+
+Operator reported another chat could discover no workers. Actual liveMCP lacked
+inferenceResources because gateway1c2 was never updated. Activated CI-passed03f9986
+with private rollback backup, unchanged Funnel and CLI links corrected. LiveMCP
+now discovers8 healthy CF resources and eligible Oracle pool. Production proof
+rx-desktop-access-20261102-a completed and result retrieved via this MCP caller.
+See ../verification/2026-11-02-production-worker-access.md. Source mixedcanary all3
+complete (1.590s request overlap). Nebius encrypted onboarding+30-model catalog
+passed; no Nebius inference/automatic selection. Two$0.001 conservative CF
+verification reservations; no purchases/topups. No historical purge.
+
+Origin broker newfiles remain untracked owned delegate output, not built/committed
+or wired. Next: verify broker, integrate executor modules into durable jobs with
+server-resolved origin protection and explicit permissions; do not claim native
+subscription worker dispatch ready. Browser visual gate still unavailable.
