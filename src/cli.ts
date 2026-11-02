@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { promisify } from "node:util";
 import { Command } from "commander";
+import { formatKeyValues, formatTable } from "./cli-format.js";
 import { CredentialPool } from "./pool.js";
 import { generateAdminPassword } from "./admin-security.js";
 import { LifecycleController, OWNED_PATH, createExecFileRunner, renderCommand, type LifecyclePlan } from "./lifecycle.js";
@@ -28,6 +29,16 @@ program
 
 function store() {
   return new StateStore();
+}
+
+function safeConfig(config: GatewayConfig): GatewayConfig {
+  const safe = { ...config };
+  if (!safe.upstreamUrl) return safe;
+  try {
+    const url = new URL(safe.upstreamUrl);
+    safe.upstreamUrl = `${url.protocol}//${url.username || url.password ? "<redacted>@" : ""}${url.host}${url.pathname}`;
+  } catch { safe.upstreamUrl = "<invalid upstream URL>"; }
+  return safe;
 }
 
 async function ensureStore() {
@@ -177,16 +188,18 @@ account
     const rows = new CredentialPool(s).snapshot(state);
     if (opts.json) return console.log(JSON.stringify(rows, null, 2));
     if (!rows.length) return console.log("No accounts configured.");
-    console.table(rows.map((r) => ({
+    console.log(formatTable(rows.map((r) => ({
       id: r.id,
       label: r.label,
+      provider: r.provider,
       enabled: r.enabled,
       state: r.state,
       requests: r.requests,
       success: r.successes,
       failures: r.failures,
-      lastHTTP: r.lastStatus || "",
-    })));
+      lastHTTP: r.lastStatus,
+      lastProbeAt: r.lastProbeAt,
+    }))));
   });
 
 for (const [name, enabled] of [["enable", true], ["disable", false]] as const) {
@@ -225,13 +238,13 @@ account
     const s = await ensureStore();
     const credentialPool = new CredentialPool(s);
     const results = id ? [await credentialPool.probeAccount(id)] : await credentialPool.probeAll();
-    console.table(results.map((result) => ({
+      console.log(formatTable(results.map((result) => ({
       id: result.accountId,
       label: result.label,
       ok: result.ok,
       status: result.status || "",
       result: result.error || "healthy",
-    })));
+      }))));
     if (results.some((result) => !result.ok)) process.exitCode = 1;
   });
 
@@ -246,7 +259,7 @@ pool
     if (opts.json) console.log(JSON.stringify({ strategy: state.config.strategy, accounts: snapshot }, null, 2));
     else {
       console.log("Strategy: " + state.config.strategy);
-      console.table(snapshot.map((r) => ({ label: r.label, state: r.state, active: r.active, requests: r.requests, failures: r.failures })));
+      console.log(formatTable(snapshot.map((r) => ({ label: r.label, state: r.state, active: r.active, requests: r.requests, failures: r.failures, lastProbeAt: r.lastProbeAt }))));
     }
   });
 pool
@@ -261,17 +274,18 @@ pool
   });
 
 const config = program.command("config").description("Read or change gateway configuration");
-config.command("list").option("--json").action(async (opts) => {
+config.command("list").alias("show").option("--json", "JSON output").action(async (opts) => {
   const s = await ensureStore();
-  const cfg = (await s.load()).config;
+  const cfg = safeConfig((await s.load()).config);
   if (opts.json) console.log(JSON.stringify(cfg, null, 2));
-  else console.table(Object.entries(cfg).map(([key, value]) => ({ key, value: Array.isArray(value) ? value.join(",") : String(value) })));
+  else console.log(formatKeyValues(cfg));
 });
 config.command("get <key>").action(async (key: keyof GatewayConfig) => {
   const s = await ensureStore();
   const cfg = (await s.load()).config as any;
   if (!(key in cfg)) throw new Error("Unknown config key: " + key);
-  console.log(typeof cfg[key] === "object" ? JSON.stringify(cfg[key], null, 2) : cfg[key]);
+  const value = key === "upstreamUrl" ? safeConfig(cfg).upstreamUrl : cfg[key];
+  console.log(typeof value === "object" ? formatKeyValues(value) : String(value));
 });
 config.command("set <key> <value>").action(async (key: keyof GatewayConfig, raw: string) => {
   const s = await ensureStore();
@@ -451,7 +465,7 @@ tools.command("list").option("--json").action(async (opts) => {
     schemaDrift: t.schemaDrift,
   }));
   if (opts.json) console.log(JSON.stringify(rows, null, 2));
-  else if (rows.length) console.table(rows);
+  else if (rows.length) console.log(formatTable(rows));
   else console.log("No inventory yet. Run: rotoxy tools refresh");
 });
 function updatePolicy(s: StateStore, mutate: (policy: ToolPolicy) => void) {
@@ -473,10 +487,11 @@ tools.command("allow <name>").description("Remove a tool from the deny list").ac
   await updatePolicy(s, (p) => { p.denyTools = (p.denyTools || []).filter((n) => n !== name); });
   console.log("Allowed " + name + ".");
 });
-const policyCmd = tools.command("policy").description("Show or replace the full tool policy (JSON)");
-policyCmd.command("show").action(async () => {
+const policyCmd = tools.command("policy").description("Show or replace the full tool policy");
+policyCmd.command("show").option("--json", "JSON output").action(async (opts) => {
   const s = await ensureStore();
-  console.log(JSON.stringify((await s.load()).config.toolPolicy ?? null, null, 2));
+  const policy = (await s.load()).config.toolPolicy ?? null;
+  console.log(opts.json ? JSON.stringify(policy, null, 2) : formatKeyValues(policy));
 });
 policyCmd.command("set <file>").description("Validate and install a policy JSON file (use 'null' content to clear)").action(async (file) => {
   const s = await ensureStore();
@@ -544,12 +559,15 @@ program
   });
 
 const pools = program.command("pools").description("Multi-pool foundations (read-only preview)");
-pools.command("preview").description("Show how the current single pool maps to the validated multi-pool schema").action(async () => {
+pools.command("preview").description("Show how the current single pool maps to the validated multi-pool schema").option("--json", "JSON output").action(async (opts) => {
   const s = await ensureStore();
   try {
     const definition = migrateLegacyPool(await s.load());
-    console.log(JSON.stringify(definition, null, 2));
-    console.log("\nPreview only: state is unchanged and runtime routing still uses the single default pool.");
+    if (opts.json) console.log(JSON.stringify(definition, null, 2));
+    else {
+      console.log(formatKeyValues(definition));
+      console.log("\nPreview only: state is unchanged and runtime routing still uses the single default pool.");
+    }
   } catch (error) {
     if (error instanceof PoolSchemaError) {
       console.error("The current pool cannot be migrated as-is:");

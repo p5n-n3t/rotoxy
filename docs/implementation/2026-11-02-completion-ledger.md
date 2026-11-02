@@ -5,12 +5,16 @@ Keep this ledger current; a source commit is not a deployed milestone.
 
 ## Current checkpoint
 
-- Operator approved implementation, then asked to finish Astra-level decisions and
-  stop for a switch to Sol medium. Do not continue routine parent work past that stop.
-- Architecture is recorded; no paid test, new Claude worker, deployment or production
-  data migration has been performed in this phase.
-- Native delegate `planning_audit` (Luna) owns only gate-1 config/doctor/resource-path/
-  health code and focused tests. Parent owns contract/ledger and integration review.
+- Operator resumed implementation on Sol after the architectural pass.
+- Source checkpoint `9f7d26e`: config/doctor/health corrections, shared Oracle-aware
+  search configuration validation and UI, Cloudflare receipt/cancellation fixes,
+  and clean forwarding of CLI diagnostic failures.
+- No paid test, new Claude worker, deployment or production data migration occurred.
+- C01 build +29 focused tests; Oracle-aware resource regression 2/2;
+  E03 focused tests 10/10; control wrapper tests 11/11. Full Node suite passed 682/682
+  at `/tmp/rotoxy-completion-node-tests.log`; durable jobs passed 90/90.
+  C03 subsequent build and CLI-focused tests passed 2/2.
+- C03 readable CLI subset is locally verified. Endpoint command remains pending E01.
 - Preserve three untracked October 22 operator handoff/planning files.
 - Source baseline: `1081f424`; deployed runtime last observed: `1c2c7e99`.
 - Existing mixed Cloudflare failure remains a failed acceptance test, not a retry target.
@@ -20,12 +24,12 @@ Keep this ledger current; a source commit is not a deployed milestone.
 | ID | Owner / scope | Dependencies | Status | Required evidence |
 | --- | --- | --- | --- | --- |
 | A01 | Parent: architecture and recovery contracts | none | Decisions recorded | Contract reconciles audit with approved requirements |
-| C01 | Luna: optional upstream, canonical resource config, truthful health | A01 | In progress | Focused tests + build; no weaker private-file checks |
+| C01 | Luna/parent: optional upstream, canonical resource config, truthful health | A01 | Locally verified; not deployed | Focused tests + build; no weaker private-file checks |
 | C02 | Next implementation lead: retirement manifest/migration and active removal | C01 | Pending | Exact preview, private backup, mixed-job isolation and crash recovery tests |
-| C03 | CLI worker: shared diagnostics, human output, endpoint command | C01, E01 | Pending | Exit-code/JSON contract tests and readable installed CLI output |
+| C03 | Luna: shared diagnostics, human output; endpoint command still awaits E01 | C01, E01 | Readable views verified; endpoints pending | Exit-code/JSON contract tests and readable installed CLI output |
 | E01 | Provider worker: capability-backed endpoint directory | C01 | Pending | Scoped discovery and API isolation; no hypothetical working routes |
 | E02 | Provider worker: Nebius encrypted onboarding and model choices | E01 | Pending | Real metadata + bounded inference, separate API/job selection |
-| E03 | Provider worker: Cloudflare receipt/cancellation and canary diagnosis | C01 | Pending | Missing-marker/truncation/abort tests; new live job only |
+| E03 | Luna: Cloudflare receipt/cancellation; live canary diagnosis remains | C01 | Local receipt tests passed; live pending | Missing-marker/truncation/abort tests; new live job only |
 | W01 | Agent worker: Codex execution and server approval transport | A01, C01 | Pending | Thread/turn receipts, approvals, cancel/restart, origin protection |
 | W02 | Agent worker: Claude execution and owned-process reconciliation | A01, C01 | Pending | Bedrock task artifact, session/approval/error/recovery evidence |
 | O01 | Oracle worker: shared capacity broker, catalogs, enrollment | A01 | Pending | Direct + ROTOXY concurrency isolation; added host without code change |
@@ -49,9 +53,10 @@ Unknown pricing or an unbounded call does not consume an assumed zero budget.
 Subscription quotas and Oracle CPU work are recorded separately. Development-agent
 spending is not silently charged to this verification allowance.
 
-## Next action after model switch
+## Exact next action
 
-Use Sol medium. Retrieve C01 result, inspect its narrow diff and tests, then complete
-the C01 review. Begin C02/E01 with separate file ownership; keep runtime activation
-gated by build/CI and rollback. Implement the remaining gates continuously, update
-evidence here, and do not reconstruct earlier audits from scratch.
+C01/E03/C03 subset reviewed and locally tested. Continue C02/E01 with explicit
+ownership: retirement preview and capability-backed endpoint directory, then remaining
+worker execution/routing/UI gates. Running gateway and monitor are unchanged. No
+release activation until release/rollback and browser acceptance checks. Never kill
+the active monitor/gateway as stale workers.
