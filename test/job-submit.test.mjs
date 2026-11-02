@@ -10,7 +10,7 @@ import { buildApp } from "../dist/server.js";
 import { JOB_TOOL_DEFINITIONS, JobInputError, requiredJobScope, validateJobSubmission, validateJobToolArguments } from "../dist/job-submit.js";
 
 const ADMIN = "correct-horse-battery-staple";
-const names = ["job_submit", "job_status", "job_workers", "job_results", "job_control", "job_inbox", "job_inbox_ack"];
+const names = ["job_submit", "job_status", "job_wait", "job_workers", "job_results", "job_control", "job_inbox", "job_inbox_ack"];
 
 function validJob() {
   return {
@@ -166,7 +166,7 @@ test("job tools are scope-filtered and intercepted before upstream while ordinar
 
     const listing = await mcp(base, readOnly, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     const listed = (await listing.json()).result.tools.map((tool) => tool.name);
-    assert.deepEqual(listed, ["rotoxy_guide", "job_status", "job_workers", "job_results", "job_inbox"]);
+    assert.deepEqual(listed, ["rotoxy_guide", "job_status", "job_wait", "job_workers", "job_results", "job_inbox"]);
     assert.ok(!listed.includes("job_submit") && !listed.includes("job_control") && !listed.includes("job_inbox_ack"));
     const writerListing = await mcp(base, writer, { jsonrpc: "2.0", id: 6, method: "tools/list" });
     assert.deepEqual((await writerListing.json()).result.tools.map((tool) => tool.name), ["rotoxy_guide", ...names]);

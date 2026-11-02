@@ -86,3 +86,19 @@ test("DNS resolution observes abort and the absolute transport deadline", async 
   await assert.rejects(promise, /test_abort/);
   assert.equal(called, false);
 });
+
+test("signed-webhook header and query support is explicit and retains public-address pinning", async () => {
+  const capture={};
+  const options={resolve:async()=>[{address:"1.1.1.1",family:4}],request:fakeRequest("ok",capture)};
+  const headers={"content-type":"application/json","webhook-id":"event-1","webhook-signature":"v1,synthetic"};
+  const ordinary=createPinnedPublicProviderFetch(options);
+  await assert.rejects(ordinary("https://receiver.example/callback?binding=synthetic",{method:"POST",headers,body:"{}"}),/url_invalid/);
+  await assert.rejects(ordinary("https://receiver.example/callback",{method:"POST",headers,body:"{}"}),/headers_invalid/);
+  const webhook=createPinnedPublicProviderFetch({...options,allowQuery:true,allowedHeaders:["content-type","webhook-id","webhook-signature"]});
+  assert.equal((await webhook("https://receiver.example/callback?binding=synthetic",{method:"POST",headers,body:"{}",redirect:"error"})).status,200);
+  assert.equal(capture.options.path,"/callback?binding=synthetic");
+  assert.equal(capture.options.headers["webhook-id"],"event-1");
+  await assert.rejects(webhook("https://receiver.example/callback",{method:"POST",headers:{...headers,authorization:"Bearer not-permitted"},body:"{}"}),/headers_invalid/);
+  const privateCallback=createPinnedPublicProviderFetch({...options,allowQuery:true,allowedHeaders:["content-type"],resolve:async()=>[{address:"100.64.0.1",family:4}]});
+  await assert.rejects(privateCallback("https://receiver.example/callback",{method:"POST",body:"{}"}),/not_public/);
+});

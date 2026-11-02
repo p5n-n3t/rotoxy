@@ -1,5 +1,7 @@
 import { createAdminNavigationRouter } from "./navigation-admin.js";
 import { createEndpointDirectoryRouter } from "./endpoint-directory.js";
+import { McpJobEvents, McpJobEventsError } from "./mcp-job-events.js";
+import { JobInputError } from "./job-submit.js";
 import { createRunnerAdminRouter } from "./runner-admin.js";
 import { createOracleModelApi } from "./oracle-model-api.js";
 import { searchMcpHandler } from "./search-mcp.js";
@@ -53,9 +55,11 @@ export interface ServerOptions {
   /** Explicit path to an owner-private, credential-free provider/account mapping. */
   webToolsConfigPath?: string;
   webTools?: ConfiguredWebTools;
+  /** Opt-in until a supported ChatGPT plugin completes event subscription QA. */
+  mcpEvents?: boolean;
 }
 
-export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "supervisorConfigPath" | "oracleTools" | "webTools" | "webToolsConfigPath"> = {}) {
+export async function buildApp(store = new StateStore(), options: Pick<ServerOptions, "supervisorBackend" | "supervisorConfigPath" | "oracleTools" | "webTools" | "webToolsConfigPath" | "mcpEvents"> = {}) {
   await store.init();
   const state = await store.load();
   const sessions = new AdminSessions();
@@ -71,7 +75,18 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const codexBinary = process.env.ROTOXY_CODEX_BINARY ?? process.env.TOKEN2OAUTH_CODEX_BINARY;
   const codexProfiles = codexBinary ? new CodexProfiles({ codexBinary, configDir: store.dir }) : undefined;
   const agentWorkspace = new AgentWorkspaceService(store, options.supervisorBackend);
-  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools, { service: agentWorkspace, backend: options.supervisorBackend });
+  const jobEvents = options.mcpEvents && options.supervisorBackend ? new McpJobEvents({ store, getStatus: async (args, clientId) => {
+    const authorizationState = await store.load();
+    if (!authorizationState.oauthClients.some(client => client.clientId === clientId)) throw new McpJobEventsError(-32001, "Client authorization unavailable", "authorization_failed");
+    try { return await supervisor.callTool("job_status", args, clientId); }
+    catch (error) {
+      if (error instanceof JobInputError && ["project is not authorized for this OAuth client", "job is not available"].includes(error.message)) {
+        throw new McpJobEventsError(-32001, "Job authorization unavailable", "authorization_failed");
+      }
+      throw error;
+    }
+  } }) : undefined;
+  const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools, { service: agentWorkspace, backend: options.supervisorBackend }, jobEvents);
   const ui = new (await import("./ui.js")).AdminUi(store, pool, sessions, { oauth, telemetry });
 
   const app = express();
@@ -144,7 +159,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
     res.status(500).json({ error: "internal_error" });
   });
 
-  return { app, store, pool, telemetry, sessions, supervisor, webTools, modelGateway, codexProfiles, agentWorkspace };
+  return { app, store, pool, telemetry, sessions, supervisor, webTools, modelGateway, codexProfiles, agentWorkspace, jobEvents };
 }
 
 export async function startServer(options: ServerOptions = {}) {
@@ -156,7 +171,7 @@ export async function startServer(options: ServerOptions = {}) {
     supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)),
     store,
   }) : undefined;
-  const { app, codexProfiles, agentWorkspace } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, supervisorConfigPath: options.supervisorConfigPath, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath });
+  const { app, codexProfiles, agentWorkspace, jobEvents } = await buildApp(store, { supervisorBackend: options.supervisorBackend ?? runtime, supervisorConfigPath: options.supervisorConfigPath, oracleTools: options.oracleTools ?? (options.oraclePool ? new OracleTools({ supervisorCwd: fileURLToPath(new URL("../supervisor/", import.meta.url)) }) : undefined), webToolsConfigPath: options.webToolsConfigPath, mcpEvents: options.mcpEvents ?? process.env.ROTOXY_MCP_EVENTS_ENABLED === "1" });
   const host = options.host || process.env.TOKEN2OAUTH_HOST || "127.0.0.1";
   const port = options.port || Number(process.env.TOKEN2OAUTH_PORT || 2030);
 
@@ -182,6 +197,8 @@ export async function startServer(options: ServerOptions = {}) {
 
   const workspaceReconciler = options.supervisorBackend || runtime ? agentWorkspace.createReconciler() : undefined;
   workspaceReconciler?.start();
+  jobEvents?.start();
+  server.once("close", () => { void jobEvents?.stop().catch(() => undefined); });
   server.once("close", () => { workspaceReconciler?.stop(); });
   if (codexProfiles) server.once("close", () => { void codexProfiles.close(); });
   if (runtime) server.once("close", () => { void runtime.close(); });

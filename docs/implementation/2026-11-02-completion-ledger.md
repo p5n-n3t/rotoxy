@@ -198,3 +198,25 @@ durable public dispatch path. Latest source changes are not deployed. Next is
 durable executor integration and origin-binding routes, then full mixed-pool,
 restart/worker-loss and browser acceptance; never mark the overall plan finished
 from these focused tests alone.
+
+## Worker-feedback delivery upgrade
+
+The operator correctly identified that inbox persistence alone does not tell a
+dormant originating agent when work changes. Live Oracle completion events were
+retrieved from the inbox, but the legacy monitor has no Oracle event-to-native
+delivery path. No automatic resumption is claimed for that monitor.
+
+Official MCP Events documentation now describes an event-driven ChatGPT Work/Cloud
+plugin path. This supersedes blanket statements that ChatGPT cannot respond to
+MCP-originated events. Added opt-in source support for `events/list`, subscribe and
+unsubscribe, encrypted subscriptions, public pinned callbacks, signed verification
+and delivery, durable outbox/receipts, secret rotation, access rechecks and epoch
+revocation. Added read-scoped `job_wait` for active callers, with slow-sibling and
+guidance handling. Updated portable MCP guide and optional skill together.
+
+TypeScript build passed. Integrated focused suite passed38/38; subsequently added
+real-disk restart case passed with the entire event suite10/10. No live callback
+or resulting ChatGPT turn has been observed. Environment opt-in is currently off
+on the live03f9986 gateway. `6c95d76` is pushed and full CI41439361329 passed.
+New feedback code awaits its own commit/CI/activation and actual supported-client
+subscription test. Details: `../architecture/worker-feedback.md`.

@@ -139,6 +139,38 @@ function boundedJson(value: unknown, max = 1_048_576): unknown {
   if (Buffer.byteLength(JSON.stringify(value)) > max) throw new JobInputError("supervisor response exceeds configured bounds");
   return value;
 }
+function statusFingerprint(row: Record<string, unknown>): string {
+  // Hash only state/identity metadata so prompts and task outputs never enter the token.
+  const tasks = Array.isArray(row.tasks) ? row.tasks.map((item) => {
+    if (!object(item)) return null;
+    const selected: Record<string, unknown> = {};
+    for (const key of ["taskId", "task_id", "state", "status", "errorClass", "providerStatus", "generation", "updatedAt", "updated_at"]) {
+      const value = item[key];
+      if (typeof value === "string" && value.length <= 256 || typeof value === "number" && Number.isSafeInteger(value)) selected[key] = value;
+    }
+    return selected;
+  }) : [];
+  const metadata: Record<string, unknown> = { tasks };
+  for (const key of ["assignmentId", "projectId", "state", "status", "revision", "updatedAt", "updated_at"]) {
+    const value = row[key];
+    if (typeof value === "string" && value.length <= 256 || typeof value === "number" && Number.isSafeInteger(value)) metadata[key] = value;
+  }
+  return createHash("sha256").update(JSON.stringify(metadata)).digest("hex");
+}
+function hasTerminalJobState(row: Record<string, unknown>): boolean {
+  const terminal = new Set(["complete", "completed", "failed", "cancelled", "canceled", "blocked", "ambiguous", "held", "emergency_stopped"]);
+  const state = String(row.state ?? row.status ?? "").toLowerCase();
+  if (terminal.has(state)) return true;
+  return Array.isArray(row.tasks) && row.tasks.some((item) => {
+    if (!object(item)) return false;
+    const taskState = String(item.state ?? item.status ?? "").toLowerCase();
+    // A finished sibling must not make every later wait return immediately
+    // while slower siblings are still running. Changes are reported by the
+    // fingerprint; unresolved blockers remain immediately actionable.
+    return terminal.has(taskState) && !["complete", "completed"].includes(taskState) ||
+      ["needs_approval", "needs_instructions"].includes(taskState);
+  });
+}
 function nativeLightSprintTarget(url: string): boolean {
   try {
     const actual = new URL(url);
@@ -292,6 +324,8 @@ export class SupervisorRuntime implements SupervisorBackend {
   private inferenceSnapshotCache?: { at: number; value: Map<string, InferenceResourceSnapshot> };
   private readonly cloudflareCatalogCache = new Map<string, { at: number; models: Set<string>; valid: boolean }>();
   private oracleRefreshAttemptAt = 0;
+  private activeJobWaiters = 0;
+  private readonly maxJobWaiters = 8;
 
   constructor(private config: SupervisorRuntimeConfig, private readonly options: SupervisorRuntimeOptions) {
     this.supervisorCwd = options.supervisorCwd ?? resolve(process.cwd(), "supervisor");
@@ -886,6 +920,50 @@ export class SupervisorRuntime implements SupervisorBackend {
       const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${args.jobId}`, undefined, readOwner));
       if (row.projectId !== project.projectId) throw new JobInputError("job is not available");
       return boundedJson(row);
+    }
+    if (name === "job_wait") {
+      if (!safeId(args.jobId)) throw new JobInputError("jobId is invalid");
+      if (this.activeJobWaiters >= this.maxJobWaiters) throw new JobInputError("job_wait capacity is full; retry with job_status");
+      this.activeJobWaiters++;
+      try {
+        const timeoutSeconds = args.timeoutSeconds === undefined ? 15 : Number(args.timeoutSeconds);
+        const deadline = Date.now() + timeoutSeconds * 1000;
+        const maxReads = timeoutSeconds + 1;
+        let reads = 0;
+        let last: Record<string, unknown>;
+        let fingerprint: string;
+        const readAuthorizedStatus = async () => {
+          // Recheck owner policy and shared Fleet consent before every bridge read.
+          await this.authorizeWorkspace(caller.projectId, caller.clientId);
+          const currentProject = this.config.projects.find((row) => row.projectId === caller.projectId);
+          if (!currentProject || args.projectId !== currentProject.projectId) throw new JobInputError("project is not authorized for this OAuth client");
+          const shared = this.config.sharedWorkspace?.projectId === currentProject.projectId && await this.consentedSharedClient(caller.clientId);
+          const currentOwner = this.owner(caller);
+          const currentReadOwner = shared ? { ...currentOwner, sharedProject: currentProject.projectId } : currentOwner;
+          const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${args.jobId}`, undefined,
+            { ...currentReadOwner, timeoutMs: Math.max(1, Math.min(15000, deadline - Date.now())) }));
+          if (row.projectId !== currentProject.projectId) throw new JobInputError("job is not available");
+          return row;
+        };
+        last = await readAuthorizedStatus();
+        reads++;
+        fingerprint = statusFingerprint(last);
+        if (hasTerminalJobState(last)) return boundedJson({ projectId: project.projectId, jobId: args.jobId, waitState: "terminal", snapshot: fingerprint, status: last });
+        if (args.snapshot !== undefined && args.snapshot !== fingerprint) return boundedJson({ projectId: project.projectId, jobId: args.jobId, waitState: "changed", snapshot: fingerprint, status: last });
+        const baseline = fingerprint;
+        while (Date.now() < deadline && reads < maxReads) {
+          await new Promise<void>((resolve) => setTimeout(resolve, Math.min(1000, Math.max(1, deadline - Date.now()))));
+          if (Date.now() >= deadline) break;
+          last = await readAuthorizedStatus();
+          reads++;
+          fingerprint = statusFingerprint(last);
+          if (hasTerminalJobState(last)) return boundedJson({ projectId: project.projectId, jobId: args.jobId, waitState: "terminal", snapshot: fingerprint, status: last });
+          if (fingerprint !== baseline) return boundedJson({ projectId: project.projectId, jobId: args.jobId, waitState: "changed", snapshot: fingerprint, status: last });
+        }
+        return boundedJson({ projectId: project.projectId, jobId: args.jobId, waitState: "timeout", snapshot: fingerprint, status: last });
+      } finally {
+        this.activeJobWaiters--;
+      }
     }
     if (name === "job_results") {
       if (!safeId(args.jobId)) throw new JobInputError("jobId is invalid");

@@ -1,4 +1,4 @@
-export const JOB_TOOLS = ["job_submit", "job_status", "job_workers", "job_results", "job_control", "job_inbox", "job_inbox_ack"] as const;
+export const JOB_TOOLS = ["job_submit", "job_status", "job_wait", "job_workers", "job_results", "job_control", "job_inbox", "job_inbox_ack"] as const;
 export type JobToolName = typeof JOB_TOOLS[number];
 export type JobScope = "jobs:read" | "jobs:write";
 
@@ -208,6 +208,11 @@ export const JOB_TOOL_DEFINITIONS = [
       } } },
   }, ["schemaVersion", "jobId", "idempotencyKey", "projectId", "eligibleAccountIds", "tasks"]),
   tool("job_status", "Read one job's state for an authorized project.", { projectId: jobKey, jobId: jobKey }, ["projectId", "jobId"]),
+  tool("job_wait", "Wait briefly for an authorized job's durable status to change. Uses status reads only; it does not wake or resume workers.", {
+    projectId: jobKey, jobId: jobKey,
+    timeoutSeconds: { type: "integer", minimum: 1, maximum: 20, default: 15 },
+    snapshot: { type: "string", pattern: "^[a-f0-9]{64}$", description: "Opaque status fingerprint from a previous job_wait response; never an authorization token." },
+  }, ["projectId", "jobId"]),
   tool("job_workers", "Read bounded worker/account observations for an authorized project.", { projectId: jobKey }, ["projectId"]),
   tool("job_results", "Read bounded results for an authorized job/task.", { projectId: jobKey, jobId: jobKey, taskId: jobKey }, ["projectId", "jobId"]),
   tool("job_control", "Apply an allowlisted durable pause, stop, resume, cancellation, or revision-fenced reconciliation. Reconcile observes an existing session or performs one read-only task-scoped session lookup after an ambiguous fresh launch; it never relaunches work.", { projectId: jobKey, action: { type: "string", enum: ["pause_dispatch", "resume_dispatch", "emergency_stop", "cancel_job", "reconcile_task"] }, jobId: jobKey, taskId: jobKey, expectedRevision: { type: "integer", minimum: 1 } }, ["projectId", "action"]),
@@ -229,13 +234,21 @@ export function validateJobToolArguments(name: JobToolName, value: unknown): unk
   if (name === "job_submit") return validateJobSubmission(value);
   if (!object(value)) throw new JobInputError("tool arguments must be an object");
   const allowed: Record<Exclude<JobToolName, "job_submit">, string[]> = {
-    job_status: ["projectId", "jobId"], job_workers: ["projectId"], job_results: ["projectId", "jobId", "taskId"],
+    job_status: ["projectId", "jobId"], job_wait: ["projectId", "jobId", "timeoutSeconds", "snapshot"], job_workers: ["projectId"], job_results: ["projectId", "jobId", "taskId"],
     job_control: ["projectId", "action", "jobId", "taskId", "expectedRevision"], job_inbox: ["projectId", "after", "limit"],
     job_inbox_ack: ["projectId", "eventId"],
   };
   only(value, allowed[name], name);
   id(value.projectId, "projectId");
-  if (name === "job_status" || name === "job_results") id(value.jobId, "jobId");
+  if (name === "job_status" || name === "job_wait" || name === "job_results") id(value.jobId, "jobId");
+  if (name === "job_wait") {
+    if (value.timeoutSeconds !== undefined && (!Number.isInteger(value.timeoutSeconds) || Number(value.timeoutSeconds) < 1 || Number(value.timeoutSeconds) > 20)) {
+      throw new JobInputError("timeoutSeconds must be an integer from 1 to 20");
+    }
+    if (value.snapshot !== undefined && (typeof value.snapshot !== "string" || !/^[a-f0-9]{64}$/.test(value.snapshot))) {
+      throw new JobInputError("snapshot must be an opaque status fingerprint");
+    }
+  }
   if (name === "job_results" && value.taskId !== undefined) id(value.taskId, "taskId");
   if (name === "job_control") {
     if (!["pause_dispatch", "resume_dispatch", "emergency_stop", "cancel_job", "reconcile_task"].includes(String(value.action))) throw new JobInputError("unsupported control action");

@@ -35,13 +35,17 @@ export interface PublicProviderHttpOptions {
   timeoutMs?: number;
   /** Opt in only for metadata-only catalog GETs; POST remains the default contract. */
   allowGet?: boolean;
+  /** Trusted service configuration only; used by signed webhook delivery. */
+  allowedHeaders?: readonly string[];
+  /** Webhook callbacks may carry a query; provider endpoints default to none. */
+  allowQuery?: boolean;
 }
 export function createPinnedPublicProviderFetch(options: PublicProviderHttpOptions = {}): typeof fetch {
   const resolve = options.resolve ?? (async host => dnsLookup(host, { all: true, verbatim: true }));
   const requestImpl = options.request ?? httpsRequest;
   return async (input, init = {}) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
-    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.port && url.port !== "443") throw new TypeError("provider_url_invalid");
+    if (url.protocol !== "https:" || url.username || url.password || url.search && !options.allowQuery || url.hash || url.port && url.port !== "443") throw new TypeError("provider_url_invalid");
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(new Error("provider_timeout")), options.timeoutMs ?? 60_000);
     const signal = init.signal ? AbortSignal.any([init.signal, deadline.signal]) : deadline.signal;
@@ -68,7 +72,8 @@ export function createPinnedPublicProviderFetch(options: PublicProviderHttpOptio
     if (method === "GET" && init.body !== undefined && init.body !== null) throw new TypeError("method_invalid");
     if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
     const headers = new Headers(init.headers);
-    if ([...headers.keys()].some(name => !["authorization", "content-type", "accept"].includes(name.toLowerCase()))) throw new TypeError("headers_invalid");
+    const allowedHeaders = options.allowedHeaders ?? ["authorization", "content-type", "accept"];
+    if ([...headers.keys()].some(name => !allowedHeaders.includes(name.toLowerCase()))) throw new TypeError("headers_invalid");
     const response = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }>((resolveResponse, reject) => {
       let request: ClientRequest;
       const requestOptions: RequestOptions = {

@@ -101,6 +101,12 @@ Assign explicit path: or record: scope keys to every task before submission. Dis
 
   recovery: `ROTOXY gateway guide v2 — recovery
 
+## Receiving worker changes
+For an active caller, use job_wait when it is advertised: supply projectId/jobId and optionally the previous snapshot. The server waits briefly using ordinary status reads and returns changed, terminal/actionable, or timeout. A wait timeout means no observed change; it does not cancel the worker or prove a crash. Read job_results and validate artifacts after completion. A finished sibling does not finish the whole job.
+For supported ChatGPT Work/Cloud plugins, an events capability and events/list can expose rotoxy.job.changed. The user must create a subscription and choose the response behavior. Signed callback delivery can trigger the subscribed workflow; ordinary MCP login does not create that subscription. Do not claim this path verified until actual subscription, delivery and client response are observed. See https://developers.openai.com/plugins/build/mcp-events.
+For other clients, use supported headless resumption only with an explicit trusted session binding and execution receipt. Otherwise retain the durable job inbox and handoff. OS notifications alone do not resume a chat. Never inject text into an unrelated terminal or browser.
+For slow Oracle calls, distinguish queued, awaiting response, completion evidence, and an ambiguous timeout. No provider progress heartbeat means progress is unobserved, not failed. Split long work into bounded checkpointed chunks; never replay an ambiguous chunk just because a deadline expired.
+
 ## Idle ≠ completed
 A session state of idle does not confirm task completion. Inspect provider errors and retrieve the requested output artifact before marking a task complete. Idle is an intermediate state, not a success state.
 

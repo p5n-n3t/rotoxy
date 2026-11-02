@@ -2,6 +2,7 @@ import { AgentWorkspaceError, ALL_AGENT_WORKSPACE_TOOL_DEFINITIONS, isAgentWorks
 import { isWorkspaceExecutionToolName, WorkspaceExecutionError } from "./workspace-execution.js";
 import { ONBOARDING_TOOL_NAME, ONBOARDING_TOOL_DEFINITION, callOnboardingTool, OnboardingInputError } from "./agent-onboarding.js";
 import type { SupervisorBackend } from "./supervisor-api.js";
+import { McpJobEventsError, type McpJobEvents } from "./mcp-job-events.js";
 import { OracleTools, OracleToolError, ORACLE_TOOL_DEFINITIONS, isOracleToolName, oracleToolRequiredScope } from "./oracle-tools.js";
 import { Readable, Transform, pipeline } from "node:stream";
 import type { Request, Response } from "express";
@@ -172,6 +173,7 @@ export class McpProxy {
     private readonly oracle?: OracleTools,
     private readonly webTools?: ConfiguredWebTools,
     private readonly workspace?: { service: AgentWorkspaceService; backend?: SupervisorBackend },
+    private readonly jobEvents?: Pick<McpJobEvents, "call">,
   ) {}
 
   handler = async (req: Request, res: Response) => {
@@ -195,6 +197,35 @@ export class McpProxy {
         message: input.message,
       });
     };
+
+    // Event callbacks contain signing secrets: handle locally without forwarding
+    // to an upstream, and return only fixed, non-sensitive protocol errors.
+    const eventRequests = rpc?.messages.filter(message => message.method?.startsWith("events/")) ?? [];
+    if (eventRequests.length) {
+      if (rpc!.batch || eventRequests.length !== 1 || rpc!.messages.length !== 1) {
+        return res.status(400).json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Event methods require one request" } });
+      }
+      const message = eventRequests[0]!;
+      const scopes = new Set(claims?.scope?.split(/\s+/) ?? []);
+      if (!claims?.client_id || !scopes.has("mcp") || !scopes.has("jobs:read")) {
+        return res.status(403).json({ jsonrpc: "2.0", id: message.id ?? null, error: { code: -32001, message: "MCP and jobs:read authorization required" } });
+      }
+      if (!this.jobEvents || !["events/list", "events/subscribe", "events/unsubscribe"].includes(message.method ?? "")) {
+        return res.status(200).json({ jsonrpc: "2.0", id: message.id ?? null, error: { code: -32601, message: "Event method is unavailable" } });
+      }
+      if (message.id === undefined || message.id === null) return res.status(400).json({ error: "event_request_id_required" });
+      try {
+        const result = await this.jobEvents.call(message.method as "events/list" | "events/subscribe" | "events/unsubscribe", message.params, claims.client_id);
+        record({ status: 200, attempts: 0 });
+        return res.status(200).json({ jsonrpc: "2.0", id: message.id, result });
+      } catch (error) {
+        const code = error instanceof McpJobEventsError ? error.code : -32603;
+        const reason = error instanceof McpJobEventsError && ["challenge_failed", "timeout", "authorization_failed", "capacity"].includes(error.reason ?? "") ? error.reason : undefined;
+        const message = code === -32602 ? "Event subscription parameters are invalid" : code === -32001 ? "Job permission is missing or expired" : code === -32015 ? "Callback verification failed" : code === -32000 ? "Event subscription capacity reached" : "Event service is unavailable";
+        record({ status: 200, attempts: 0, errorClass: "event-request-rejected" });
+        return res.status(200).json({ jsonrpc: "2.0", id: eventRequests[0]!.id, error: { code, message, ...(reason ? { data: { reason } } : {}) } });
+      }
+    }
 
     // Gateway-local jobs are intercepted after OAuth authentication and before
     // policy/pool selection. Exact names never fall through to an upstream.
@@ -390,6 +421,25 @@ export class McpProxy {
           if (observeProtocolResponse) this.pool.bindSession(affinityKey, account.id);
           else await this.pool.success(account.id, upstream.status, affinityKey);
           const contentType = upstream.headers.get("content-type");
+
+          if (this.jobEvents && rpc && !rpc.batch && rpc.messages.length === 1 && rpc.messages[0]?.method === "initialize" &&
+              claims?.scope?.split(/\s+/).includes("mcp") && claims.scope.split(/\s+/).includes("jobs:read")) {
+            const buffered = await readBodyLimited(upstream, MAX_FILTERED_RESPONSE_BYTES);
+            const rewritten = buffered === undefined ? undefined : rewriteServerBody(contentType, buffered.toString("utf8"), payload => {
+              const addEvents = (message: any) => {
+                if (message.id === rpc.messages[0]!.id && message.result && typeof message.result === "object" && !Array.isArray(message.result)) {
+                  message.result.capabilities = { ...message.result.capabilities, events: {} };
+                }
+                return message;
+              };
+              return Array.isArray(payload) ? payload.map(addEvents) : addEvents(payload);
+            });
+            if (rewritten === undefined) return res.status(502).json({ error: "mcp_initialization_response_invalid" });
+            copyResponseHeaders(upstream.headers, res);
+            res.removeHeader("content-length");
+            record({ accountId: account.id, status: upstream.status, attempts });
+            return res.status(upstream.status).send(rewritten);
+          }
 
           if (wantsToolsList && req.method !== "HEAD") {
             await this.sendFiltered(res, upstream, policy, rpc!, localJobTools);
@@ -655,7 +705,7 @@ export class McpProxy {
       record({ status: 200, attempts: 0 });
       res.status(200).json({ jsonrpc: "2.0", id: message.id, result: {
         protocolVersion,
-        capabilities: { tools: { listChanged: false } },
+        capabilities: { tools: { listChanged: false }, ...(this.jobEvents && ["mcp", "jobs:read"].every(scope => ((res.locals as any).oauthClaims?.scope?.split(/\s+/) ?? []).includes(scope)) ? { events: {} } : {}) },
         serverInfo: { name: "ROTOXY", version: "0.2.0" },
         instructions: "ROTOXY provides pooled tools and durable agent coordination. Discover tools/list and use only tools and projects authorized for this client. For delegated work, discover project resources, split useful independent tasks with explicit ownership and dependencies, then submit a bounded job using a stable idempotency key. Choose workers by demonstrated capability, available capacity and budget; do not launch workers simply to fill slots. Preserve account/session affinity and do not retry ambiguous mutations. Keep project/job IDs, read durable status, results and incident inbox, and validate artifacts before reporting completion. Idle does not mean completed; provider execution errors override idle. Workspace messages are ledger records, not proof of native provider delivery. Desktop alerts do not wake a dormant chat. Leave an actionable checkpoint when yielding. Call rotoxy_guide (topic: start | dispatch | recovery | providers | collaboration) for the current gateway guide. The optional rotoxy-orchestrate skill provides the fuller workflow.",
       } });
