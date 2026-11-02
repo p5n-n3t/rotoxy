@@ -20,11 +20,13 @@ test("inferenceRequest accepts only the durable bounded outbox shape", () => {
 });
 
 test("Cloudflare inference pins the credential and retains marker and usage provenance", async () => {
-  let account;
+  let account, forwardedSignal;
+  const controller = new AbortController();
   const adapter = new InferenceJobsAdapter({
     now: () => 123_000,
-    cloudflare: { runForAccountWithReceipt: async (id, input) => {
+    cloudflare: { runForAccountWithReceipt: async (id, input, signal) => {
       account = id;
+      forwardedSignal = signal;
       assert.equal(input.model, "@cf/meta/model");
       assert.equal(input.input.max_tokens, 100);
       assert.match(input.input.prompt, /final nonempty line: DONE/);
@@ -32,8 +34,9 @@ test("Cloudflare inference pins the credential and retains marker and usage prov
         result: { success: true, result: { response: "Answer\nDONE", usage: { prompt_tokens: 4, completion_tokens: 7, total_tokens: 11 } } } };
     } },
   });
-  const result = await adapter.invoke({ ...inferenceRequest(operation("cloudflare", "@cf/meta/model")), accountId: "CloudflareCred_1234" });
+  const result = await adapter.invoke({ ...inferenceRequest(operation("cloudflare", "@cf/meta/model")), accountId: "CloudflareCred_1234" }, controller.signal);
   assert.equal(account, "CloudflareCred_1234");
+  assert.equal(forwardedSignal, controller.signal);
   assert.equal(result.classification, "accepted");
   assert.equal(result.value.reportedModel, null);
   assert.equal(result.value.modelEvidence, "pinned_endpoint");
@@ -42,6 +45,27 @@ test("Cloudflare inference pins the credential and retains marker and usage prov
   assert.equal(result.value.providerUsage.completion_tokens, 7);
   assert.equal(result.value.requestStartedAt, 123);
   assert.equal(result.value.assistantAt, 123);
+});
+
+test("Cloudflare completion requires the exact final marker and a non-truncated finish", async () => {
+  const invoke = (response) => new InferenceJobsAdapter({
+    cloudflare: { runForAccountWithReceipt: async (id) => ({ credentialId: id,
+      providerAccountId: "0123456789abcdef0123456789abcdef",
+      result: { success: true, result: response } }) },
+  }).invoke({ ...inferenceRequest(operation("cloudflare", "@cf/meta/model")), accountId: "CloudflareCred_1234" });
+
+  const missing = await invoke({ response: "A generic greeting with no requested marker" });
+  assert.equal(missing.classification, "ambiguous");
+  assert.equal(missing.reason, "cloudflare_completion_marker_missing");
+  const wrongFinalLine = await invoke({ response: "Useful result\nDONE extra" });
+  assert.equal(wrongFinalLine.classification, "ambiguous");
+  assert.equal(wrongFinalLine.reason, "cloudflare_completion_marker_missing");
+  const truncated = await invoke({ response: "Answer\nDONE\n", finish_reason: "length" });
+  assert.equal(truncated.classification, "ambiguous");
+  assert.equal(truncated.reason, "cloudflare_response_truncated");
+  const complete = await invoke({ response: "Answer\nDONE\n\n", finish_reason: "stop" });
+  assert.equal(complete.classification, "accepted");
+  assert.equal(complete.value.terminationEvidence, "expected_marker");
 });
 
 test("Oracle inference uses a fixed private origin, secured token file, and provider finish evidence", async () => {

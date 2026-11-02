@@ -1,5 +1,10 @@
 # Current delivery — 2026-10-23
 
+> Historical checkpoint. For work approved on 2026-11-02, use the
+> [completion contract](../design/2026-11-02-completion-contract.md) and
+> [live implementation ledger](../implementation/2026-11-02-completion-ledger.md).
+> The runtime and release claims below describe October 23, not current readiness.
+
 The operator resumed implementation on October 23. Historical pause files are
 recovery evidence and do not override that resume. Use the current Git state and
 this file before starting another assignment.

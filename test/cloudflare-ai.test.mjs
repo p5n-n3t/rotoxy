@@ -183,3 +183,30 @@ test("Cloudflare job inference pins a credential and returns provider-account at
   assert.deepEqual(receipt.result.result, { response: "Answer\nDONE" });
   await credentials.updateCredential(first.id, { enabled: false });
 });
+
+test("pinned Cloudflare job inference propagates abort and preserves ambiguous single-send outcome", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "t2o-cloudflare-job-abort-"));
+  const oldHome = process.env.HOME, oldConfig = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.HOME = join(root, "home"); process.env.TOKEN2OAUTH_CONFIG_DIR = join(root, "config");
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = oldConfig;
+  });
+  const store = new StateStore(); await store.init({ adminPassword: "temporary-cloudflare-abort-test" });
+  const credentials = new CloudflareCredentialStore(store);
+  const model = "@cf/meta/llama-3.1-8b-instruct";
+  const account = await credentials.addCredential({ label: "abort", accountId: "d".repeat(32), token: "secret-token-abort", allowedModels: [model] });
+  let calls = 0, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const adapter = new CloudflareAIAdapter(credentials, { timeoutMs: 5000, fetch: async (_url, init) => {
+    calls++; entered();
+    return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true }));
+  } });
+  const controller = new AbortController();
+  const pending = adapter.runForAccountWithReceipt(account.id, { model, input: { prompt: "bounded request", max_tokens: 10 } }, controller.signal);
+  await started;
+  controller.abort();
+  await assert.rejects(pending, error => error instanceof CloudflareAIError && error.code === "upstream_ambiguous");
+  assert.equal(calls, 1, "an aborted dispatched inference is not retried");
+});

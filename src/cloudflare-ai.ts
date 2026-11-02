@@ -248,10 +248,13 @@ export class CloudflareAIAdapter {
     } catch (error) { release(); throw error; }
   }
 
-  private async request(account: { view: CloudflareCredentialView; token: string }, path: string, method: "GET" | "POST", body?: unknown, responseLimit = MAX_INFERENCE_BYTES, timeoutMs = this.timeoutMs): Promise<unknown> {
+  private async request(account: { view: CloudflareCredentialView; token: string }, path: string, method: "GET" | "POST", body?: unknown, responseLimit = MAX_INFERENCE_BYTES, timeoutMs = this.timeoutMs, parentSignal?: AbortSignal): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const abort = () => controller.abort();
+    parentSignal?.addEventListener("abort", abort, { once: true });
     try {
+      if (parentSignal?.aborted) controller.abort();
       const response = await this.fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${account.view.accountId}${path}`, {
         method, signal: controller.signal, redirect: "error",
         headers: { authorization: `Bearer ${account.token}`, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
@@ -286,7 +289,10 @@ export class CloudflareAIAdapter {
     } catch (error) {
       if (error instanceof CloudflareAIError) throw error;
       throw new CloudflareAIError("upstream_ambiguous");
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", abort);
+    }
   }
 
   async listModels(accountId?: string, maxPages = 20): Promise<unknown> {
@@ -334,11 +340,11 @@ export class CloudflareAIAdapter {
   }
 
   /** Execute on one exact persisted credential; task/account affinity is never silently rerouted. */
-  async runForAccount(accountId: string, input: CloudflareInferenceInput): Promise<unknown> {
-    return (await this.runForAccountWithReceipt(accountId, input)).result;
+  async runForAccount(accountId: string, input: CloudflareInferenceInput, signal?: AbortSignal): Promise<unknown> {
+    return (await this.runForAccountWithReceipt(accountId, input, signal)).result;
   }
 
-  async runForAccountWithReceipt(accountId: string, input: CloudflareInferenceInput): Promise<{ result: unknown; credentialId: string; providerAccountId: string }> {
+  async runForAccountWithReceipt(accountId: string, input: CloudflareInferenceInput, signal?: AbortSignal): Promise<{ result: unknown; credentialId: string; providerAccountId: string }> {
     if (typeof accountId !== "string" || !/^[A-Za-z0-9_-]{8,80}$/.test(accountId) ||
         !input || !validModel(input.model) || !input.input || typeof input.input !== "object" || Array.isArray(input.input)) {
       throw new CloudflareAIError("invalid_request");
@@ -348,11 +354,11 @@ export class CloudflareAIAdapter {
     if (Buffer.byteLength(json, "utf8") > 1_000_000) throw new CloudflareAIError("invalid_request");
     const account = await this.acquire(input.model, accountId);
     if (account.view.id !== accountId) { account.release(); throw new CloudflareAIError("no_eligible_account"); }
-    const result = await this.runWithAccount(account, input);
+    const result = await this.runWithAccount(account, input, signal);
     return { result, credentialId: account.view.id, providerAccountId: account.view.accountId };
   }
 
-  private async runWithAccount(account: { view: CloudflareCredentialView; token: string; release: () => void }, input: CloudflareInferenceInput): Promise<unknown> {
+  private async runWithAccount(account: { view: CloudflareCredentialView; token: string; release: () => void }, input: CloudflareInferenceInput, signal?: AbortSignal): Promise<unknown> {
     const started = this.now();
     let status = "failed";
     let usage: Record<string, number> | undefined;
@@ -363,7 +369,7 @@ export class CloudflareAIAdapter {
         requestInput.max_tokens = Math.min(Number(requestInput.max_tokens), this.maxTokens);
       }
       const encodedModel = input.model.split("/").map((part) => encodeURIComponent(part)).join("/");
-      const response = await this.request(account, `/ai/run/${encodedModel}`, "POST", requestInput);
+      const response = await this.request(account, `/ai/run/${encodedModel}`, "POST", requestInput, MAX_INFERENCE_BYTES, this.timeoutMs, signal);
       const raw = (response as any)?.result?.usage;
       if (raw && typeof raw === "object") {
         usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens", "neurons"].filter(key => typeof raw[key] === "number" && Number.isFinite(raw[key]) && raw[key] >= 0).map(key => [key, raw[key]]));

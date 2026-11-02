@@ -302,5 +302,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     else if (action === 'status') result = await controller.status();
     else result = controller.installPlan();
     console.log(JSON.stringify(result, null, 2));
-  } catch (error) { console.error(error?.message || error); process.exitCode = 1; }
+  } catch (error) {
+    // A forwarded CLI already owns its diagnostics on inherited stdout/stderr.
+    // Preserve its exit status without appending execFileSync's command dump.
+    if (Number.isInteger(error?.status) && error.status > 0 && error.status <= 255) process.exitCode = error.status;
+    else { console.error(error?.signal ? `ROTOXY command stopped by ${error.signal}` : (error?.message || error)); process.exitCode = 1; }
+  }
 }

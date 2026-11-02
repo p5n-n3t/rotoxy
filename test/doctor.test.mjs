@@ -60,6 +60,16 @@ test("missing probes are incomplete and do not imply health", () => {
   assert.ok(report.stageChecks.every((check) => check.status === "unverified"));
 });
 
+test("an absent optional upstream does not make otherwise valid configuration invalid", () => {
+  const snapshot = healthySnapshot();
+  delete snapshot.config.upstreamUrl;
+  const report = diagnoseDoctorSnapshot(snapshot);
+  assert.equal(report.stageChecks.find((check) => check.stage === "config").status, "passed");
+
+  snapshot.config.upstreamUrl = "not a URL";
+  assert.ok(findingIds(snapshot).includes("config.invalid"));
+});
+
 test("evaluates cooldowns against the timestamp in the same credential snapshot", () => {
   const snapshot = healthySnapshot();
   snapshot.credentials.accounts[0].state = "cooldown";
@@ -145,7 +155,7 @@ test("detects only conflicting exact Funnel paths and preserves root plus subpat
 
 test("creates previews only for allowlisted, preconditioned repairs", () => {
   const snapshot = healthySnapshot();
-  snapshot.config.upstreamUrl = "";
+  snapshot.config.upstreamUrl = "file:///etc/passwd";
   snapshot.funnel.mounts = [{ path: "/", targetHost: "127.0.0.1", targetPort: 2025 }];
   snapshot.credentials.accounts = [{ id: "acct-off", enabled: false, secretAvailable: true, state: "disabled" }];
   const beforePlanning = structuredClone(snapshot);
@@ -169,7 +179,7 @@ test("creates previews only for allowlisted, preconditioned repairs", () => {
 
 test("blocks Funnel repair on a collision and rejects unsafe target URLs", () => {
   const snapshot = healthySnapshot();
-  snapshot.config.upstreamUrl = "";
+  snapshot.config.upstreamUrl = "file:///etc/passwd";
   snapshot.funnel.mounts.push({ path: "/token2oauth", targetPort: 9999 });
   const [urlPlan, mountPlan] = planDoctorRepairs(snapshot, [
     { action: "set-upstream-url", value: "https://user:password@provider.example/mcp" },

@@ -164,3 +164,17 @@ test('manual Funnel lifecycle preserves exposure across backend restarts without
   assert.doesNotMatch(unit,/^(Requires|BindsTo|WantedBy)=/m);
   assert.match(unit,/^Restart=no$/m);
 });
+
+test('forwarded diagnostic failure preserves exit status without a second command dump', async () => {
+  const {mkdir, writeFile} = await import('node:fs/promises');
+  const {spawnSync} = await import('node:child_process');
+  const prefix = join(isolatedHome, 'forwarded-cli');
+  await mkdir(join(prefix, 'dist'), {recursive:true});
+  await writeFile(join(prefix, 'dist/cli.js'), 'console.error("Configuration needs attention"); process.exitCode = 2;');
+  const result = spawnSync(process.execPath, [new URL('../scripts/rotoxy-control.mjs',import.meta.url).pathname,'doctor'], {
+    encoding:'utf8', env:{...process.env, ROTOXY_PREFIX:prefix}, timeout:10000,
+  });
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr.trim(), 'Configuration needs attention');
+  assert.equal(result.stdout, '');
+});

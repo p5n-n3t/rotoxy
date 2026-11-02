@@ -64,7 +64,8 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const oauth = new OAuthService(store, sessions);
   const modelGateway = createModelGateway(store);
   const supervisor = new SupervisorApi(options.supervisorBackend);
-  const webTools = options.webTools ?? liveWebToolsConfig(options.webToolsConfigPath ?? join(store.dir, "web-tools.json"), store);
+  const webToolsConfigPath = options.webToolsConfigPath ?? join(store.dir, "web-tools.json");
+  const webTools = options.webTools ?? liveWebToolsConfig(webToolsConfigPath, store);
   const codexBinary = process.env.ROTOXY_CODEX_BINARY ?? process.env.TOKEN2OAUTH_CODEX_BINARY;
   const codexProfiles = codexBinary ? new CodexProfiles({ codexBinary, configDir: store.dir }) : undefined;
   const agentWorkspace = new AgentWorkspaceService(store, options.supervisorBackend);
@@ -109,7 +110,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(createCommandWorkspaceRouter(store, sessions, options.supervisorBackend));
   router.use(createJobsAdminRouter(store, sessions, options.supervisorBackend));
   router.use(createControlPlaneAdminRouter(store, sessions, modelGateway.credentials, fileURLToPath(new URL("../supervisor/", import.meta.url)), codexProfiles, modelGateway.snapshot));
-  router.use(createResourceConnectionsRouter(store, sessions));
+  router.use(createResourceConnectionsRouter(store, sessions, { configPath: webToolsConfigPath }));
   router.use(createAnalyticsApiRouter(store, sessions, telemetry));
   router.use(createSupervisorAdminRouter(store, sessions, options.supervisorBackend));
   router.use(ui.router);

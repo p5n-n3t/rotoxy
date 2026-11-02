@@ -89,7 +89,7 @@ export class InferenceJobsAdapter implements InferenceExecutor {
         model: request.model,
         input: { prompt: `${request.prompt}\n\nFinish with this exact marker as the final nonempty line: ${request.expectedMarker}`,
           max_tokens: request.maxOutputTokens },
-      });
+      }, signal);
       const outer = object(receipt.result) ? receipt.result : undefined;
       const result = object(outer?.result) ? outer!.result as Record<string, unknown> : outer;
       const assistantText = result?.response;
@@ -98,6 +98,14 @@ export class InferenceJobsAdapter implements InferenceExecutor {
       }
       const rawFinish = result?.finish_reason ?? result?.finishReason;
       const finishReason = typeof rawFinish === "string" && rawFinish.length <= 64 ? rawFinish : undefined;
+      const normalizedFinish = finishReason?.toLowerCase().replace(/[\s-]+/g, "_");
+      if (["length", "max_tokens", "max_output_tokens", "token_limit", "max_token_limit", "truncated", "incomplete"].includes(normalizedFinish ?? "")) {
+        return { classification: "ambiguous", accountId: request.accountId, reason: "cloudflare_response_truncated" };
+      }
+      const finalNonemptyLine = assistantText.split(/\r?\n/).filter((line) => line.trim().length > 0).at(-1);
+      if (finalNonemptyLine !== request.expectedMarker) {
+        return { classification: "ambiguous", accountId: request.accountId, reason: "cloudflare_completion_marker_missing" };
+      }
       return { classification: "accepted", accountId: request.accountId,
         value: { assistantText, reportedModel: null, modelEvidence: "pinned_endpoint",
           terminationEvidence: "expected_marker", ...(finishReason ? { finishReason } : {}),

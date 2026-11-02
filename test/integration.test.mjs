@@ -559,3 +559,20 @@ test("review fixes: non-POST bodies, quota text on 5xx, odd tool names, framed c
     await env.teardown();
   }
 });
+
+test("health and dashboard do not count legacy credentials as selectable without an upstream", async () => {
+  const env = await setup();
+  try {
+    await env.store.update((state) => { state.config.upstreamUrl = ""; });
+    const health = await (await fetch(env.base + "/healthz")).json();
+    assert.equal(health.upstreamConfigured, false);
+    assert.equal(health.accounts, 2);
+    assert.equal(health.selectable, 0);
+    const dashboard = await (await fetch(env.base + "/")).text();
+    assert.match(dashboard, /Legacy upstream credential pool/);
+    assert.match(dashboard, /selectable for the configured upstream MCP endpoint/);
+    assert.match(dashboard, />0<span class="muted"> \/ 2<\/span>/);
+  } finally {
+    await env.teardown();
+  }
+});

@@ -221,13 +221,15 @@ export class AdminUi {
     const state = await this.store.load();
     const base = state.config.publicBaseUrl.replace(/\/$/, "");
     const snapshot = this.pool.snapshot(state);
-    const ready = snapshot.filter((a) => ["healthy", "ready", "unknown"].includes(String(a.state)) && a.enabled).length;
+    const ready = state.config.upstreamUrl
+      ? snapshot.filter((a) => ["healthy", "ready", "unknown"].includes(String(a.state)) && a.enabled).length
+      : 0;
     res.type("html").send(page("Gateway", `<main class="wrap">
 <div class="nav"><div class="brand"><div class="logo">T2</div><div><strong>ROTOXY</strong><div class="eyebrow">Bearer → OAuth 2.1</div></div></div><a class="btn secondary" href="${e(base)}/admin">Admin console</a></div>
 <section class="hero"><div class="eyebrow">MCP credential gateway</div><h1>One OAuth connection.<br><span class="gradient">Many upstream tokens.</span></h1><p class="lead">A self-hosted OAuth facade for bearer-token MCP servers, with encrypted credentials, sticky sessions, adaptive pooling, quota-aware cooldowns and optional Tailscale Funnel exposure.</p></section>
 <section class="grid">
 <div class="card"><div class="eyebrow">Gateway</div><div class="metric"><span class="dot"></span> Online</div><p class="muted tiny">OAuth metadata and MCP proxy are available.</p></div>
-<div class="card"><div class="eyebrow">Credential pool</div><div class="metric">${ready}<span class="muted"> / ${snapshot.length}</span></div><p class="muted tiny">currently selectable accounts</p></div>
+<div class="card"><div class="eyebrow">Legacy upstream credential pool</div><div class="metric">${ready}<span class="muted"> / ${snapshot.length}</span></div><p class="muted tiny">selectable for the configured upstream MCP endpoint</p></div>
 <div class="card"><div class="eyebrow">Strategy</div><div class="metric" style="font-size:21px">${e(state.config.strategy)}</div><p class="muted tiny">session-aware selection policy</p></div>
 <div class="card wide"><div class="eyebrow">ChatGPT / MCP URL</div><h3>Protected MCP endpoint</h3><div class="copy">${e(base)}/mcp</div></div>
 <div class="card"><div class="eyebrow">Discovery</div><h3>OAuth 2.1</h3><p class="muted tiny">Authorization code + PKCE S256, DCR, refresh rotation, resource-bound access tokens.</p></div>
@@ -243,7 +245,9 @@ export class AdminUi {
       upstreamConfigured: Boolean(state.config.upstreamUrl),
       strategy: state.config.strategy,
       accounts: snapshot.length,
-      selectable: snapshot.filter((a) => a.enabled && !["cooldown", "exhausted", "auth-failed", "disabled"].includes(String(a.state))).length,
+      selectable: state.config.upstreamUrl
+        ? snapshot.filter((a) => a.enabled && !["cooldown", "exhausted", "auth-failed", "disabled"].includes(String(a.state))).length
+        : 0,
     });
   };
 

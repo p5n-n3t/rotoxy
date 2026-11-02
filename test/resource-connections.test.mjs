@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { chmod, lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore } from "../dist/store.js";
@@ -60,6 +60,11 @@ test("private resource connections are admin/CSRF gated, encrypted, explicit, an
   assert.equal(JSON.stringify(exa.secret).includes("exa-mock-key"), false);
 
   const statePath = join(store.dir, "web-tools.json");
+  const oracleBinding = { enabled: true, features: { search: "supported", extract: "supported" } };
+  await writeFile(statePath, JSON.stringify({providers: {oracle: oracleBinding}, permissions: {clients: {}}}), {mode: 0o600});
+  const oraclePage = await fetch(base + "/admin/resources", {headers: {cookie: `t2o_admin=${session}`}});
+  assert.equal(oraclePage.status, 200);
+  assert.match(await oraclePage.text(), /Oracle search cluster/);
   const save = await fetch(base + "/admin/api/v1/resource-connections", {
     method: "POST", headers: { cookie: `t2o_admin=${session}`, "x-csrf-token": csrf, "content-type": "application/json" },
     body: JSON.stringify({
@@ -74,6 +79,7 @@ test("private resource connections are admin/CSRF gated, encrypted, explicit, an
   assert.equal(result.providers.find((p) => p.provider === "tavily").status, "not_configured");
   const config = await readFile(statePath, "utf8");
   assert.equal(config.includes("mock-key"), false);
+  assert.deepEqual(JSON.parse(config).providers.oracle, oracleBinding);
   assert.deepEqual(JSON.parse(config).permissions.clients, { "oauth-known": ["web_search"] });
   await chmod(statePath, 0o600);
   assert.equal((await lstat(statePath)).mode & 0o077, 0);
@@ -98,4 +104,39 @@ test("private resource connections are admin/CSRF gated, encrypted, explicit, an
 
   await store.update((state) => { state.security = { adminEpoch: 1 }; });
   assert.equal((await fetch(base + "/admin/api/v1/resource-connections", { headers: { cookie: `t2o_admin=${session}` } })).status, 401);
+});
+
+test("resource settings reader and writer share the configured private path", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "t2o-resource-config-path-"));
+  const priorConfig = process.env.TOKEN2OAUTH_CONFIG_DIR;
+  process.env.TOKEN2OAUTH_CONFIG_DIR = join(root, "state");
+  t.after(() => { if (priorConfig === undefined) delete process.env.TOKEN2OAUTH_CONFIG_DIR; else process.env.TOKEN2OAUTH_CONFIG_DIR = priorConfig; });
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const store = new StateStore();
+  await store.init({ adminPassword: "local-test-admin" });
+  const privateDir = join(root, "private-settings");
+  await mkdir(privateDir, { mode: 0o700 });
+  const customPath = join(privateDir, "web-tools.json");
+  const sessions = new AdminSessions();
+  const session = sessions.create(60_000, 0);
+  const csrf = sessions.csrfToken(session);
+  const app = express();
+  app.use(createResourceConnectionsRouter(store, sessions, { configPath: customPath }));
+  const server = createServer(app);
+  const address = await listen(server);
+  t.after(() => close(server));
+  const base = `http://127.0.0.1:${address.port}`;
+  const headers = { cookie: `t2o_admin=${session}`, "x-csrf-token": csrf, "content-type": "application/json" };
+
+  const save = await fetch(base + "/admin/api/v1/resource-connections", {
+    method: "POST", headers, body: JSON.stringify({ providers: {}, permissions: { clients: {} } }),
+  });
+  assert.equal(save.status, 200);
+  assert.deepEqual(JSON.parse(await readFile(customPath, "utf8")).permissions, { clients: {} });
+  assert.equal((await lstat(customPath)).mode & 0o077, 0);
+  const listed = await fetch(base + "/admin/api/v1/resource-connections", { headers: { cookie: `t2o_admin=${session}` } });
+  assert.equal(listed.status, 200);
+  assert.deepEqual((await listed.json()).authenticatedClientDefaults, []);
+  await assert.rejects(readFile(join(store.dir, "web-tools.json")), { code: "ENOENT" });
 });

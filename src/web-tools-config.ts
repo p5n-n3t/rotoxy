@@ -15,7 +15,7 @@ const providers: WebProviderName[] = ["exa", "firecrawl", "tavily", "oracle"];
 const tools: WebToolName[] = ["web_search", "web_extract"];
 const features: WebFeature[] = ["search", "extract"];
 
-function validate(value: unknown): PrivateConfig {
+export function validateWebToolsConfig(value: unknown): PrivateConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid web tools config.");
   const raw = value as Record<string, any>;
   if (Object.keys(raw).some((key) => !["providers", "permissions"].includes(key)) || !raw.providers || typeof raw.providers !== "object" || Array.isArray(raw.providers)) throw new Error("Invalid web tools config.");
@@ -23,6 +23,7 @@ function validate(value: unknown): PrivateConfig {
   for (const [name, rawBinding] of Object.entries(raw.providers)) {
     const binding = rawBinding as Record<string, any>;
     if (!providers.includes(name as WebProviderName) || !binding || typeof binding !== "object" || Array.isArray(binding) || typeof binding.enabled !== "boolean" || Object.keys(binding).some((key) => !["enabled", "accountId", "features"].includes(key))) throw new Error("Invalid web tools provider binding.");
+    if (binding.accountId !== undefined && (typeof binding.accountId !== "string" || binding.accountId.length > 128)) throw new Error("Invalid web provider account id.");
     if (name !== "oracle" && binding.enabled && (typeof binding.accountId !== "string" || !binding.accountId.trim())) throw new Error("Enabled web provider requires an existing account id.");
     const selected: Partial<Record<WebFeature, FeatureCapability>> = {};
     if (binding.features !== undefined) {
@@ -52,7 +53,7 @@ export async function loadWebToolsConfig(path: string | undefined, store: StateS
   if (!path) return undefined;
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0 || info.size > 128 * 1024) throw new Error("Web tools config must be an owner-private regular file (mode 0600 or stricter).");
-  const config = validate(JSON.parse(await readFile(path, "utf8")));
+  const config = validateWebToolsConfig(JSON.parse(await readFile(path, "utf8")));
   const facade = new WebTools({
     config: { providers: config.providers },
     fetch: options.fetch,

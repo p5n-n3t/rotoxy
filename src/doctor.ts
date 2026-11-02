@@ -211,7 +211,11 @@ function normalizeMountPath(value: string): string | undefined {
 function configIssues(config: ConfigSnapshot | undefined): string[] {
   if (!config) return ["config snapshot missing"];
   const issues: string[] = [];
-  if (!isHttpUrl(config.upstreamUrl)) issues.push("upstreamUrl must be an HTTP(S) URL without embedded credentials, query, or fragment");
+  // The upstream MCP endpoint is optional for installations using only local
+  // or alternate provider routes. A configured value must still be valid.
+  if (config.upstreamUrl !== undefined && config.upstreamUrl !== "" && !isHttpUrl(config.upstreamUrl)) {
+    issues.push("upstreamUrl must be an HTTP(S) URL without embedded credentials, query, or fragment");
+  }
   if (!isHttpUrl(config.publicBaseUrl)) issues.push("publicBaseUrl must be an HTTP(S) URL without embedded credentials, query, or fragment");
   if (!validBasePath(config.basePath)) issues.push("basePath must be an empty path or a normalized absolute path");
   if (!Number.isSafeInteger(config.requestTimeoutMs) || (config.requestTimeoutMs ?? 0) <= 0) {
