@@ -68,12 +68,15 @@ export function createOracleModelApi(store: StateStore, options: Options = {}) {
       const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (catalog) {
         if (!Array.isArray(data?.data)) return fail(502, "oracle_catalog_invalid");
-        data.data = data.data.slice(0, 100).filter((m: any) => typeof m?.id === "string" && /^[A-Za-z0-9._:-]{1,160}$/.test(m.id)).map((m: any) => ({ id: "oracle/" + m.id, object: "model", owned_by: "oracle" }));
+        const ids = [...new Set<string>(data.data.filter((m: any) => typeof m?.id === "string" && /^[A-Za-z0-9._:-]{1,160}$/.test(m.id)).map((m: any) => m.id))];
+        data.data = ids.slice(0, 100).map(id => ({ id: "oracle/" + id, object: "model", owned_by: "oracle" }));
+        data.truncated = ids.length > 100;
+        data.total_models = ids.length;
       } else {
         if (typeof data?.model !== "string" || !Array.isArray(data.choices)) return fail(502, "oracle_response_invalid");
         data.model = "oracle/" + data.model;
         const host = response.headers.get("x-oracle-host");
-        if (host && /^ora(?:1|3|5|6|7|8)$/.test(host)) res.setHeader("X-Oracle-Host", host);
+        if (host && /^ora[1-9][0-9]{0,2}$/.test(host)) res.setHeader("X-Oracle-Host", host);
       }
       res.setHeader("X-Rotoxy-Provider-Path", "oracle");
       return res.json(data);

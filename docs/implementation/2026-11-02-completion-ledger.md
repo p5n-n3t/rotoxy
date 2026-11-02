@@ -110,3 +110,15 @@ Final rebuild and focused navigation tests passed 10/10. No deployment.
 Workspace execution test is rerunning alone with a 240s outer deadline; no compiler
 competition. Its own reconciliation deadline is120s, so prior75s isolation was
 insufficient and cannot alone establish a regression.
+
+## Workspace verification result
+
+Standalone workspace execution test passed 2/2 in33s after compiler completion.
+Prior75s isolation timeout and full-suite stall under memory pressure are not proof
+of a retirement regression. Still require a complete post-retirement full-suite run.
+Built-in browser access reports disabled in Work settings; visual acceptance remains
+unverified. Navigation source/build/focused tests passed10/10 and is pushed3f0392f.
+
+Luna now owns new `src/providers/claude-code-jobs.ts` and its synthetic tests only;
+no paid launch or runtime integration is authorized by that module's existence.
+Parent owns Oracle model catalog deduplication and growable host attribution tests.

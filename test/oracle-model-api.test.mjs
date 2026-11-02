@@ -27,7 +27,7 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   app.use(createOracleModelApi(store,{tokenFile,fetch:async(url,init)=>{
     calls.push({url,init});
     if(reject) throw Error('synthetic-private-oracle-key must not leak');
-    return Response.json(init.method==='GET'?{object:'list',data:[{id:'qwen3.5:2b'}]}:{model:'qwen3.5:2b',choices:[{message:{content:'OK'}}]},{headers:{'x-oracle-host':selectedHost}});
+    return Response.json(init.method==='GET'?{object:'list',data:[{id:'qwen3.5:2b'},{id:'qwen3.5:2b'}]}:{model:'qwen3.5:2b',choices:[{message:{content:'OK'}}]},{headers:{'x-oracle-host':selectedHost}});
   }}));
   const server=createServer(app);
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -40,6 +40,9 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   assert.equal(calls.length,0);
   const catalog=await(await fetch(base+'/models',{headers})).json();
   assert.equal(catalog.data[0].id,'oracle/qwen3.5:2b');
+  assert.equal(catalog.data.length,1);
+  assert.equal(catalog.total_models,1);
+  assert.equal(catalog.truncated,false);
   const completion=await fetch(base+'/chat/completions',{method:'POST',headers,body:JSON.stringify(body)});
   assert.equal(completion.headers.get('x-oracle-host'),'ora8');
   assert.equal(completion.headers.get('x-rotoxy-provider-path'),'oracle');
@@ -56,9 +59,9 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   assert.doesNotMatch(await failed.text(),/synthetic-private/);
   assert.equal(calls.length,3,'ambiguous upstream failures are not replayed');
   reject=false;
-  selectedHost='ora1';
+  selectedHost='ora9';
   const restoredHost=await fetch(base+'/chat/completions',{method:'POST',headers,body:JSON.stringify(body)});
-  assert.equal(restoredHost.headers.get('x-oracle-host'),'ora1','the restored small-model host retains execution attribution');
+  assert.equal(restoredHost.headers.get('x-oracle-host'),'ora9','a newly enrolled host retains execution attribution');
   await restoredHost.json();
   await chmod(tokenFile,0o644);
   assert.equal((await fetch(base+'/models',{headers})).status,503);
