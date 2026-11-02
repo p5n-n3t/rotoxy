@@ -1,3 +1,4 @@
+import { createAdminNavigationRouter } from "./navigation-admin.js";
 import { createEndpointDirectoryRouter } from "./endpoint-directory.js";
 import { createRunnerAdminRouter } from "./runner-admin.js";
 import { createOracleModelApi } from "./oracle-model-api.js";
@@ -114,6 +115,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(createResourceConnectionsRouter(store, sessions, { configPath: webToolsConfigPath }));
   router.use(createAnalyticsApiRouter(store, sessions, telemetry));
   router.use(createSupervisorAdminRouter(store, sessions, options.supervisorBackend));
+  router.use(createAdminNavigationRouter(store, sessions));
   router.use(createEndpointDirectoryRouter(store, sessions, { webToolsConfigPath }));
   router.use(ui.router);
   router.all(

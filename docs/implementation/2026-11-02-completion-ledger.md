@@ -98,3 +98,15 @@ No production purge, paid test, runtime deployment or new Claude process occurre
   build was stopped by its owner. Host memory/swap pressure slowed verification.
 - Runtime remains unchanged; no native subscription worker launched after the
   operator account switch, no paid test, purge or deployment.
+
+## Full regression and navigation status
+
+`c2b9aa3` is pushed. Full regression was stopped after workspace execution test
+stalled; isolated 75-second run exited 124. This is not a full-suite pass. Luna
+is investigating read-only; do not infer retirement caused it without evidence.
+Navigation changes and Activity/Settings landing routes are local, parent-wired;
+first focused run exposed custom-nav group rendering incompatibility, now fixed.
+Final rebuild and focused navigation tests passed 10/10. No deployment.
+Workspace execution test is rerunning alone with a 240s outer deadline; no compiler
+competition. Its own reconciliation deadline is120s, so prior75s isolation was
+insufficient and cannot alone establish a regression.

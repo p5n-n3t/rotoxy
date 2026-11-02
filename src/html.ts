@@ -18,27 +18,37 @@ export const ROTOXY_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewB
 export interface NavItem { key: string; label: string; href: string }
 export interface NavGroup { label: string; items: readonly NavItem[] }
 
-/**
- * Shared ROTOXY workspace navigation. Entries without a route are deliberately
- * rendered as unavailable text; never send an operator to a fabricated page.
- */
+/** Shared primary navigation and reachable secondary admin views. */
 export const NAV_GROUPS: readonly NavGroup[] = [
-  { label: "Command", items: [{ key: "pool", label: "Overview", href: "/admin" }, { key: "agents", label: "Agent workspace", href: "/admin/agents" }, { key: "jobs", label: "Jobs", href: "/admin/jobs" }, { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" }] },
-  { label: "Resources", items: [
-    { key: "accounts", label: "Workspace accounts", href: "/admin#accounts" },
-    { key: "models", label: "Models & APIs", href: "/admin/providers" },
+  { label: "ROTOXY", items: [
+    { key: "pool", label: "Overview", href: "/admin" },
+    { key: "jobs", label: "Jobs", href: "/admin/jobs" },
+    { key: "models", label: "Pools", href: "/admin/providers" },
+    { key: "endpoints", label: "Connections", href: "/admin/endpoints" },
+    { key: "activity", label: "Activity", href: "/admin/activity" },
+    { key: "settings", label: "Settings", href: "/admin/settings" },
+  ] },
+  { label: "Workspaces", items: [
+    { key: "agents", label: "Agent workspace", href: "/admin/agents" },
+    { key: "supervisor", label: "Supervisor", href: "/admin/supervisor" },
     { key: "codex", label: "ChatGPT & Codex", href: "/admin/codex" },
     { key: "oracle", label: "Private workers", href: "/admin/oracle" },
-    { key: "resources", label: "Search", href: "/admin/resources" },
-    { key: "credits", label: "Usage & credits", href: "/admin/credits" },
   ] },
-  { label: "Settings", items: [{ key: "endpoints", label: "Connections", href: "/admin/endpoints" },{ key: "tools", label: "Tools", href: "/admin/tools" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "routing", label: "Routing", href: "/admin/routing" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
+  { label: "Manage", items: [
+    { key: "resources", label: "Search tools", href: "/admin/resources" },
+    { key: "credits", label: "Usage & credits", href: "/admin/credits" },
+    { key: "tools", label: "Tool access", href: "/admin/tools" },
+    { key: "routing", label: "Routing", href: "/admin/routing" },
+    { key: "security", label: "Security", href: "/admin/security" },
+    { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" },
+    { key: "runners", label: "CLI runners", href: "/admin/runners" },
+  ] },
 ];
 
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {
   const b = esc(base);
-  const navActive = active === "dispatch-approvals" ? "jobs" : active === "runners" ? "models" : active === "chatgpt-codex" ? "codex" : ["cloudflare", "inference"].includes(active) ? "models" : active;
-  const labels: Record<string, string> = { "dispatch-approvals": "Dispatch approvals", runners: "CLI runner profiles", cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map" };
+  const navActive = active === "dispatch-approvals" ? "jobs" : ["runners", "cloudflare", "inference", "oracle-models"].includes(active) ? "models" : active === "chatgpt-codex" ? "codex" : active;
+  const labels: Record<string, string> = { "dispatch-approvals": "Dispatch approvals", runners: "CLI runner profiles", cloudflare: "Cloudflare Workers AI", inference: "Inference accounts", codex: "ChatGPT & Codex accounts", workspace: "Resource map", "oracle-models": "Oracle model inventory", "oracle-fleet": "Oracle fleet", "private-services": "Private services" };
   const current = labels[active] ?? groups.flatMap((group) => group.items).find((item) => item.key === navActive)?.label ?? active;
   const link = (item: NavItem) => item.href
     ? `<a class="nav-link" href="${b}${esc(item.href)}"${navActive === item.key ? ' aria-current="page"' : ""}>${esc(item.label)}</a>`
@@ -47,7 +57,7 @@ export function adminNav(base: string, active: string, groups: readonly NavGroup
     const items = g.items.filter(item => item.href);
     const links = items.map(link).join("");
     const selected = items.some(item => item.key === navActive);
-    if (g.label === "Resources" || g.label === "Settings") return `<details class="nav-group nav-disclosure"${selected ? " open" : ""}><summary class="nav-group-toggle">${esc(g.label)}<span aria-hidden="true">⌄</span></summary><div class="nav-group-items">${links}</div></details>`;
+    if (["Workspaces", "Manage"].includes(g.label)) return `<details class="nav-group nav-disclosure"${selected ? " open" : ""}><summary class="nav-group-toggle">${esc(g.label)}<span aria-hidden="true">⌄</span></summary><div class="nav-group-items">${links}</div></details>`;
     return `<section class="nav-group" aria-labelledby="nav-${esc(g.label.toLowerCase())}"><h2 class="nav-label" id="nav-${esc(g.label.toLowerCase())}">${esc(g.label)}</h2>${links}</section>`;
   }).join("");
   const actions = `<div class="rx-sidebar-end"><a class="btn secondary" href="${b}/">Gateway</a><form class="inline" method="post" action="${b}/admin/logout"><button class="secondary">Sign out</button></form></div>`;

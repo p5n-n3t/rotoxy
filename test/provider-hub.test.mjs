@@ -46,7 +46,7 @@ test("provider hub is admin-only, lists safe store views, and links to mounted a
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-security-policy"), /default-src 'none'/);
   const html = await response.text();
-  for (const href of ["/token2oauth/admin/inference", "/token2oauth/admin/cloudflare", "/token2oauth/admin/models", "/token2oauth/admin#accounts", "/token2oauth/admin/codex", "/token2oauth/admin/oracle"]) assert.ok(html.includes(`href="${href}"`), href);
+  for (const href of ["/token2oauth/admin/inference", "/token2oauth/admin/cloudflare", "/token2oauth/admin/models", "/token2oauth/admin/providers", "/token2oauth/admin/codex", "/token2oauth/admin/oracle"]) assert.ok(html.includes(`href="${href}"`), href);
   assert.match(html, /OpenAI-compatible providers/);
   assert.match(html, /OpenCode is an agent client/);
   assert.match(html, /Hermes is an agent\/client setup/);
