@@ -32,7 +32,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     { key: "resources", label: "Search", href: "/admin/resources" },
     { key: "credits", label: "Usage & credits", href: "/admin/credits" },
   ] },
-  { label: "Settings", items: [{ key: "tools", label: "Tools", href: "/admin/tools" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "routing", label: "Routing", href: "/admin/routing" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
+  { label: "Settings", items: [{ key: "endpoints", label: "Connections", href: "/admin/endpoints" },{ key: "tools", label: "Tools", href: "/admin/tools" }, { key: "security", label: "Auth", href: "/admin/security" }, { key: "routing", label: "Routing", href: "/admin/routing" }, { key: "diagnostics", label: "Diagnostics", href: "/admin/diagnostics" }] },
 ];
 
 export function adminNav(base: string, active: string, groups: readonly NavGroup[] = NAV_GROUPS): string {

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { endpointDirectory } from "./endpoint-directory.js";
 import { execFile, execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
@@ -624,6 +625,11 @@ clients.command("restore <client> <backupPath>")
     console.log(`Backup path: ${result.backupPath}`);
     console.log(result.message);
   });
+
+program.command("endpoints").description("List configured pool and orchestration connection endpoints").option("--json", "Structured output").action(async opts => {
+  const rows = await endpointDirectory(await ensureStore());
+  console.log(opts.json ? JSON.stringify({version:1,evidence:"local_metadata",endpoints:rows},null,2) : formatTable(rows.map(row=>({pool:row.label,protocol:row.protocol,status:row.status,url:row.url})),["pool","protocol","status","url"]) + "\n\nFull endpoint URLs:\n" + rows.map(row=>`${row.label}: ${row.url}`).join("\n"));
+});
 
 program.parseAsync(process.argv).catch((error) => {
   console.error("rotoxy:", error?.message || error);

@@ -1,3 +1,4 @@
+import { createEndpointDirectoryRouter } from "./endpoint-directory.js";
 import { createRunnerAdminRouter } from "./runner-admin.js";
 import { createOracleModelApi } from "./oracle-model-api.js";
 import { searchMcpHandler } from "./search-mcp.js";
@@ -113,6 +114,7 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   router.use(createResourceConnectionsRouter(store, sessions, { configPath: webToolsConfigPath }));
   router.use(createAnalyticsApiRouter(store, sessions, telemetry));
   router.use(createSupervisorAdminRouter(store, sessions, options.supervisorBackend));
+  router.use(createEndpointDirectoryRouter(store, sessions, { webToolsConfigPath }));
   router.use(ui.router);
   router.all(
     "/search/mcp", express.raw({ type: "*/*", limit: "16kb" }), oauth.authenticateSearchMcp, searchMcpHandler(webTools),

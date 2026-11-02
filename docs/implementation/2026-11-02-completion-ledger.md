@@ -25,9 +25,9 @@ Keep this ledger current; a source commit is not a deployed milestone.
 | --- | --- | --- | --- | --- |
 | A01 | Parent: architecture and recovery contracts | none | Decisions recorded | Contract reconciles audit with approved requirements |
 | C01 | Luna/parent: optional upstream, canonical resource config, truthful health | A01 | Locally verified; not deployed | Focused tests + build; no weaker private-file checks |
-| C02 | Next implementation lead: retirement manifest/migration and active removal | C01 | Pending | Exact preview, private backup, mixed-job isolation and crash recovery tests |
+| C02 | Luna: exact-ID preview; active retirement fence | C01 | Preview tested; apply unsupported; fence in progress | Exact preview, private backup, mixed-job isolation and crash recovery tests |
 | C03 | Luna: shared diagnostics, human output; endpoint command still awaits E01 | C01, E01 | Readable views verified; endpoints pending | Exit-code/JSON contract tests and readable installed CLI output |
-| E01 | Provider worker: capability-backed endpoint directory | C01 | Pending | Scoped discovery and API isolation; no hypothetical working routes |
+| E01 | Parent: shared authenticated directory, dashboard and CLI | C01 | Local implementation/test in progress; provider MCP scopes pending | Scoped discovery and API isolation; no hypothetical working routes |
 | E02 | Provider worker: Nebius encrypted onboarding and model choices | E01 | Pending | Real metadata + bounded inference, separate API/job selection |
 | E03 | Luna: Cloudflare receipt/cancellation; live canary diagnosis remains | C01 | Local receipt tests passed; live pending | Missing-marker/truncation/abort tests; new live job only |
 | W01 | Agent worker: Codex execution and server approval transport | A01, C01 | Pending | Thread/turn receipts, approvals, cancel/restart, origin protection |
@@ -60,3 +60,17 @@ ownership: retirement preview and capability-backed endpoint directory, then rem
 worker execution/routing/UI gates. Running gateway and monitor are unchanged. No
 release activation until release/rollback and browser acceptance checks. Never kill
 the active monitor/gateway as stale workers.
+
+## Resumed endpoint/retirement checkpoint
+
+Operator resumed on Sol after switching accounts. No Astra needed for current work.
+New endpoint directory uses existing encrypted provider stores; `/admin/endpoints`
+and `/admin/api/v1/endpoints` require admin authentication; `rotoxy endpoints`
+uses the same function. Status is local metadata, not authentication/inference
+verification. Custom provider paths are derived from saved IDs. Public generic
+`/providers` remains a static protocol directory; scoped provider MCP routes remain
+pending and must not be claimed complete.
+
+Retirement script is read-only preview. Its `--apply` explicitly refuses because
+cross-store dependency classification and journaled restore are not implemented.
+No production purge, paid test, runtime deployment or new Claude process occurred.
