@@ -105,6 +105,10 @@ class JobRegistryTests(unittest.TestCase):
         value["instructions"] = "Return exactly DONE"
         body = assignment("inference-job", "inference-key", [value], accounts=["oracle-a"])
         self.registry.submit(body, now=2)
+        pending = self.registry.get_assignment("inference-job")["tasks"][0]
+        self.assertEqual(pending["modelRequested"], "oracle/qwen3.5:2b")
+        self.assertEqual(pending["requestedProvider"], "oracle")
+        self.assertIsNone(pending["modelReported"], "a requested pin is not provider-reported evidence")
         operation = self.registry.claim_operation("oracle-worker", now=3)
         self.assertEqual(operation["kind"], "run_inference")
         self.assertIsNone(operation["sessionId"])

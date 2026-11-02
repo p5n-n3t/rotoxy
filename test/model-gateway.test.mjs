@@ -60,6 +60,19 @@ test("Ollama gateway encrypts and rotates keys, enforces scoped tokens, balances
   assert.equal(denied.status, 401);
   assert.equal(calls.length, 0, "read-only token cannot invoke the provider");
 
+  for (const [path, format] of [
+    ["/v1/chat/completions", { response_format: { type: "json_object" } }],
+    ["/v1/chat/completions", { response_format: { type: "json_schema", json_schema: {} } }],
+    ["/api/chat", { format: "json" }],
+    ["/api/generate", { format: { type: "object" } }],
+    ["/v1/responses", { text: { format: { type: "json_object" } } }],
+  ]) {
+    const rejected = await fetch(base + path, { method: "POST", headers: { authorization: `Bearer ${invokeToken.token}`, "content-type": "application/json" }, body: JSON.stringify({ model: "gemma4:31b", ...format }) });
+    assert.equal(rejected.status, 400);
+    assert.match((await rejected.json()).error.message, /does not support enforced structured output/);
+  }
+  assert.equal(calls.length, 0, "unsupported output contracts consume no upstream quota or account slot");
+
   const catalogA = await fetch(base + "/p/ollama/v1/models", { headers: { authorization: `Bearer ${readToken.token}` } });
   assert.equal(catalogA.status, 200);
   assert.equal(calls.at(-1).url, "https://ollama.com/v1/models");

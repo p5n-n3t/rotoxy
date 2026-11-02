@@ -169,7 +169,32 @@ complete (1.590s request overlap). Nebius encrypted onboarding+30-model catalog
 passed; no Nebius inference/automatic selection. Two $0.001 conservative CF
 verification reservations; no purchases/topups. No historical purge.
 
-Origin broker newfiles remain untracked owned delegate output, not built/committed
-or wired. Next: verify broker, integrate executor modules into durable jobs with
+Origin broker files now pass four local tests, but remain unwired. Next:
+integrate executor modules into durable jobs with
 server-resolved origin protection and explicit permissions; do not claim native
 subscription worker dispatch ready. Browser visual gate still unavailable.
+
+## Individual pools and task-contract continuation
+
+See `../verification/2026-11-02-pool-scenarios.md` for live catalog/operation
+evidence and remaining coverage. Ollama, Cloudflare and Oracle direct catalogs
+answer; no direct Claude Code/Codex inference API is advertised. Ollama completed
+two classification requests but failed strict raw JSON both times. Official cloud
+documentation confirms structured output unsupported; source now rejects those
+contracts before spending quota. Oracle canonical credential resolution now matches
+the directory when the environment override is absent. Explicit invalid overrides
+remain failures. Source requested-model attribution is corrected for inference.
+
+New live Oracle job `rx-oracle-contracts-20261102-a` completed three tasks on ora5,
+ora3 and ora6, with 8.840s overlap between independent requests and dependency
+ordering preserved. Classification passed exact text; transformation/extraction
+repeated markers and failed exact-text validation. Scheduler completion is not
+arbitrary artifact validation. No automatic replay or additional paid API call.
+
+Local build plus pool/gateway/origin suites passed9/9; Python durable-job suite
+passed90/90. A follow-up build/tests covers the new trusted Claude profile adapter.
+That adapter reuses the existing registry and process executor; it is not yet a
+durable public dispatch path. Latest source changes are not deployed. Next is
+durable executor integration and origin-binding routes, then full mixed-pool,
+restart/worker-loss and browser acceptance; never mark the overall plan finished
+from these focused tests alone.

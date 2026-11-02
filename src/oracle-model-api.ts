@@ -1,6 +1,6 @@
 import express from "express";
 import { lstat, readFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { ModelCredentialStore } from "./model-credentials.js";
 import type { StateStore } from "./store.js";
 
@@ -12,7 +12,7 @@ type Options = { tokenFile?: string; fetch?: typeof fetch };
 export function createOracleModelApi(store: StateStore, options: Options = {}) {
   const router = express.Router();
   const credentials = new ModelCredentialStore(store);
-  const tokenFile = options.tokenFile ?? process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+  const tokenFile = options.tokenFile ?? process.env.ROTOXY_ORACLE_API_TOKEN_FILE ?? join(store.dir, "oracle-api-token");
   const fetchImpl = options.fetch ?? fetch;
   let inflight = 0;
   router.all(["/providers/oracle/v1/models", "/providers/oracle/v1/chat/completions"], async (req, res) => {

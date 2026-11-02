@@ -99,7 +99,16 @@ export function createModelGateway(store: StateStore, options: ModelGatewayOptio
     let requestedModel: string | undefined;
     if (target.scope === "model:invoke" && Buffer.isBuffer(req.body)) {
       try {
-        const value = JSON.parse(req.body.toString("utf8")).model;
+        const input = JSON.parse(req.body.toString("utf8"));
+        // Ollama Cloud currently does not enforce structured output. Reject
+        // that contract before spending quota rather than forwarding an option
+        // which can be ignored upstream and returning a misleading success.
+        if ((input.response_format != null && input.response_format.type !== "text") ||
+            (input.format != null && input.format !== "") ||
+            (input.text?.format != null && input.text.format.type !== "text")) {
+          return sendError(res, 400, "Ollama Cloud does not support enforced structured output; request plain text or choose a provider with structured-output support");
+        }
+        const value = input.model;
         if (typeof value === "string" && value.length <= 200 && !/[\r\n\0]/.test(value)) requestedModel = value;
       } catch { /* Preserve existing body handling; configured model policies fail closed below. */ }
     }

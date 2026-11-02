@@ -5,7 +5,7 @@ import { InferenceProviderStore } from "./inference-providers.js";
 import { CloudflareCredentialStore } from "./cloudflare-ai.js";
 import { AdminSessions, adminEpoch, parseCookies } from "./admin-session.js";
 import { adminNav, esc, withCsrf } from "./html.js";
-import { loadWebToolsConfig } from "./web-tools-config.js";
+import { loadWebToolsConfig, validateWebToolsConfig } from "./web-tools-config.js";
 import { join } from "node:path";
 import { lstat, readFile } from "node:fs/promises";
 import { page } from "./ui.js";
@@ -14,6 +14,18 @@ export interface EndpointEntry {
   id: string; label: string; url: string; protocol: string; authentication: string;
   status: "configured" | "not_configured" | "unavailable";
   operations: string[]; models: string[]; note: string;
+}
+
+/** Metadata-only check: inspect owner/private file metadata without reading credential bytes. */
+async function privateOracleTokenAvailable(store: StateStore): Promise<boolean> {
+  const configuredPath = process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+  const tokenFile = configuredPath ?? join(store.dir, "oracle-api-token");
+  try {
+    if (!tokenFile.startsWith("/")) return false;
+    const info = await lstat(tokenFile);
+    return info.isFile() && !info.isSymbolicLink() && info.uid === process.getuid?.() &&
+      (info.mode & 0o077) === 0 && info.size > 0 && info.size <= 4096;
+  } catch { return false; }
 }
 
 /** Local metadata only. A configured endpoint is never labelled execution-verified. */
@@ -26,13 +38,13 @@ export async function endpointDirectory(store: StateStore, options: { webToolsCo
     rows.push({id, label, url: base + path, protocol, authentication, status: configured ? "configured" : "not_configured", operations, models: [...new Set(models)], note});
   };
   add("workspace", "ROTOXY orchestration", "/mcp", "MCP", "OAuth", true, ["tools/list", "tools/call"], [], "Discover authorized resources through workspace_projects and rotoxy_guide. Worker execution depends on configured adapters.");
+  const oracleTokenAvailable = await privateOracleTokenAvailable(store);
   let searchConfigured = false;
   try {
-    const tools = await loadWebToolsConfig(options.webToolsConfigPath ?? join(store.dir,"web-tools.json"), store);
-    const mapping = options.webToolsConfigPath ?? join(store.dir,"web-tools.json");
-    // The runtime validator above checks file privacy and the complete schema.
-    const binding = JSON.parse(await readFile(mapping,"utf8")).providers?.oracle;
-    searchConfigured = Boolean(tools && binding?.enabled && process.env.ROTOXY_ORACLE_API_TOKEN_FILE);
+    const mapping = options.webToolsConfigPath ?? join(store.dir, "web-tools.json");
+    const tools = await loadWebToolsConfig(mapping, store);
+    const binding = validateWebToolsConfig(JSON.parse(await readFile(mapping, "utf8"))).providers.oracle;
+    searchConfigured = Boolean(tools && binding?.enabled && oracleTokenAvailable);
   } catch { /* An unreadable mapping must not be advertised as configured. */ }
   add("search", "Oracle search", "/search/mcp", "MCP", "OAuth (search resource)", searchConfigured, ["search", "fetch"], [], "Requires enabled Oracle search mapping and client permission as well as the private credential file.");
   const accounts = await new InferenceProviderStore(store).listAccounts();
@@ -41,20 +53,12 @@ export async function endpointDirectory(store: StateStore, options: { webToolsCo
   const cloudflare = await new CloudflareCredentialStore(store).listCredentials();
   const infer = (id: string, label: string, configured: boolean, models: string[]) => add(id,label,`/providers/${id}/v1`,"OpenAI-compatible","Scoped model Bearer token",configured,["GET /models","POST /chat/completions"],models);
   infer("ollama", "Ollama pool", ollama.some(a=>a.enabled), []);
-  infer("cloudflare", "Cloudflare Workers AI", cloudflare.some(a=>a.enabled), cloudflare.filter(a=>a.enabled).flatMap(a=>a.allowedModels));
+  infer("cloudflare", "Cloudflare Workers AI", cloudflare.some(a=>a.enabled), cloudflare.filter(a=>a.enabled).flatMap(a=>a.allowedModels.map(model=>`cloudflare/${model}`)));
   for (const provider of [{id:"openai",label:"OpenAI"},{id:"openrouter",label:"OpenRouter"}, ...custom]) {
     const selected=accounts.filter(a=>a.provider===provider.id && a.enabled);
-    infer(provider.id,provider.label,selected.length>0,selected.flatMap(a=>a.allowedModels));
+    infer(provider.id,provider.label,selected.length>0,selected.flatMap(a=>a.allowedModels.map(model=>`${provider.id}/${model}`)));
   }
-  let oracleConfigured = false;
-  try {
-    const tokenFile=process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
-    if(tokenFile?.startsWith("/")) {
-      const info=await lstat(tokenFile);
-      oracleConfigured=info.isFile() && !info.isSymbolicLink() && info.uid===process.getuid?.() && !(info.mode & 0o077) && info.size<=4096;
-    }
-  } catch { /* Private token unavailable. */ }
-  infer("oracle","Oracle compute",oracleConfigured,[]);
+  infer("oracle","Oracle compute",oracleTokenAvailable,[]);
   add("unified","Unified inference","/v1","OpenAI-compatible","Scoped model Bearer token",ollama.some(a=>a.enabled)||cloudflare.some(a=>a.enabled)||accounts.some(a=>a.enabled),["GET /models","POST /chat/completions"]);
   return rows;
 }

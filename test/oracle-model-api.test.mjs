@@ -18,20 +18,22 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   const creds = new ModelCredentialStore(store);
   const read = await creds.issueToken({scopes:['model:read'],expiresInSeconds:60});
   const invoke = await creds.issueToken({scopes:['model:read','model:invoke'],expiresInSeconds:60});
-  const tokenFile = join(dir,'oracle-token');
+  const tokenFile = join(dir,'oracle-api-token');
   await writeFile(tokenFile,'synthetic-private-oracle-key',{mode:0o600});
   const calls=[];
   let reject=false;
   let selectedHost='ora8';
   const app=express();
-  app.use(createOracleModelApi(store,{tokenFile,fetch:async(url,init)=>{
+  const oldTokenFile = process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+  delete process.env.ROTOXY_ORACLE_API_TOKEN_FILE;
+  app.use(createOracleModelApi(store,{fetch:async(url,init)=>{
     calls.push({url,init});
     if(reject) throw Error('synthetic-private-oracle-key must not leak');
     return Response.json(init.method==='GET'?{object:'list',data:[{id:'qwen3.5:2b'},{id:'qwen3.5:2b'}]}:{model:'qwen3.5:2b',choices:[{message:{content:'OK'}}]},{headers:{'x-oracle-host':selectedHost}});
   }}));
   const server=createServer(app);
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));if(old===undefined)delete process.env.ROTOXY_CONFIG_DIR;else process.env.ROTOXY_CONFIG_DIR=old;await rm(dir,{recursive:true,force:true});});
+  t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));if(old===undefined)delete process.env.ROTOXY_CONFIG_DIR;else process.env.ROTOXY_CONFIG_DIR=old;if(oldTokenFile===undefined)delete process.env.ROTOXY_ORACLE_API_TOKEN_FILE;else process.env.ROTOXY_ORACLE_API_TOKEN_FILE=oldTokenFile;await rm(dir,{recursive:true,force:true});});
   const base=`http://127.0.0.1:${server.address().port}/providers/oracle/v1`;
   assert.equal((await fetch(base+'/models')).status,401);
   const headers={authorization:'Bearer '+invoke.token,'content-type':'application/json'};
@@ -66,4 +68,25 @@ test('private Oracle route authorizes scopes, pins destination, namespaces model
   await chmod(tokenFile,0o644);
   assert.equal((await fetch(base+'/models',{headers})).status,503);
   assert.equal(calls.length,4);
+});
+
+test('an invalid explicit Oracle credential override does not fall back to the canonical file', async t => {
+  const dir=await mkdtemp(join(tmpdir(),'rotoxy-oracle-override-'));
+  const old=process.env.ROTOXY_CONFIG_DIR;
+  process.env.ROTOXY_CONFIG_DIR=dir;
+  const store=new StateStore();
+  if(old===undefined)delete process.env.ROTOXY_CONFIG_DIR;else process.env.ROTOXY_CONFIG_DIR=old;
+  await store.init({adminPassword:'synthetic-oracle-override-password'});
+  await writeFile(join(dir,'oracle-api-token'),'synthetic-private-oracle-key',{mode:0o600});
+  const token=await new ModelCredentialStore(store).issueToken({scopes:['model:read'],expiresInSeconds:60});
+  let calls=0;
+  const app=express();
+  app.use(createOracleModelApi(store,{tokenFile:join(dir,'missing-override'),fetch:async()=>{calls++;throw Error('must not call upstream');}}));
+  const server=createServer(app);
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});});
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/providers/oracle/v1/models`,{headers:{authorization:'Bearer '+token.token}});
+  assert.equal(response.status,503);
+  assert.equal((await response.json()).error.message,'oracle_credential_unavailable');
+  assert.equal(calls,0);
 });
