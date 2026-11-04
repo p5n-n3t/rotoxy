@@ -54,7 +54,7 @@ test("job submission accepts only explicit supported providers for fresh tasks",
   extraField.tasks[0].execution = { mode: "fresh", provider: "claude", accountId: "account-a" };
   assert.throws(() => validateJobSubmission(extraField), /unsupported field/);
   const executionSchema = JOB_TOOL_DEFINITIONS.find((tool) => tool.name === "job_submit").inputSchema.properties.tasks.items.properties.execution;
-  assert.equal(executionSchema.oneOf[1].properties.provider.enum.join(","), "claude,codex,auto,pi");
+  assert.equal(executionSchema.oneOf.find(schema=>schema.properties.mode.const==='fresh').properties.provider.enum.join(","), "claude,codex,auto,pi");
 });
 
 test("job scopes remain separate", () => {

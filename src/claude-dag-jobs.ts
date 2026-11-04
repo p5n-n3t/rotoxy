@@ -7,11 +7,19 @@ import type { ClaudeWorkerRuntime } from './claude-worker-runtime.js';
  * single Claude launch. A scheduler operation always maps to the same task. */
 export class ClaudeDagJobs implements AgentJobExecutor {
  private readonly active=new Map<string,{projectId:string;jobId:string;clientId:string;taskId:string;cancelled:boolean}>();
+ private readonly cancellations=new Map<string,number>();
+ private closed=false;
+ private cancelKey(projectId:string,jobId:string,clientId:string){return JSON.stringify([projectId,jobId,clientId]);}
+ private pruneCancellations(){for(const [key,until] of this.cancellations)if(until<Date.now())this.cancellations.delete(key);}
  constructor(private readonly runtime:Pick<ClaudeWorkerRuntime,'call'|'resources'>,
   private readonly workspace:Pick<AgentWorkspaceService,'snapshot'|'update'>,
   private readonly sleep=(ms:number)=>new Promise<void>(r=>setTimeout(r,ms))){}
  resources():Promise<AgentResource[]>{return this.runtime.resources();}
  async cancelJob(projectId:string,jobId:string,clientId:string):Promise<number>{
+  this.pruneCancellations();
+  // Cover the scheduler eligibility read before invoke registers its handle.
+  // Claims expire within 300s; subsequent claims also recheck durable job state.
+  this.cancellations.set(this.cancelKey(projectId,jobId,clientId),Date.now()+300000);
   let requested=0;
   for(const row of this.active.values())if(row.projectId===projectId&&row.jobId===jobId&&row.clientId===clientId){
    row.cancelled=true;requested++;
@@ -19,7 +27,7 @@ export class ClaudeDagJobs implements AgentJobExecutor {
   }
   return requested;
  }
- async cancelAll():Promise<void>{await Promise.all([...this.active.values()].map(row=>this.cancelJob(row.projectId,row.jobId,row.clientId)));}
+ async cancelAll():Promise<void>{this.closed=true;await Promise.all([...this.active.values()].map(row=>this.cancelJob(row.projectId,row.jobId,row.clientId)));}
  async invoke(op:JobOperation):Promise<JobResult<Record<string,unknown>>>{
   const rejected=(reason:string):JobResult<Record<string,unknown>>=>({accountId:op.selectedAccountId,classification:'rejected',reason});
   const ambiguous=(reason:string):JobResult<Record<string,unknown>>=>({accountId:op.selectedAccountId,classification:'ambiguous',reason});
@@ -29,14 +37,17 @@ export class ClaudeDagJobs implements AgentJobExecutor {
     typeof i.model!=='string'||typeof i.prompt!=='string'||Buffer.byteLength(i.prompt)>16384||
     typeof i.expectedMarker!=='string'||!Number.isSafeInteger(i.timeoutMs)||Number(i.timeoutMs)<100||Number(i.timeoutMs)>120000||
     op.selectedAccountId!=='claude-code:'+i.profileId)return rejected('invalid_agent_binding');
-  const resource=(await this.resources()).find(r=>r.accountId===op.selectedAccountId&&r.profileId===i.profileId&&r.models.includes(String(i.model)));
-  if(!resource)return rejected('agent_binding_unavailable');
   const taskId='dag-'+createHash('sha256').update(op.operationId).digest('hex').slice(0,40);
-  const binding={projectId:i.projectId,jobId:String(i.jobId??''),clientId:i.clientId,taskId,cancelled:false};
+  this.pruneCancellations();
+  const binding={projectId:i.projectId,jobId:String(i.jobId??''),clientId:i.clientId,taskId,cancelled:this.closed||this.cancellations.has(this.cancelKey(i.projectId,String(i.jobId??''),i.clientId))};
   this.active.set(op.operationId,binding);
   const actor='client:'+i.clientId;const requestStartedAt=Date.now()/1000;
   let launched=false;
   try{
+   if(binding.cancelled)return rejected('agent_cancelled_before_launch');
+   const resource=(await this.resources()).find(r=>r.accountId===op.selectedAccountId&&r.profileId===i.profileId&&r.models.includes(String(i.model)));
+   if(!resource)return rejected('agent_binding_unavailable');
+   if(binding.cancelled)return rejected('agent_cancelled_before_launch');
    let snap=await this.workspace.snapshot(i.projectId,actor);
    const current=snap.tasks.find((row:any)=>row.id===taskId) as any;
    if(!current){

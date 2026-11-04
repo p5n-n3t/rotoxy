@@ -682,7 +682,7 @@ class JobRegistry:
                               "attempt": task["attempt_id"], "generation": task["generation"],
                               "selectedAccountId": task["selected_account"], "providerTaskId": task["provider_task_id"],
                               "sessionId": task["session_id"], "dispatchAt": task["dispatch_at"], "releasedAt": task["released_at"],
-                              "modelRequested": execution.get("model", "not_reported") if execution.get("mode") == "inference" else "not_reported", "modelReported": task["reported_model"],
+                              "modelRequested": execution.get("model", "not_reported") if execution.get("mode") in {"inference", "agent"} else "not_reported", "modelReported": task["reported_model"],
                               "providerStatus": task["provider_status"], "quota": "unknown", "capacity": "unknown"}
                 # A provider category is a real dispatch attribute, unlike an
                 # exact model pin which the documented LightSprint launch API

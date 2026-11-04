@@ -64,3 +64,10 @@ These local tests use synthetic credentials and executables, not live Bedrock
 inference. Full CI, production activation and bounded live execution are separate
 release gates. This change does not prove arbitrary objective decomposition,
 autonomous code editing, dormant ChatGPT wake-up, or the full product roadmap.
+
+Follow-up review added cancellation fences before invocation/profile discovery,
+plus registry-failure isolation and requested-model attribution for agent nodes.
+Tests cover cancellation before invoke and during delayed discovery with zero
+launches. CI41855286203 exposed an old test's positional schema assumption; the
+assertion now locates the fresh branch by discriminant. Final focused subset13/13
+passes, including the real Python/synthetic CLI dependency+cancellation test.

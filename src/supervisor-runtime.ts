@@ -304,12 +304,16 @@ function workspaceAccessRevision(raw: string, clients: Array<{ clientId: string;
 
 export class SupervisorRuntime implements SupervisorBackend {
   private agentExecutor?:AgentJobExecutor;
+  private agentResourceStatus='not_configured';
   setAgentExecutor(executor:AgentJobExecutor){this.agentExecutor=executor;this.dispatchPolicyFingerprint="";}
   private async agentResources():Promise<AgentResource[]>{
     if(!this.agentExecutor)return [];
     const rules=await new ResourceRoutingRulesStore(this.options.store,this.options.routingConfigDir??this.options.configDir).read();
-    return (await this.agentExecutor.resources()).filter(r=>rules.resources[r.accountId]?.enabled!==false)
-      .map(r=>({...r,models:r.models.filter(model=>routingRuleAllowsModel(rules.resources[r.accountId],model))})).filter(r=>r.models.length>0);
+    try{
+      const resources=await this.agentExecutor.resources();this.agentResourceStatus='configured';
+      return resources.filter(r=>rules.resources[r.accountId]?.enabled!==false)
+        .map(r=>({...r,models:r.models.filter(model=>routingRuleAllowsModel(rules.resources[r.accountId],model))})).filter(r=>r.models.length>0);
+    }catch{this.agentResourceStatus='Claude profile registry unavailable; inspect its private configuration.';return [];}
   }
   private async agentEligible(op:JobOperation):Promise<boolean>{
     const resource=(await this.agentResources()).find(r=>r.accountId===op.selectedAccountId&&r.profileId===op.input.profileId&&r.models.includes(String(op.input.model)));
@@ -1069,7 +1073,7 @@ export class SupervisorRuntime implements SupervisorBackend {
           ...(resource.provider === "oracle" ? { eligibleHostCount: resource.oracleHosts?.length ?? 0 } : {}) }];
       });
       const agentResources=(await this.agentResources()).filter(r=>project.accountIds.includes(r.accountId)).map(r=>({...r,executionMode:'agent',quota:'not_reported',tools:['Read','Glob','Grep'],maxBudgetUsd:0.25}));
-      return boundedJson({ projectId: project.projectId, accounts, workers, inferenceResources, agentResources,
+      return boundedJson({ projectId: project.projectId, accounts, workers, inferenceResources, agentResources,agentResourcesStatus:this.agentResourceStatus,
         maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
     }
     if (name === "job_inbox") {
