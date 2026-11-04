@@ -136,7 +136,10 @@ export function validateJobSubmission(value: unknown): JobSubmission {
   if (value.schemaVersion !== 1) throw new JobInputError("schemaVersion must be 1");
   if (JSON.stringify(value).length > 1_048_576) throw new JobInputError("job submission exceeds 1 MiB");
   if (!Array.isArray(value.eligibleAccountIds) || value.eligibleAccountIds.length < 1 || value.eligibleAccountIds.length > 50) throw new JobInputError("eligibleAccountIds must contain 1–50 configured account IDs");
-  const eligibleAccountIds = value.eligibleAccountIds.map((v) => id(v, "eligible account ID"));
+  const eligibleAccountIds = value.eligibleAccountIds.map((v) => {
+    if(typeof v!=='string'||!/^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/.test(v))throw new JobInputError('eligible account ID must be a safe identifier');
+    return v;
+  });
   if (new Set(eligibleAccountIds).size !== eligibleAccountIds.length) throw new JobInputError("eligibleAccountIds must be unique");
   let scheduling: JobSubmission["scheduling"];
   if (value.scheduling !== undefined) {
@@ -191,7 +194,7 @@ export const JOB_TOOL_DEFINITIONS = [
       profile: { type: "string", enum: ["economy", "balanced", "throughput", "custom"] },
       maxConcurrency: { type: "integer", minimum: 1, maximum: 32, description: "Only valid with profile=custom. Omit this field for economy, balanced, or throughput." },
     } },
-    eligibleAccountIds: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: jobKey },
+    eligibleAccountIds: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: {...jobKey,pattern:'^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$'} },
     tasks: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false,
       required: ["taskId", "dependsOn", "scopeKeys", "instructions", "execution", "output"],
       properties: {

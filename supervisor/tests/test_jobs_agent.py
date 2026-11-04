@@ -162,6 +162,9 @@ class JobRegistryAgentTests(unittest.TestCase):
         self.assertIsNone(self.claim(worker="another", now=4))
         self.assertEqual(self.registry.get_assignment("agent-job")["tasks"][0]["state"], "blocked")
 
+    def test_capacity_accepts_generated_underscore_account_ids(self):
+        self.assertEqual(self.registry.account_capacity(["_opaque-account"]), {"accounts": []})
+
     def test_retained_ambiguous_attempt_reduces_read_only_account_capacity(self):
         self.submit(job_id="retained-job")
         operation = self.claim(now=3, lease=1)

@@ -99,3 +99,13 @@ If all eligible accounts are busy, queueing remains valid. Missing occupancy dat
 is explicitly reported; configured capacity is not labelled free capacity.
 Tests cover retained-slot counting without double-counting repository attempts,
 no state mutation from reads, endpoint authentication, and free-account selection.
+
+Capacity follow-up verification caught a stored credential ID starting with `_`.
+Its old validator rejected the entire capacity request. Account-key validation is
+now consistent across capacity, MCP submission schema/parser, and claimed worker
+operations (job/task identifiers retain their stricter rules). Regression tests
+exercise underscore account IDs in routing and actual worker dispatch. The second
+live job `rx-unified-capacity-20261104-b` completed Claude file inspection and
+Oracle computation with8.004seconds of client-interval overlap; Cloudflare was
+excluded because occupancy was explicitly unavailable, not counted as executed.
+Its Claude CLI reported$0.004763. A final capacity/three-provider gate remains.

@@ -279,7 +279,7 @@ function newestAssistant(transcript: unknown, dispatchAtSeconds: number, instruc
 function validOperation(value: unknown): value is JobOperation {
   const row = object(value);
   return !!row && ID.test(String(row.operationId ?? "")) && ID.test(String(row.attemptId ?? "")) &&
-    Number.isSafeInteger(row.generation) && Number(row.generation) > 0 && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(String(row.selectedAccountId ?? "")) &&
+    Number.isSafeInteger(row.generation) && Number(row.generation) > 0 && /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/.test(String(row.selectedAccountId ?? "")) &&
     typeof row.kind === "string" && object(row.input) !== undefined;
 }
 

@@ -91,7 +91,7 @@ test("ambiguous chat mutation is never replayed", async () => {
 
 test("inference operations use the explicit executor once and retain account and provider evidence", async () => {
   const operation = { operationId: "inference-operation-123456", attemptId: "attempt-inference", generation: 1,
-    selectedAccountId: "cf-account", kind: "run_inference", input: { provider: "cloudflare",
+    selectedAccountId: "_cf-account", kind: "run_inference", input: { provider: "cloudflare",
       model: "@cf/meta/model", prompt: "bounded prompt", maxOutputTokens: 64, expectedMarker: "DONE", dispatchAt: 1 } };
   let fallback = 0; let calls = 0; let posted;
   const bridge = { async request(_method, route, body) {
@@ -99,8 +99,8 @@ test("inference operations use the explicit executor once and retain account and
     if (route.endsWith("/result")) { posted = structuredClone(body); return {}; }
     throw new Error("unexpected route");
   } };
-  const worker = createJobWorker({ bridge, adapterFactory: () => { fallback++; return adapter("cf-account"); },
-    inferenceExecutorFactory: () => ({ invoke: async (request) => { calls++; assert.equal(request.accountId, "cf-account");
+  const worker = createJobWorker({ bridge, adapterFactory: () => { fallback++; return adapter("_cf-account"); },
+    inferenceExecutorFactory: () => ({ invoke: async (request) => { calls++; assert.equal(request.accountId, "_cf-account");
       return ok(request.accountId, { assistantText: "Answer\nDONE", reportedModel: null, modelEvidence: "pinned_endpoint",
         terminationEvidence: "expected_marker", requestStartedAt: Date.now() / 1_000, assistantAt: Date.now() / 1_000,
         providerAccountId: "0123456789abcdef0123456789abcdef" }); } }),

@@ -533,7 +533,7 @@ class JobRegistry:
     def account_capacity(self, account_ids):
         """Return capacity counters for registered account IDs without scheduling work."""
         if (not isinstance(account_ids, list) or not 1 <= len(account_ids) <= 50 or
-                any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value)
+                any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}", value)
                     for value in account_ids) or len(set(account_ids)) != len(account_ids)):
             raise ValueError("accountIds must contain 1 to 50 unique safe IDs")
         values = []
