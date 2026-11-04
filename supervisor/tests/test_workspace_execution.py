@@ -178,6 +178,11 @@ class TestClientIdValidator(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(result["error"], "idempotency_conflict")
 
+    def test_generic_execution_summary_is_rotoxy_owned(self):
+        code, result = reserve(self.db, "generic-summary")
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["dispatch"]["provider"], "rotoxy")
+
     def test_reconciliation_claim_prefers_latest_unobserved_binding_when_timestamps_collide(self):
         # A burst can legitimately receive the same millisecond timestamp. The
         # newest handoff still needs its first observation before old backlog.

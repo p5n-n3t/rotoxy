@@ -23,15 +23,19 @@ test('real Python DAG dispatches two dependent Claude tasks through the existing
  const config={version:1,projects:[{projectId:'fleet',clientIds:['client-a'],accountIds:[accountId],registeredSessions:[]}],maxWorkers:2,allowUnknownQuota:true,localLimits:{maxTasks:100,maxJobBytes:1048576,maxOutputBytes:32768}};
  const runtime=new SupervisorRuntime(config,{configDir:dir,store,supervisorCwd:join(process.cwd(),'supervisor'),routingConfigDir:dir,supervisionDbPath:join(dir,'inbox.sqlite'),recoveryDbPath:join(dir,'recovery.sqlite'),oracleConfigPath:join(dir,'oracle-config.json'),oracleDbPath:join(dir,'oracle.sqlite'),oracleCachePath:join(dir,'oracle-cache.json'),oracleInventoryReader:async()=>({hosts:[]}),workerOptions:{pollIntervalMs:50}});
  const workspace=new AgentWorkspaceService(store,runtime);const claude=new ClaudeWorkerRuntime(store,workspace,runtime,[binary],[dir]);
- runtime.setAgentExecutor(new ClaudeDagJobs(claude,workspace));
- t.after(async()=>{await claude.close();await runtime.close();await rm(dir,{recursive:true,force:true});});
+ let restored;
+ t.after(async()=>{await restored?.close();await claude.close();await runtime.close();await rm(dir,{recursive:true,force:true});});
  await runtime.start();
+ assert.equal(runtime.status.workerStarted,false,'native dispatch waits for the actual executor attachment');
+ runtime.setAgentExecutor(new ClaudeDagJobs(claude,workspace));
+ assert.equal(runtime.status.workerStarted,true);
  const caller={clientId:'client-a',projectId:'fleet'};
- const task=(id,dependsOn)=>({taskId:id,dependsOn,scopeKeys:['record:'+id],instructions:'Inspect the supplied statement only and return Verified result.',execution:{mode:'agent',provider:'claude-code',profileId:profile.id,model:'test-haiku-model',timeoutMs:15000},output:{kind:'text',maxBytes:1024,format:'text',expectedMarker:'DONE'}});
+ const task=(id,dependsOn)=>({taskId:id,dependsOn,scopeKeys:['record:'+id],instructions:'Inspect the supplied statement only and return Verified result.',execution:{mode:'agent',provider:'claude-code',profileId:profile.id,model:'test-haiku-model',timeoutMs:30000},output:{kind:'text',maxBytes:1024,format:'text',expectedMarker:'DONE'}});
  const submission={schemaVersion:1,jobId:'test-dag',idempotencyKey:'test-dag-idem',projectId:'fleet',eligibleAccountIds:[accountId],tasks:[task('one',[]),task('two',['one'])]};
  await runtime.callTool('job_submit',submission,caller);
  let status;
- for(let i=0;i<150;i++){
+ const completionDeadline=Date.now()+90000;
+ while(Date.now()<completionDeadline){
   status=await runtime.callTool('job_status',{projectId:'fleet',jobId:'test-dag'},caller);
   if(status.state==='complete'||status.state==='blocked')break;
   await new Promise(r=>setTimeout(r,200));
@@ -62,4 +66,11 @@ test('real Python DAG dispatches two dependent Claude tasks through the existing
  for(let i=0;i<50;i++){attempt=await claude.call('claude_task_status',{projectId:'fleet',taskId:cancelledTask.id},'client-a');if(attempt.status==='ambiguous')break;await new Promise(r=>setTimeout(r,50));}
  assert.equal(attempt.status,'ambiguous');
  assert.equal((await readFile(counter,'utf8')).trim().split('\n').length,3,'cancel never launches replacement work');
+ await runtime.close();
+ restored=new SupervisorRuntime(config,{configDir:dir,store,supervisorCwd:join(process.cwd(),'supervisor'),routingConfigDir:dir,supervisionDbPath:join(dir,'inbox.sqlite'),recoveryDbPath:join(dir,'recovery.sqlite'),oracleConfigPath:join(dir,'oracle-config.json'),oracleDbPath:join(dir,'oracle.sqlite'),oracleCachePath:join(dir,'oracle-cache.json'),oracleInventoryReader:async()=>({hosts:[]}),workerOptions:{pollIntervalMs:50}});
+ await restored.start();
+ const recovered=await restored.callTool('job_results',{projectId:'fleet',jobId:'test-dag'},caller);
+ assert.equal(recovered.results.length,2,'completed results survive a real supervisor process restart');
+ await new Promise(r=>setTimeout(r,100));
+ assert.equal((await readFile(counter,'utf8')).trim().split('\n').length,3,'restart does not replay completed or cancelled launches');
 });

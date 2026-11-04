@@ -553,7 +553,9 @@ program
       }
       if (report.stageChecks.some((c) => c.status === "unverified")) {
         console.log("");
-        console.log("Unverified stages were not observed. Use --live and --public for upstream, tools and OAuth evidence.");
+        console.log(!snapshot.config?.upstreamUrl
+          ? "Optional upstream checks are skipped. Verify local MCP tools through an authenticated client; --public checks OAuth metadata."
+          : "Unverified stages were not observed. Use --live and --public for upstream, tools and OAuth evidence.");
       }
     }
     if (report.status === "issues") process.exitCode = 1;

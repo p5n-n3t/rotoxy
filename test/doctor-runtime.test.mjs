@@ -40,3 +40,21 @@ test("doctor leaves stale-only upstream and tool evidence unchecked", async () =
   assert.deepEqual(snapshot.upstream, { checked: false });
   assert.deepEqual(snapshot.tools, { checked: false });
 });
+
+test("doctor skips upstream probes and stale tool inventories when no upstream is configured", async () => {
+  const now = Date.now();
+  const accounts = [account("legacy-account", true, now, true, 200)];
+  const capabilities = { "legacy-account": { capturedAt: now, ok: false, error: "legacy tools/list rejected", tools: [] } };
+  const store = fakeStore(accounts, capabilities);
+  store.load = async () => {
+    const state = await fakeStore(accounts, capabilities).load();
+    state.config.upstreamUrl = "";
+    return state;
+  };
+  let probes = 0;
+  const pool = { probeAccount: async () => { probes += 1; } };
+  const snapshot = await collectDoctorSnapshot(store, pool, { live: true });
+  assert.equal(probes, 0, "no upstream probe is launched without a configured target");
+  assert.deepEqual(snapshot.upstream, { checked: false });
+  assert.deepEqual(snapshot.tools, { checked: false });
+});

@@ -313,3 +313,29 @@ Python5new+90existing passed. See verification/2026-11-04-claude-unified-jobs.md
 Next: full CI, private config profile binding, backed-up release activation, real
 bounded Claude/Oracle mixed job, and restart/result retrieval proof. Do not claim
 those production gates complete from local tests.
+
+### Unified execution production gate — 2026-11-04
+
+Running backend8cc347a, readable launcher66e859b. One ordinary job completed
+Claude/Bedrock, Oracle and Cloudflare tasks with validated outputs and model/source
+attribution; Claude package inspection matched local name and dependency count.
+Pairwise execution overlap verified; no triple-overlap claim. Job IDs and detailed
+proof are in verification/2026-11-04-claude-unified-jobs.md. Configured, occupied,
+available and retained capacity are distinct; another client's ambiguous slots
+were never cleared. Full backend CI752Node per22/24,556Python and18Oracle passed.
+
+Follow-up source fixes: generic ROTOXY metadata no longer claims LightSprint;
+retired optional-upstream doctor probes are skipped truthfully; native worker
+startup now defers dispatch until executor attachment and preserves durable
+profile bindings during bootstrap. Real Python restart test verifies persisted
+results without replay after cancellation. Root corrected CLI formatter test
+expectations after an extra plan-output detail changed its snapshot (CI41860043789).
+Next: full final CI, activate these small follow-ups, rerun doctor and retrieve
+existing job results without paid calls. Built-in browser navigation is failing
+its browser.user API; all3 public Funnel edges return login200 in4–5seconds.
+The fresh login link is available; authenticated visual QA still pending.
+
+Still open beyond this gate: Codex subscription durable execution/native-account
+protection end to end; actual client callback/resumption QA; exact-ID historical
+retirement purge with backup/rollback; remaining search/Oracle/UI acceptance and
+arbitrary-objective planner gates. Do not count static registrations as execution.

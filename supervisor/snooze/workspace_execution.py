@@ -101,7 +101,7 @@ def _summary(row):
         submission = {}
     remote = row["remote_state"]
     return {"projectId": row["project_id"], "jobId": row["job_id"], "state": remote or row["state"],
-            "provider": "lightsprint", "taskCount": len(submission.get("tasks", [])),
+            "provider": "rotoxy", "taskCount": len(submission.get("tasks", [])),
             "createdAt": row["created_at"], "updatedAt": row["updated_at"], "shareMode": row["share_mode"]}
 
 

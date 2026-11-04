@@ -69,7 +69,8 @@ export async function collectDoctorSnapshot(
     requestTimeoutMs: state.config.requestTimeoutMs,
   };
 
-  if (options.live) {
+  const hasConfiguredUpstream = typeof state.config.upstreamUrl === "string" && state.config.upstreamUrl.trim().length > 0;
+  if (options.live && hasConfiguredUpstream) {
     const candidate = state.accounts.find((a) => a.enabled);
     if (candidate) {
       await pool.probeAccount(candidate.id);
@@ -106,21 +107,27 @@ export async function collectDoctorSnapshot(
   // probes, use the newest result regardless of success so an old success
   // cannot hide a later authentication or availability failure.
   const observedAt = Date.now();
-  const probes = state.accounts
-    .filter((a) => isFreshEvidence(a.stats.lastProbeAt, observedAt))
-    .sort((a, b) => b.stats.lastProbeAt! - a.stats.lastProbeAt!);
-  const probed = probes.find((a) => a.enabled);
-  if (probed) {
-    const error = probed.stats.lastProbeError;
-    snapshot.upstream = {
-      checked: true,
-      connected: probed.stats.lastProbeStatus !== undefined,
-      timedOut: Boolean(error && /timed out/i.test(error)),
-      status: probed.stats.lastProbeStatus,
-      initializeOk: probed.stats.lastProbeOk === true,
-      error: probed.stats.lastProbeOk ? undefined : error,
-    };
-  } else if (state.accounts.some((a) => a.stats.lastProbeAt !== undefined)) {
+  if (hasConfiguredUpstream) {
+    const probes = state.accounts
+      .filter((a) => isFreshEvidence(a.stats.lastProbeAt, observedAt))
+      .sort((a, b) => b.stats.lastProbeAt! - a.stats.lastProbeAt!);
+    const probed = probes.find((a) => a.enabled);
+    if (probed) {
+      const error = probed.stats.lastProbeError;
+      snapshot.upstream = {
+        checked: true,
+        connected: probed.stats.lastProbeStatus !== undefined,
+        timedOut: Boolean(error && /timed out/i.test(error)),
+        status: probed.stats.lastProbeStatus,
+        initializeOk: probed.stats.lastProbeOk === true,
+        error: probed.stats.lastProbeOk ? undefined : error,
+      };
+    } else if (state.accounts.some((a) => a.stats.lastProbeAt !== undefined)) {
+      snapshot.upstream = { checked: false };
+    }
+  } else {
+    // Account histories may outlive the optional upstream configuration. They
+    // are not evidence about the current local-only gateway topology.
     snapshot.upstream = { checked: false };
   }
 
@@ -129,7 +136,9 @@ export async function collectDoctorSnapshot(
   const enabledInventories = inventories
     .filter(([id]) => knownAccounts.get(id)?.enabled === true && isFreshEvidence(state.capabilities?.[id]?.capturedAt, observedAt))
     .sort((a, b) => b[1].capturedAt - a[1].capturedAt);
-  if (enabledInventories.length) {
+  if (!hasConfiguredUpstream) {
+    snapshot.tools = { checked: false };
+  } else if (enabledInventories.length) {
     const latest = enabledInventories[0][1];
     snapshot.tools = {
       checked: true,

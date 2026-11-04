@@ -28,7 +28,7 @@ export class WorkspaceExecutionError extends Error {
   constructor(readonly code: "invalid_input" | "invalid_limit" | "execution_not_found" | "idempotency_conflict" | "supervisor_unavailable" | "ledger_unavailable" | "bridge_timeout" | "bridge_output_invalid") { super(code); }
 }
 
-export type WorkspaceExecutionSummary = { projectId: string; jobId: string; state: string; provider: "lightsprint"; taskCount: number; createdAt: number; updatedAt: number; shareMode?: "private" | "fleet" };
+export type WorkspaceExecutionSummary = { projectId: string; jobId: string; state: string; provider: "rotoxy"; taskCount: number; createdAt: number; updatedAt: number; shareMode?: "private" | "fleet" };
 export interface WorkspaceReconciliationBinding { projectId: string; jobId: string; clientId: string }
 export interface WorkspaceReconciliationCallbacks {
   claim(limit: number): Promise<WorkspaceReconciliationBinding[]>;

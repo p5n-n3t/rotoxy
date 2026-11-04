@@ -56,6 +56,19 @@ test("Agent Workspace service binds trusted actors, bounds the Python bridge, an
   assert.equal(calls[0].options.maxStdoutBytes, 512 * 1024);
   assert.deepEqual(calls[0].stdin, { command: "snapshot", projectId: "project-a", actor: "client:client-1", after: 9 });
 
+  const legacyRows = [
+    { id: "client:old-owner", label: "ROTOXY execution owner", provider: "lightsprint" },
+    { id: "client:real-provider", label: "LightSprint worker", provider: "lightsprint" },
+    { id: "agent:synthetic-lookalike", label: "ROTOXY execution owner", provider: "lightsprint" },
+  ];
+  const legacyService = new AgentWorkspaceService(store, backend, { runner: async (_executable, _args, stdin) => JSON.stringify({
+    ...sampleSnapshot("project-a"), participants: legacyRows,
+    messages: [{ id: "message-1", senderLabel: "ROTOXY execution owner", senderProvider: "lightsprint" }],
+  }) });
+  const normalized = await legacyService.snapshot("project-a", "client:client-1");
+  assert.deepEqual(normalized.participants.map(row => row.provider), ["rotoxy", "lightsprint", "lightsprint"]);
+  assert.equal(normalized.messages[0].senderProvider, "lightsprint", "historical sender attribution is preserved");
+
   const validInput = { action: "task_create", taskId: "task-1", idempotencyKey: "once-1", expectedRevision: 0, title: "Prepare review", description: "bounded task" };
   assert.deepEqual(await service.update("project-a", "admin:local", validInput), { accepted: true, revision: 1 });
   assert.equal(calls[1].stdin.actor, "admin:local");

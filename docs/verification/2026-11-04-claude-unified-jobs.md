@@ -135,3 +135,25 @@ scoped JWTs for a registered client, not a fresh external OAuth login.
 The lifecycle CLI also now defaults to concise readable output, retains --json
 for automation, and reports actual local health in status. Focused launcher tests
 pass14/14; installation of the wrapper does not require a backend restart.
+
+## Restart and diagnostic follow-ups
+
+The real Python/synthetic CLI test now restarts the supervisor after success and
+cancellation and retrieves both completed outputs without additional launches.
+It exposed provisional native profile registration during bootstrap clearing a
+retained binding. Bootstrap now preserves native bindings and defers the worker
+until the trusted executor attaches; no claim can dispatch through an absent
+executor. Native runtime and workspace proofs remain read-only/bounded.
+
+Generic workspace owner/summary metadata now identifies ROTOXY. Only the exact
+legacy synthetic owner tuple is normalized in the read DTO; real historical
+provider participants and message sender snapshots are not rewritten. Optional
+upstream doctor checks no longer probe retired/absent targets or report stale
+upstream inventory as a current tools error. Authenticated local tool discovery
+is still a separate proof; a 401 is not relabelled a successful tools/list.
+
+All three public Funnel DNS A addresses returned the login page with TLS
+verification enabled (HTTP200, approximately4–5seconds). Previous host-only checks
+resolved the private100.x Tailscale address and therefore were not independent
+public-ingress proof. Browser navigation subsequently reported its browser.user
+API unavailable; no authenticated visual QA is claimed from that failure.

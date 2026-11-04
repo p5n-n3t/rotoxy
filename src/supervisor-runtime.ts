@@ -318,7 +318,10 @@ export class SupervisorRuntime implements SupervisorBackend {
   }
   private agentExecutor?:AgentJobExecutor;
   private agentResourceStatus='not_configured';
-  setAgentExecutor(executor:AgentJobExecutor){this.agentExecutor=executor;this.dispatchPolicyFingerprint="";}
+  setAgentExecutor(executor:AgentJobExecutor){
+    this.agentExecutor=executor;this.dispatchPolicyFingerprint="";
+    if(this.started&&!this.closed&&this.worker){this.worker.start();this.workerRunning=true;}
+  }
   private async agentResources():Promise<AgentResource[]>{
     if(!this.agentExecutor)return [];
     const rules=await new ResourceRoutingRulesStore(this.options.store,this.options.routingConfigDir??this.options.configDir).read();
@@ -342,6 +345,7 @@ export class SupervisorRuntime implements SupervisorBackend {
   }
   private readonly bridge: SupervisorBridge;
   private worker?: ReturnType<typeof createJobWorker>;
+  private workerRunning=false;
   private closed = false;
   private started = false;
   private readonly adapterCache = new Map<string, PinnedJobsAdapter>();
@@ -637,6 +641,9 @@ export class SupervisorRuntime implements SupervisorBackend {
     const payloads=[...new Set(this.config.projects.flatMap(p=>p.accountIds))].map(accountId=>{
       const agent=agents.find(r=>r.accountId===accountId);
       if(agent)return {accountId,enabled:rules.resources[accountId]?.enabled!==false,authorized:true,allowUnknownQuota:this.config.allowUnknownQuota,health:agent.busy?'degraded':'healthy',quota:'unknown',localCapacity:1,registeredSessions:[],agentProviders:[{provider:agent.provider,profileId:agent.profileId,models:agent.models,timeoutMs:agent.timeoutMs}]};
+      // Attachment happens after supervisor bootstrap. Preserve durable native
+      // bindings while unavailable; dispatch rechecks the actual executor.
+      if(accountId.startsWith('claude-code:'))return undefined;
       const account=state.accounts.find(a=>a.id===accountId);
       const inferenceResource=inference.get(accountId);
       if(inferenceResource){return {accountId,enabled:inferenceResource.enabled,authorized:inferenceResource.authorized,
@@ -651,7 +658,7 @@ export class SupervisorRuntime implements SupervisorBackend {
         registeredSessions:sessions.map(s=>({id:s.sessionId,model:s.model,workspace:s.workspaceId}))};
     });
     const fingerprint=JSON.stringify(payloads);if(fingerprint===this.dispatchPolicyFingerprint)return;
-    for(const payload of payloads)await this.bridge.request("POST","/v1/accounts",payload);
+    for(const payload of payloads)if(payload)await this.bridge.request("POST","/v1/accounts",payload);
     this.dispatchPolicyFingerprint=fingerprint;
   }
 
@@ -829,7 +836,9 @@ export class SupervisorRuntime implements SupervisorBackend {
           inferenceCapacity ? [inferenceCapacity] : []),
         allowFreshOperations: freshBindingsConfigured, ...this.options.workerOptions,
       });
-      this.worker.start();
+      if(this.agentExecutor||!this.config.projects.some(p=>p.accountIds.some(id=>id.startsWith('claude-code:')))){
+        this.worker.start();this.workerRunning=true;
+      }
       }
       await this.registerMonitoredSessions();
       this.started = true;
@@ -839,7 +848,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     }
   }
 
-  get status() { return { ...this.bridge.status(), workerStarted: Boolean(this.worker) && this.started && !this.closed }; }
+  get status() { return { ...this.bridge.status(), workerStarted: this.workerRunning && this.started && !this.closed }; }
 
   async guidanceAdmin(input: WorkerGuidanceInput): Promise<WorkerGuidanceResult> {
     if (this.closed || !this.started) return { requestId: input.requestId, state: "rejected", reason: "supervisor_not_running" };
@@ -1507,6 +1516,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       await this.bridge.close();
       this.adapterCache.clear();
       this.started = false;
+      this.workerRunning=false;
     }
   }
 }

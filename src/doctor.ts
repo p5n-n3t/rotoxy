@@ -322,7 +322,7 @@ function stageChecks(snapshot: DoctorSnapshot): StageCheck[] {
     {
       stage: "upstream",
       status: upstreamFailed ? "failed" : upstreamPassed ? "passed" : "unverified",
-      summary: upstreamFailed ? "The upstream connection or MCP initialize check failed." : upstreamPassed ? "The upstream connection and MCP initialize probe passed." : "A successful upstream MCP initialize probe has not been recorded.",
+      summary: upstreamFailed ? "The upstream connection or MCP initialize check failed." : upstreamPassed ? "The upstream connection and MCP initialize probe passed." : !snapshot.config?.upstreamUrl ? "No upstream MCP URL is configured; this optional probe was skipped for the current local gateway." : "A successful upstream MCP initialize probe has not been recorded.",
     },
     {
       stage: "oauth",
@@ -332,7 +332,7 @@ function stageChecks(snapshot: DoctorSnapshot): StageCheck[] {
     {
       stage: "tools",
       status: toolsFailed ? "failed" : toolsPassed ? "passed" : "unverified",
-      summary: toolsFailed ? "The MCP tools/list check failed." : toolsPassed ? "MCP tools/list returned a valid result." : "A successful MCP tools/list result has not been recorded.",
+      summary: toolsFailed ? "The MCP tools/list check failed." : toolsPassed ? "MCP tools/list returned a valid result." : !snapshot.config?.upstreamUrl ? "No upstream MCP URL is configured; upstream tools/list was skipped. Local broker tools remain authenticated through the gateway." : "A successful MCP tools/list result has not been recorded.",
     },
     {
       stage: "funnel",

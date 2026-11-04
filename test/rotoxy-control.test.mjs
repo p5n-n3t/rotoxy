@@ -190,8 +190,8 @@ test('human lifecycle output summarizes service states, readiness, ingress, and 
   assert.doesNotMatch(output, /hugeRawSnapshot|x{1000}/);
   assert.equal(formatLifecycleOutput('status', result.status).startsWith('ROTOXY status: needs attention'), true);
   assert.equal(formatLifecycleOutput('install-plan', { files: ['rotoxy.target'], installCommands: ['one'],
-    wrapperSymlink: 'ln -sfn ...', migrationGate: 'review exact mappings' }),
-  'ROTOXY install plan (manual; no unit is enabled at boot)\nFiles: rotoxy.target\nInstall steps: 1 commands\nWrapper: ln -sfn ...\nMigration gate: review exact mappings');
+    wrapperBackup:'cp -a ...',wrapperSymlink: 'ln -sfn ...', migrationGate: 'review exact mappings' }),
+  'ROTOXY install plan (manual; no unit is enabled at boot)\nFiles: rotoxy.target\nInstall steps: 1 commands\n  1. one\nBack up wrapper: cp -a ...\nWrapper: ln -sfn ...\nMigration gate: review exact mappings');
   assert.equal(formatLifecycleOutput('status', result.status, true), JSON.stringify(result.status, null, 2), '--json retains the full status object');
 });
 

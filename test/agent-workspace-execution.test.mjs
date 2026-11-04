@@ -29,7 +29,7 @@ const submission = (jobId, instructions = "Published instruction") => ({ schemaV
 const BACKGROUND_RECONCILIATION_TIMEOUT_MS = 120_000;
 
 test("workspace sync preserves the safe fresh-task roundtrip failure class", async () => {
-  const summary = { projectId: "project-a", jobId: "job-roundtrip", state: "accepted", provider: "lightsprint", taskCount: 1, createdAt: 1, updatedAt: 1 };
+  const summary = { projectId: "project-a", jobId: "job-roundtrip", state: "accepted", provider: "rotoxy", taskCount: 1, createdAt: 1, updatedAt: 1 };
   const runner = async (_executable, _args, stdin) => {
     const request = JSON.parse(stdin);
     if (request.command === "get") return JSON.stringify({ dispatch: summary, submission: { tasks: [{ taskId: "task-a" }] }, remoteJobId: "remote-job", actor: "client:owner" });
@@ -173,7 +173,8 @@ test("workspace execution persists before submit, replays once, reconciles owner
     assert.equal(synced.value.results[0].text, "safe shared result");
     assert.ok(calls.some(call => call.name === "job_results" && call.caller.clientId === owner.clientId));
     const snapshotResponse = await mcp(collaborator, "workspace_snapshot", { projectId: "project-a" });
-    assert.ok(snapshotResponse.value.executionSummaries.some(row => row.provider === "lightsprint" && row.taskCount === 1));
+    assert.ok(snapshotResponse.value.executionSummaries.some(row => row.provider === "rotoxy" && row.taskCount === 1));
+    assert.equal(snapshotResponse.value.participants.find(row => row.id === `client:${owner.clientId}`).provider, "rotoxy");
     assert.ok(snapshotResponse.value.tasks.every(task => !task.description.includes("Published instruction")));
     assert.equal(new Set(snapshotResponse.value.tasks.filter(task => task.externalTaskId === "task-a").map(task => task.id)).size, 3, "shared task identifiers are owner-specific across three published executions");
     assert.ok(snapshotResponse.value.artifacts.some(artifact => artifact.reference === "safe shared result"));

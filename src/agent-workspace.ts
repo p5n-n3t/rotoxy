@@ -193,7 +193,13 @@ export class AgentWorkspaceService {
       throw new AgentWorkspaceError("bridge_output_invalid");
     }
     const executionSummaries = await this.execution.summaries(projectId);
-    return { ...result, executionResources: await this.backend?.workspaceResources?.(projectId) ?? [], executions: executionSummaries, executionRevision: Math.max(0, ...executionSummaries.map(row => row.updatedAt)), ...(executionSummaries.length ? { executionSummaries } : {}) } as unknown as AgentWorkspaceSnapshot;
+    // Older projected owner rows used LightSprint as a placeholder. Normalize
+    // only that exact synthetic identity in the DTO; real provider participants
+    // and immutable message sender snapshots retain their recorded provenance.
+    const participants = (result.participants as any[]).map(row =>
+      typeof row?.id === "string" && row.id.startsWith("client:") && row.label === "ROTOXY execution owner" && row.provider === "lightsprint"
+        ? { ...row, provider: "rotoxy" } : row);
+    return { ...result, participants, executionResources: await this.backend?.workspaceResources?.(projectId) ?? [], executions: executionSummaries, executionRevision: Math.max(0, ...executionSummaries.map(row => row.updatedAt)), ...(executionSummaries.length ? { executionSummaries } : {}) } as unknown as AgentWorkspaceSnapshot;
   }
 
   async update(projectId: string, actor: string, input: Record<string, unknown>): Promise<unknown> {
@@ -259,7 +265,7 @@ export class AgentWorkspaceService {
       await this.update(submission.projectId, actor, { ...input, idempotencyKey: `exec-${createHash("sha256").update(`${projectionKey}:${String(input.action)}:${String(input.taskId ?? input.artifactId ?? "")}`).digest("hex").slice(0, 48)}`, expectedRevision: snapshot.revision });
       snapshot = await this.snapshot(submission.projectId, actor);
     };
-    if (!(snapshot.participants as any[]).some(row => row.id === actor)) await apply({ action: "participant_upsert", label: "ROTOXY execution owner", provider: "lightsprint" });
+    if (!(snapshot.participants as any[]).some(row => row.id === actor)) await apply({ action: "participant_upsert", label: "ROTOXY execution owner", provider: "rotoxy" });
     const taskById = new Map(submission.tasks.map(task => [task.taskId, task]));
     const ordered: typeof submission.tasks = [];
     const visited = new Set<string>();
