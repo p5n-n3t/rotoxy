@@ -13,7 +13,7 @@ Call `workspace_projects`, then `workspace_snapshot` for the authorized project.
 
 ## Plan useful parallel work
 
-Break the objective into independent, verifiable tasks and dependencies. Give each task explicit file ownership, inputs, acceptance criteria and an artifact destination. Use isolated branches or sandboxes for concurrent edits. Pick the cheapest demonstrated capable resource; reserve frontier reasoning for hard decisions. Distribute comparable work fairly across eligible accounts, subject to affinity, capacity and budget. Do not fill slots without useful work or split every task equally regardless of capability.
+Break the objective into independent, verifiable tasks and dependencies. Give each task explicit file ownership, inputs, acceptance criteria and an artifact destination. Use isolated branches or sandboxes for concurrent edits. Meet the task quality bar first, then prefer the lowest expected cost; reserve frontier reasoning for hard decisions. Distribute comparable work fairly across eligible accounts, subject to affinity, capacity and budget. Do not fill slots without useful work or split every task equally regardless of capability.
 
 ## Submit and retain control
 

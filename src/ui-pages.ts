@@ -172,7 +172,7 @@ export function renderDiagnosticsPage(input: DiagnosticsPageInput): string {
 
   const stageRows = report.stageChecks.map((check) => {
     const dot = check.status === "passed" ? "" : check.status === "failed" ? "bad" : "warn";
-    return `<tr><td>${esc(check.stage)}</td><td><span class="pill"><span class="dot ${dot}"></span>${esc(check.status)}</span></td><td class="tiny muted">${esc(check.summary)}</td></tr>`;
+    return `<tr><td>${esc(check.stage)}</td><td><span class="pill">${check.status==='skipped'?'':`<span class="dot ${dot}"></span>`}${esc(check.status)}</span></td><td class="tiny muted">${esc(check.summary)}</td></tr>`;
   }).join("");
   const findings = report.findings.map((finding) => `<li><span class="pill"><span class="dot ${SEVERITY_DOT[finding.severity]}"></span>${esc(finding.severity)}</span> <strong>${esc(finding.title)}</strong><div class="tiny muted">${finding.evidence.map((ev) => esc(ev.observation)).join(" · ")}</div><div class="tiny">Next step: ${esc(finding.action.summary)}${finding.action.mode === "plan-only" ? " (preview with <code>rotoxy doctor --repairs</code>)" : ""}</div></li>`).join("");
 

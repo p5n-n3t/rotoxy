@@ -157,3 +157,17 @@ verification enabled (HTTP200, approximately4–5seconds). Previous host-only ch
 resolved the private100.x Tailscale address and therefore were not independent
 public-ingress proof. Browser navigation subsequently reported its browser.user
 API unavailable; no authenticated visual QA is claimed from that failure.
+
+The capacity bottleneck was traced to five retained global slots, three from the
+retired workspace provider. Exact backed-up retirement released only those three;
+see 2026-11-04-legacy-slot-retirement.md. The initial follow-up probe d failed at
+read-only discovery, before any budget reservation/submission; do not treat that
+as a provider launch or blindly replay a submitted operation.
+
+Optional, unconfigured upstream probes now have explicit skipped status. Missing
+required evidence remains unverified and actual failures remain failed. Doctor
+can report healthy when all configured requirements pass without falsely claiming
+an authenticated local tools/list observation. The repository's portable guide
+and optional orchestration skill describe the verified agent/inference contract,
+capacity distinctions, origin protection and no-replay rules. Native Claude task
+cards now link to the durable parent job and external task ID.

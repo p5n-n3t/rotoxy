@@ -70,17 +70,18 @@ test("an absent optional upstream does not make otherwise valid configuration in
   assert.ok(findingIds(snapshot).includes("config.invalid"));
 });
 
-test("an absent upstream leaves optional checks unverified with current gateway guidance", () => {
+test("an absent upstream skips optional checks without pretending authenticated tools were tested", () => {
   const snapshot = healthySnapshot();
   delete snapshot.config.upstreamUrl;
   snapshot.upstream = { checked: false };
   snapshot.tools = { checked: false };
   const report = diagnoseDoctorSnapshot(snapshot);
-  assert.equal(report.stageChecks.find(check => check.stage === "upstream").status, "unverified");
+  assert.equal(report.stageChecks.find(check => check.stage === "upstream").status, "skipped");
   assert.match(report.stageChecks.find(check => check.stage === "upstream").summary, /No upstream MCP URL is configured/);
-  assert.equal(report.stageChecks.find(check => check.stage === "tools").status, "unverified");
+  assert.equal(report.stageChecks.find(check => check.stage === "tools").status, "skipped");
   assert.match(report.stageChecks.find(check => check.stage === "tools").summary, /Local broker tools remain authenticated/);
   assert.equal(findingIds(snapshot).includes("tools.discovery-failed"), false);
+  assert.equal(report.status,'healthy');
 });
 
 test("evaluates cooldowns against the timestamp in the same credential snapshot", () => {

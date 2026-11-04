@@ -339,3 +339,14 @@ Still open beyond this gate: Codex subscription durable execution/native-account
 protection end to end; actual client callback/resumption QA; exact-ID historical
 retirement purge with backup/rollback; remaining search/Oracle/UI acceptance and
 arbitrary-objective planner gates. Do not count static registrations as execution.
+
+### Retired capacity and agent guidance — 2026-11-04
+
+Exact preview/apply utility released3 blocked legacy provider reservations after
+consistent SQLite backup/hash and transaction-fenced revalidation. Two unrelated
+CF ambiguity records are unchanged. History/results/dependencies remain; full
+historical purge is still separate. Backup:retired-legacy-slots-20261104. Utility
+5/5tests pass. Doctor now distinguishes skipped optional probes from unverified
+required evidence. Portable skill updated; local installed skill updated additively.
+Native task cards carry parent job/task linkage. No additional paid dispatch has
+occurred since successful three-provider c; probe d stopped before submission.

@@ -17,7 +17,7 @@ export type DoctorStage =
   | "tools"
   | "funnel";
 
-export type StageStatus = "passed" | "failed" | "unverified";
+export type StageStatus = "passed" | "failed" | "unverified" | "skipped";
 export type FindingSeverity = "critical" | "error" | "warning" | "info";
 
 export interface ProcessSnapshot {
@@ -238,6 +238,7 @@ function eligibleAccounts(snapshot: CredentialsSnapshot | undefined): Credential
 }
 
 function stageChecks(snapshot: DoctorSnapshot): StageCheck[] {
+  const upstreamNotConfigured=snapshot.config?.checked===true&&!snapshot.config.upstreamUrl?.trim();
   const process = snapshot.process;
   const processFailed = Boolean(
     process?.checked &&
@@ -321,7 +322,7 @@ function stageChecks(snapshot: DoctorSnapshot): StageCheck[] {
     credentialsCheck,
     {
       stage: "upstream",
-      status: upstreamFailed ? "failed" : upstreamPassed ? "passed" : "unverified",
+      status: upstreamFailed ? "failed" : upstreamPassed ? "passed" : upstreamNotConfigured ? "skipped" : "unverified",
       summary: upstreamFailed ? "The upstream connection or MCP initialize check failed." : upstreamPassed ? "The upstream connection and MCP initialize probe passed." : !snapshot.config?.upstreamUrl ? "No upstream MCP URL is configured; this optional probe was skipped for the current local gateway." : "A successful upstream MCP initialize probe has not been recorded.",
     },
     {
@@ -331,7 +332,7 @@ function stageChecks(snapshot: DoctorSnapshot): StageCheck[] {
     },
     {
       stage: "tools",
-      status: toolsFailed ? "failed" : toolsPassed ? "passed" : "unverified",
+      status: toolsFailed ? "failed" : toolsPassed ? "passed" : upstreamNotConfigured ? "skipped" : "unverified",
       summary: toolsFailed ? "The MCP tools/list check failed." : toolsPassed ? "MCP tools/list returned a valid result." : !snapshot.config?.upstreamUrl ? "No upstream MCP URL is configured; upstream tools/list was skipped. Local broker tools remain authenticated through the gateway." : "A successful MCP tools/list result has not been recorded.",
     },
     {
@@ -599,7 +600,7 @@ export function diagnoseDoctorSnapshot(snapshot: DoctorSnapshot): DoctorReport {
 
   const checks = stageChecks(snapshot);
   const hasIssues = findings.length > 0 || checks.some((check) => check.status === "failed");
-  const complete = checks.every((check) => check.status === "passed");
+  const complete = checks.every((check) => check.status === "passed"||check.status === "skipped");
   return {
     status: hasIssues ? "issues" : complete ? "healthy" : "incomplete",
     stageChecks: checks,

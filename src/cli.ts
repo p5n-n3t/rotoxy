@@ -535,7 +535,7 @@ program
     } else {
       console.log("ROTOXY doctor: " + report.status);
       for (const check of report.stageChecks) {
-        const mark = check.status === "passed" ? "✓" : check.status === "failed" ? "✗" : "?";
+        const mark = check.status === "passed" ? "✓" : check.status === "failed" ? "✗" : check.status === "skipped" ? "–" : "?";
         console.log("  " + mark + " " + check.stage.padEnd(12) + check.summary);
       }
       for (const finding of report.findings) {

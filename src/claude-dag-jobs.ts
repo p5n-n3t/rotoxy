@@ -56,6 +56,7 @@ export class ClaudeDagJobs implements AgentJobExecutor {
      snap=await this.workspace.snapshot(i.projectId,actor);
     }
     await this.workspace.update(i.projectId,actor,{action:'task_create',taskId,title:'Job task '+String(i.taskId??taskId).slice(0,100),description:i.prompt,
+     ...(typeof i.jobId==='string'&&safe.test(i.jobId)?{jobId:i.jobId}:{}),...(typeof i.taskId==='string'&&safe.test(i.taskId)?{externalTaskId:i.taskId}:{}),
      expectedRevision:snap.revision,idempotencyKey:taskId+'-create'});
    }else if(current.description!==i.prompt)return ambiguous('agent_task_content_mismatch');
    let status=await this.runtime.call('claude_task_status',{projectId:i.projectId,taskId},i.clientId) as any;
