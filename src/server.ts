@@ -3,6 +3,7 @@ import { createEndpointDirectoryRouter } from "./endpoint-directory.js";
 import { McpJobEvents, McpJobEventsError } from "./mcp-job-events.js";
 import { JobInputError } from "./job-submit.js";
 import { ClaudeWorkerRuntime } from "./claude-worker-runtime.js";
+import { ClaudeDagJobs } from './claude-dag-jobs.js';
 import { createRunnerAdminRouter } from "./runner-admin.js";
 import { createOracleModelApi } from "./oracle-model-api.js";
 import { searchMcpHandler } from "./search-mcp.js";
@@ -102,6 +103,10 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const claudeWorker=options.claudeWorker && options.supervisorBackend && workerBinary && existsSync(workerBinary) && workerCwds.length ?
     new ClaudeWorkerRuntime(store,agentWorkspace,options.supervisorBackend,[realpathSync(workerBinary)],workerCwds.map(path=>realpathSync(path))) : undefined;
   const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools, { service: agentWorkspace, backend: options.supervisorBackend }, jobEvents, claudeWorker);
+  if(claudeWorker&&options.supervisorBackend?.setAgentExecutor){
+    options.supervisorBackend.setAgentExecutor(new ClaudeDagJobs(claudeWorker,agentWorkspace));
+    claudeWorker.enableDag();
+  }
   const ui = new (await import("./ui.js")).AdminUi(store, pool, sessions, { oauth, telemetry });
 
   const app = express();

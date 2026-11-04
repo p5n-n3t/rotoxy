@@ -22,8 +22,8 @@ MAX_INSTRUCTIONS = 16 * 1024
 MAX_JOB_BYTES = 1024 * 1024
 MAX_DEPENDENCIES = 8
 MAX_PAGE = 200
-MUTATING_KINDS = {"create_task", "patch_task", "launch_task", "chat_session", "cancel_session", "run_inference"}
-OPERATION_KINDS = {"observe_session", "inspect_task_agents", "chat_session", "cancel_session", "create_task", "patch_task", "verify_task_packet", "launch_task", "run_inference"}
+MUTATING_KINDS = {"create_task", "patch_task", "launch_task", "chat_session", "cancel_session", "run_inference", "run_agent"}
+OPERATION_KINDS = {"observe_session", "inspect_task_agents", "chat_session", "cancel_session", "create_task", "patch_task", "verify_task_packet", "launch_task", "run_inference", "run_agent"}
 USAGE_KEYS = {"reportedSessionCostUsd", "promptCount", "budgetUsed", "maxBudget", "fundingSource", "sandboxTier"}
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # Node job-worker.ts returns these only on the chat_session path before
@@ -203,6 +203,17 @@ def validate_assignment(body):
                 raise ValueError("maxOutputTokens must be between 1 and 4096")
             if execution["accountId"] not in accounts:
                 raise ValueError("Inference account must be eligible")
+        elif execution.get("mode") == "agent":
+            if set(execution) != {"mode", "provider", "accountId", "profileId", "model", "timeoutMs"}:
+                raise ValueError("Invalid bounded agent execution binding")
+            for field, maximum in (("provider", 64), ("accountId", 256), ("profileId", 128), ("model", 160)):
+                _text(execution[field], f"execution.{field}", maximum)
+            if execution["provider"] != "claude-code":
+                raise ValueError("Unsupported agent provider")
+            if type(execution["timeoutMs"]) is not int or not 100 <= execution["timeoutMs"] <= 120000:
+                raise ValueError("Agent timeoutMs must be between 100 and 120000")
+            if execution["accountId"] not in accounts:
+                raise ValueError("Agent account must be eligible")
         else:
             raise ValueError("Unsupported task execution mode")
         output = task["output"]
@@ -396,7 +407,7 @@ class JobRegistry:
 
     def register_account(self, body, now=None):
         required = {"accountId", "enabled", "authorized", "allowUnknownQuota", "health", "quota", "registeredSessions"}
-        _allowed_object(body, required, {"localCapacity", "inferenceProviders"}, "account")
+        _allowed_object(body, required, {"localCapacity", "inferenceProviders", "agentProviders"}, "account")
         account_id = _text(body["accountId"], "accountId")
         if any(type(body[key]) is not bool for key in ("enabled", "authorized", "allowUnknownQuota")):
             raise ValueError("Account flags must be boolean")
@@ -438,14 +449,37 @@ class JobRegistry:
                 raise ValueError("Invalid inference output token limit")
             seen_providers.add(provider)
             clean_providers.append({"provider": provider, "models": clean_models, "maxOutputTokens": maximum})
+        agents = body.get("agentProviders", [])
+        if not isinstance(agents, list) or len(agents) > 8:
+            raise ValueError("agentProviders must be a bounded list")
+        clean_agents = []
+        seen_agents = set()
+        for item in agents:
+            _closed_object(item, {"provider", "profileId", "models", "timeoutMs"}, "agent provider")
+            provider = _text(item["provider"], "agent provider", 64)
+            profile_id = _text(item["profileId"], "agent profileId", 128)
+            models = item["models"]
+            maximum = item["timeoutMs"]
+            if provider != "claude-code" or profile_id in seen_agents:
+                raise ValueError("Unsupported or duplicate agent profile")
+            if not isinstance(models, list) or not 1 <= len(models) <= 64:
+                raise ValueError("Agent models must be a bounded nonempty list")
+            clean_models = [_text(model, "agent model", 160) for model in models]
+            if len(set(clean_models)) != len(clean_models):
+                raise ValueError("Duplicate agent model")
+            if type(maximum) is not int or not 100 <= maximum <= 120000:
+                raise ValueError("Invalid agent timeout limit")
+            seen_agents.add(profile_id)
+            clean_agents.append({"provider": provider, "profileId": profile_id, "models": clean_models, "timeoutMs": maximum})
         data = {"accountId": account_id, "enabled": body["enabled"], "authorized": body["authorized"],
                 "allowUnknownQuota": body["allowUnknownQuota"], "health": body["health"],
                 "quota": body["quota"], "localCapacity": capacity, "registeredSessions": clean_sessions,
-                "inferenceProviders": clean_providers}
+                "inferenceProviders": clean_providers, "agentProviders": clean_agents}
         when = time.time() if now is None else now
         with self.connection(write=True) as db:
             current = db.execute("SELECT revision,data FROM registered_accounts WHERE account_id=?", (account_id,)).fetchone()
             old_providers = json.loads(current["data"]).get("inferenceProviders", []) if current else []
+            old_agents = json.loads(current["data"]).get("agentProviders", []) if current else []
             if current and old_providers != clean_providers:
                 active_inference = False
                 for row in db.execute("SELECT body FROM job_tasks WHERE selected_account=? AND (" + _SLOT_SQL + ")", (account_id,)):
@@ -454,6 +488,11 @@ class JobRegistry:
                         break
                 if active_inference:
                     raise ValueError("Cannot change inference provider allowlist while a task is reserved")
+            if current and old_agents != clean_agents:
+                active_agent = any(json.loads(row["body"]).get("execution", {}).get("mode") == "agent"
+                                   for row in db.execute("SELECT body FROM job_tasks WHERE selected_account=? AND (" + _SLOT_SQL + ")", (account_id,)))
+                if active_agent:
+                    raise ValueError("Cannot change agent profile allowlist while a task is reserved")
             # A busy session is an identity tuple, not just an ID. Keep its owning
             # account, workspace, and model stable until every reservation releases.
             old_sessions = {item["id"]: item for item in json.loads(current["data"])["registeredSessions"]} if current else {}
@@ -513,6 +552,14 @@ class JobRegistry:
         return account, session
 
     @staticmethod
+    def _agent_binding(account, execution):
+        profile = next((item for item in account.get("agentProviders", [])
+                        if item.get("provider") == execution.get("provider") and
+                        item.get("profileId") == execution.get("profileId")), None)
+        return bool(profile and execution.get("model") in profile.get("models", []) and
+                    execution.get("timeoutMs", 0) <= profile.get("timeoutMs", 0))
+
+    @staticmethod
     def _scopes_overlap(left, right):
         for a in left:
             for b in right:
@@ -534,7 +581,9 @@ class JobRegistry:
             for task in body["tasks"]:
                 execution = task["execution"]
                 session_id = execution.get("sessionId")
-                self._account(db, execution["accountId"], session_id)
+                account, _ = self._account(db, execution["accountId"], session_id)
+                if execution["mode"] == "agent" and (not body.get("clientId") or not self._agent_binding(account, execution)):
+                    raise ValueError("Agent task requires an owner-bound registered profile, model, and timeout")
             assignment_row = {"owner_principal": body.get("ownerPrincipalId"), "client_id": body.get("clientId")}
             state = "queued" if approved else "draft"
             db.execute("INSERT INTO assignments(id,project,idem,fingerprint,eligible,body,state,approved,revision,created_at,owner_principal,client_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -796,6 +845,8 @@ class JobRegistry:
     @staticmethod
     def _next_kind(task):
         mode = task["execution"]["mode"]
+        if mode == "agent":
+            return "run_agent" if task.get("dispatchPhase", "queued") == "queued" else None
         if mode == "inference":
             return "run_inference" if task.get("dispatchPhase", "queued") == "queued" else None
         if mode == "fresh":
@@ -883,7 +934,7 @@ class JobRegistry:
                             external_occupancy += 1
                 if job_occupancy + external_occupancy < account_data["localCapacity"]:
                     available.append(candidate)
-            if spec["execution"]["mode"] in {"existing-session", "fresh", "inference"}:
+            if spec["execution"]["mode"] in {"existing-session", "fresh", "inference", "agent"}:
                 pinned = spec["execution"]["accountId"]
                 available = [account for account in available if account == pinned]
             if spec["execution"]["mode"] == "inference":
@@ -895,6 +946,10 @@ class JobRegistry:
                     if (provider is None or execution["model"] not in provider["models"] or
                             execution["maxOutputTokens"] > provider["maxOutputTokens"]):
                         available.remove(candidate)
+            if spec["execution"]["mode"] == "agent":
+                execution = spec["execution"]
+                available = [candidate for candidate in available
+                             if self._agent_binding(self._account(db, candidate)[0], execution)]
             if spec["execution"]["mode"] == "existing-session":
                 session_id = spec["execution"]["sessionId"]
                 session_occupancy = db.execute(
@@ -947,6 +1002,15 @@ class JobRegistry:
             elif execution["mode"] == "inference":
                 operation_input = {"provider": execution["provider"], "model": execution["model"],
                                    "prompt": spec["instructions"], "maxOutputTokens": execution["maxOutputTokens"],
+                                   "expectedMarker": spec["output"]["expectedMarker"], "dispatchAt": dispatch_at}
+            elif execution["mode"] == "agent":
+                assignment_owner = db.execute("SELECT project,client_id FROM assignments WHERE id=?", (row["id"],)).fetchone()
+                if not assignment_owner["client_id"]:
+                    continue
+                operation_input = {"projectId": assignment_owner["project"], "clientId": assignment_owner["client_id"],
+                                   "jobId": row["id"], "taskId": row["task_id"],
+                                   "profileId": execution["profileId"], "model": execution["model"],
+                                   "prompt": spec["instructions"], "timeoutMs": execution["timeoutMs"],
                                    "expectedMarker": spec["output"]["expectedMarker"], "dispatchAt": dispatch_at}
             else:
                 operation_input = {"sessionId": session["id"], "instructions": spec["instructions"],
@@ -1103,6 +1167,21 @@ class JobRegistry:
                             db.execute("UPDATE operations SET due_at=? WHERE id=? AND state='queued'",
                                        (min(dispatched) + 60, op["id"]))
                             return None
+                if op["kind"] == "run_agent":
+                    agent_input = json.loads(op["input"])
+                    owner = db.execute("SELECT project,client_id FROM assignments WHERE id=?", (op["assignment"],)).fetchone()
+                    if (not self._agent_binding(account_data, execution) or not owner or not owner["client_id"] or
+                            agent_input.get("projectId") != owner["project"] or
+                            agent_input.get("clientId") != owner["client_id"] or
+                            agent_input.get("jobId") != op["assignment"] or agent_input.get("taskId") != op["task_id"]):
+                        db.execute("UPDATE operations SET state='rejected',error_class='AgentBindingUnavailable' WHERE id=? AND state='queued'", (op["id"],))
+                        db.execute("UPDATE job_tasks SET state='blocked',released_at=? WHERE assignment=? AND task_id=? AND generation=?",
+                                   (when, op["assignment"], op["task_id"], op["generation"]))
+                        db.execute("UPDATE attempts SET state='blocked',released_at=? WHERE id=? AND released_at IS NULL", (when, op["attempt_id"]))
+                        if not self._has_runnable_tasks(db, op["assignment"]):
+                            db.execute("UPDATE assignments SET state='held',revision=revision+1 WHERE id=?", (op["assignment"],))
+                        self._event(db, op["assignment"], "agent_binding_unavailable", {"taskId": op["task_id"], "generation": op["generation"], "operationId": op["id"]}, when)
+                        return None
                 occupied = db.execute(
                     "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND NOT (assignment=? AND task_id=?) "
                     "AND (" + _SLOT_SQL + ")",
@@ -1183,7 +1262,7 @@ class JobRegistry:
         result = body.get("result", {})
         if not isinstance(result, dict) or len(json.dumps(result, separators=(",", ":")).encode()) > 32768:
             raise ValueError("Result must be a bounded object")
-        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "requestStartedAt", "usage", "creditDebit", "finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId"}
+        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "requestStartedAt", "usage", "creditDebit", "finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId", "attemptId", "artifactId", "profileId", "costUsd"}
         if set(result) - allowed_result:
             raise ValueError("Unsupported operation result fields")
         for key, value in result.items():
@@ -1214,6 +1293,10 @@ class JobRegistry:
                 if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value):
                     raise ValueError("Invalid Cloudflare account attribution")
                 continue
+            if key == "costUsd":
+                if type(value) not in {int, float} or not math.isfinite(value) or value < 0:
+                    raise ValueError("Invalid Claude agent cost")
+                continue
             if key == "providerUsage":
                 if (not isinstance(value, dict) or len(value) > 8 or
                         set(value) - {"prompt_tokens", "completion_tokens", "total_tokens", "neurons"} or
@@ -1238,7 +1321,7 @@ class JobRegistry:
                     if not isinstance(nested, str) or len(nested) > 2048 or re.search(r"(?i)bearer\s+\S+|lsat_[A-Za-z0-9_-]+", nested):
                         raise ValueError("Invalid pull request reference")
             elif key in {"assistantAt", "requestStartedAt"}:
-                if type(value) not in {int, float} or value < 0:
+                if type(value) not in {int, float} or not math.isfinite(value) or value < 0:
                     raise ValueError(f"{key} must be a non-negative timestamp")
             elif value is not None: raise ValueError("Invalid result value")
         error_class = body.get("errorClass")
@@ -1303,6 +1386,30 @@ class JobRegistry:
                             any(type(value) not in {int, float} or not math.isfinite(value) or value < 0 or
                                 (key != "neurons" and type(value) is not int) for key, value in usage.items())):
                         raise ValueError("Invalid inference provider usage")
+            if outcome == "accepted" and op["kind"] == "run_agent":
+                row = db.execute("SELECT body,dispatch_at FROM job_tasks WHERE assignment=? AND task_id=?", (op["assignment"], op["task_id"])).fetchone()
+                spec = json.loads(row["body"])
+                execution = spec["execution"]
+                agent_input = json.loads(op["input"])
+                owner = db.execute("SELECT project,client_id FROM assignments WHERE id=?", (op["assignment"],)).fetchone()
+                assistant_text = result.get("assistantText")
+                request_started_at, assistant_at = result.get("requestStartedAt"), result.get("assistantAt")
+                dispatch_at = agent_input.get("dispatchAt")
+                if (not isinstance(assistant_text, str) or result.get("reportedModel") != execution["model"] or
+                        result.get("profileId") != execution["profileId"] or
+                        not isinstance(result.get("attemptId"), str) or not result["attemptId"] or len(result["attemptId"]) > 128 or
+                        not isinstance(result.get("artifactId"), str) or not result["artifactId"] or len(result["artifactId"]) > 256 or
+                        not owner or agent_input.get("projectId") != owner["project"] or agent_input.get("clientId") != owner["client_id"]):
+                    raise ValueError("Accepted Claude agent result is missing its owner, profile, attempt, artifact, or model binding")
+                if (type(request_started_at) not in {int, float} or not math.isfinite(request_started_at) or
+                        type(assistant_at) not in {int, float} or not math.isfinite(assistant_at) or
+                        type(dispatch_at) not in {int, float} or not math.isfinite(dispatch_at) or
+                        request_started_at < dispatch_at or assistant_at < request_started_at):
+                    raise ValueError("Claude agent request interval timestamps are invalid")
+                final_line = next((line for line in reversed(assistant_text.splitlines()) if line.strip()), "")
+                if (len(assistant_text.encode("utf-8")) > spec["output"]["maxBytes"] or
+                        final_line != spec["output"]["expectedMarker"]):
+                    raise ValueError("Claude agent result does not satisfy the bounded final marker contract")
             debit = result.get("creditDebit")
             if debit is not None:
                 if self.credit_admission is None or op["kind"] != "chat_session" or outcome != "accepted":
@@ -1383,6 +1490,21 @@ class JobRegistry:
                     db.execute("UPDATE attempts SET state='blocked',released_at=? WHERE id=? AND released_at IS NULL",
                                (when, op["attempt_id"]))
                     state = "blocked"
+            elif op["kind"] == "run_agent":
+                spec = json.loads(task["body"])
+                agent_input = json.loads(op["input"])
+                text_value = result["assistantText"]
+                metadata = {"attemptId": result["attemptId"], "artifactId": result["artifactId"],
+                            "profileId": result["profileId"], "requestStartedAt": result["requestStartedAt"]}
+                if "costUsd" in result:
+                    metadata["costUsd"] = result["costUsd"]
+                db.execute("INSERT OR IGNORE INTO job_results(assignment,task_id,generation,text,assistant_at,reported_model,created_at,metadata) VALUES(?,?,?,?,?,?,?,?)",
+                           (op["assignment"], op["task_id"], op["generation"], text_value,
+                            result["assistantAt"], result["reportedModel"], when, json.dumps(metadata, sort_keys=True)))
+                db.execute("UPDATE job_tasks SET reported_model=?,released_at=? WHERE assignment=? AND task_id=? AND generation=?",
+                           (result["reportedModel"], when, op["assignment"], op["task_id"], op["generation"]))
+                db.execute("UPDATE attempts SET state='complete',released_at=? WHERE id=? AND released_at IS NULL", (when, op["attempt_id"]))
+                state = "complete"
             else:
                 spec = json.loads(task["body"])
                 phase_map = {"create_task": "created", "patch_task": "patched", "verify_task_packet": "verified"}

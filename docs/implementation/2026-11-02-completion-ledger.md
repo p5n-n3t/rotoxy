@@ -300,3 +300,16 @@ event callback/reaction, unrestricted coding policy, full mixed-provider plannin
 and historical retired-provider purge are not complete. Next integrate the existing
 Claude execution contract with the main scheduler before claiming automatic
 mixed-provider Claude dispatch; preserve private attempts and do not replay them.
+
+### Main Claude DAG integration — 2026-11-04 (local gate)
+
+Added explicit agent/claude-code task execution, trusted profile discovery and
+main-scheduler binding. Reuses Claude workspace task/attempt ledger; no duplicate
+queue. Python enforces profile/model/time/output/owner fences and no replay after
+lease loss. Job cancellation now reaches owned Claude children; generation-conflict
+receipts are bounded. Real Python+fakeCLI integration passes dependencies,
+idempotency, artifacts and cancellation. Final agent/worker subset43/43 passed;
+Python5new+90existing passed. See verification/2026-11-04-claude-unified-jobs.md.
+Next: full CI, private config profile binding, backed-up release activation, real
+bounded Claude/Oracle mixed job, and restart/result retrieval proof. Do not claim
+those production gates complete from local tests.

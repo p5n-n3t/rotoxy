@@ -9,6 +9,7 @@ import { redact } from "./telemetry.js";
 import { normalizeSupervisorSnapshot, renderSupervisorDashboard, renderSupervisorEventFeed, renderSupervisorWorkerView } from "./supervisor-ui.js";
 import type { StateStore } from "./store.js";
 import type { WorkerGuidanceInput, WorkerGuidanceResult } from "./worker-guidance.js";
+import type { AgentJobExecutor } from './job-worker.js';
 
 export interface SupervisorCaller {
   /** OAuth client id; the durable bridge uses this to enforce project ownership. */
@@ -37,6 +38,7 @@ export interface WorkspaceAccessUpdate { projectId: string; clientIds: string[];
 
 /** Semantic injection seam. A concrete adapter delegates to the durable supervisor bridge. */
 export interface SupervisorBackend {
+  setAgentExecutor?(executor:AgentJobExecutor):void;
   callTool(name: JobToolName, args: unknown, caller: SupervisorCaller): Promise<unknown>;
   /** Verify project membership for shared agent collaboration; no caller-supplied actor identity. */
   authorizeWorkspace?(projectId: string, clientId: string): void | Promise<void>;

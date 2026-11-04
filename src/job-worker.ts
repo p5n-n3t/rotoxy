@@ -47,6 +47,17 @@ export interface JobOperation {
   input: Record<string, unknown>;
 }
 
+export interface AgentResource {
+  accountId: string; provider: "claude-code"; profileId: string; models: string[];
+  capacity: number; timeoutMs: number; busy?:boolean;
+}
+export interface AgentJobExecutor {
+  resources(): Promise<AgentResource[]>;
+  invoke(operation: JobOperation): Promise<JobResult<Record<string, unknown>>>;
+  cancelJob?(projectId:string,jobId:string,clientId:string):Promise<number>;
+  cancelAll?():Promise<void>;
+}
+
 export interface InferenceRequest {
   operationId: string;
   accountId: string;
@@ -74,6 +85,8 @@ export interface InferenceExecutor {
 }
 
 export interface JobWorkerOptions {
+  agentExecutor?: AgentJobExecutor;
+  isAgentEligible?: (operation: JobOperation) => boolean | Promise<boolean>;
   bridge: JobBridge;
   adapterFactory: (accountId: string, limits: { timeoutMs: number }) => PinnedJobsAdapter | Promise<PinnedJobsAdapter>;
   /** Called only for a structurally valid, durably claimed operation. When supplied for chat dispatch it must return undefined to reject an operation outside its trusted binding. */
@@ -266,7 +279,7 @@ function newestAssistant(transcript: unknown, dispatchAtSeconds: number, instruc
 function validOperation(value: unknown): value is JobOperation {
   const row = object(value);
   return !!row && ID.test(String(row.operationId ?? "")) && ID.test(String(row.attemptId ?? "")) &&
-    Number.isSafeInteger(row.generation) && Number(row.generation) > 0 && ID.test(String(row.selectedAccountId ?? "")) &&
+    Number.isSafeInteger(row.generation) && Number(row.generation) > 0 && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(String(row.selectedAccountId ?? "")) &&
     typeof row.kind === "string" && object(row.input) !== undefined;
 }
 
@@ -306,7 +319,12 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
       receipts.delete(operationId);
       leaseDeadlines.delete(operationId);
       return true;
-    } catch {
+    } catch(error) {
+      if(object(error)?.code==='http_409'){
+        receipts.delete(operationId);leaseDeadlines.delete(operationId);
+        diagnostic('result_receipt_generation_conflict');
+        return false;
+      }
       const previous = receipts.get(operationId);
       receipts.set(operationId, { body, attempts: (previous?.attempts ?? 0) + 1 });
       diagnostic("result_receipt_pending");
@@ -336,6 +354,18 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
     try {
       const checkEligible = (op.kind === "observe_session" || op.kind === "inspect_task_agents") && options.isAccountObservable !== undefined
         ? options.isAccountObservable : options.isAccountEligible;
+      if (op.kind === "run_agent") {
+        const timeout = input.timeoutMs;
+        if (!options.agentExecutor || !options.isAgentEligible || !await options.isAgentEligible(op) ||
+            !Number.isSafeInteger(timeout) || Number(timeout) < 100 || Number(timeout) > 120000 ||
+            stopped || !running || (leaseDeadlines.get(op.operationId) ?? 0) - now() <= Number(timeout) + requestTimeoutMs) {
+          return await submit(op, "rejected", {}, "agent_resource_unavailable");
+        }
+        mutationStarted = true;
+        const invoked = await options.agentExecutor.invoke(op);
+        if (invoked.accountId !== op.selectedAccountId) return await submit(op,"ambiguous",{},"agent_account_mismatch");
+        return await submit(op, invoked.classification, invoked.value ?? {}, invoked.reason);
+      }
       if (op.kind === "run_inference") {
         if (!options.isInferenceEligible || !await options.isInferenceEligible(op)) {
           errorClass = "inference_resource_unavailable"; return await submit(op, "rejected", {}, errorClass);
@@ -633,6 +663,7 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
       if (timer) clearTimeout(timer);
       timer = undefined;
       controller?.abort();
+      await options.agentExecutor?.cancelAll?.();
       await tickPromise?.catch(() => undefined);
       await Promise.allSettled([...active.values()]);
     },

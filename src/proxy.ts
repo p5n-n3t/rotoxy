@@ -779,7 +779,7 @@ export class McpProxy {
             const args=message.params?.arguments as Record<string,unknown>;
             try{
               const agents=await this.claudeWorker.call('claude_workers',{projectId:args.projectId},claims.client_id) as {workers?:unknown[]};
-              value={...baseValue,agentResources:agents.workers??[]};
+              value={...baseValue,agentResources:baseValue.agentResources??agents.workers??[],agentProfiles:agents.workers??[]};
             }catch{
               value={...baseValue,agentResources:[],agentResourcesStatus:'Claude worker registry could not be read; inference resources remain available.'};
             }

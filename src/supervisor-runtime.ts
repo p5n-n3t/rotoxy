@@ -8,7 +8,7 @@ import { chmod, lstat, open, readFile, rename, unlink, writeFile } from "node:fs
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { PROVIDER_PROFILES } from "./provider-capabilities.js";
-import { createJobWorker, type JobBridge, type JobWorkerOptions, type PinnedJobsAdapter } from "./job-worker.js";
+import { createJobWorker, type JobBridge, type JobWorkerOptions, type PinnedJobsAdapter, type AgentJobExecutor, type AgentResource, type JobOperation } from "./job-worker.js";
 import { JobInputError, validateJobToolArguments, type JobTaskInput, type JobToolName } from "./job-submit.js";
 import { LightSprintJobsAdapter } from "./providers/lightsprint-jobs.js";
 import { LightSprintWorkspacePinnedJobsAdapter, workspaceBranchName } from "./providers/lightsprint-workspace-pinned-jobs.js";
@@ -303,6 +303,26 @@ function workspaceAccessRevision(raw: string, clients: Array<{ clientId: string;
 }
 
 export class SupervisorRuntime implements SupervisorBackend {
+  private agentExecutor?:AgentJobExecutor;
+  setAgentExecutor(executor:AgentJobExecutor){this.agentExecutor=executor;this.dispatchPolicyFingerprint="";}
+  private async agentResources():Promise<AgentResource[]>{
+    if(!this.agentExecutor)return [];
+    const rules=await new ResourceRoutingRulesStore(this.options.store,this.options.routingConfigDir??this.options.configDir).read();
+    return (await this.agentExecutor.resources()).filter(r=>rules.resources[r.accountId]?.enabled!==false)
+      .map(r=>({...r,models:r.models.filter(model=>routingRuleAllowsModel(rules.resources[r.accountId],model))})).filter(r=>r.models.length>0);
+  }
+  private async agentEligible(op:JobOperation):Promise<boolean>{
+    const resource=(await this.agentResources()).find(r=>r.accountId===op.selectedAccountId&&r.profileId===op.input.profileId&&r.models.includes(String(op.input.model)));
+    if(!resource||resource.busy||Number(op.input.timeoutMs)>resource.timeoutMs)return false;
+    if(typeof op.input.projectId!=='string'||typeof op.input.clientId!=='string'||typeof op.input.jobId!=='string')return false;
+    try{await this.authorizeWorkspace(op.input.projectId,op.input.clientId);}catch{return false;}
+    const project=this.config.projects.find(p=>p.projectId===op.input.projectId&&p.accountIds.includes(resource.accountId));
+    if(!project)return false;
+    const assignment=parseJson(await this.bridge.request('GET',`/admin/api/v1/assignments/${op.input.jobId}`,undefined,this.owner({clientId:op.input.clientId,projectId:project.projectId})));
+    if(assignment.projectId!==project.projectId||assignment.state!=='queued')return false;
+    const rules=await new ResourceRoutingRulesStore(this.options.store,this.options.routingConfigDir??this.options.configDir).read();
+    return rules.resources[resource.accountId]?.enabled!==false;
+  }
   private readonly bridge: SupervisorBridge;
   private worker?: ReturnType<typeof createJobWorker>;
   private closed = false;
@@ -596,7 +616,10 @@ export class SupervisorRuntime implements SupervisorBackend {
   private async syncDispatchPolicy():Promise<void>{
     const rulesDir=this.options.routingConfigDir??this.options.configDir??this.options.store.dir;
     const [state,rules,inference]=await Promise.all([this.options.store.load(),new ResourceRoutingRulesStore(this.options.store,rulesDir).read(),this.inferenceResources(true)]);
+    const agents=await this.agentResources();
     const payloads=[...new Set(this.config.projects.flatMap(p=>p.accountIds))].map(accountId=>{
+      const agent=agents.find(r=>r.accountId===accountId);
+      if(agent)return {accountId,enabled:rules.resources[accountId]?.enabled!==false,authorized:true,allowUnknownQuota:this.config.allowUnknownQuota,health:agent.busy?'degraded':'healthy',quota:'unknown',localCapacity:1,registeredSessions:[],agentProviders:[{provider:agent.provider,profileId:agent.profileId,models:agent.models,timeoutMs:agent.timeoutMs}]};
       const account=state.accounts.find(a=>a.id===accountId);
       const inferenceResource=inference.get(accountId);
       if(inferenceResource){return {accountId,enabled:inferenceResource.enabled,authorized:inferenceResource.authorized,
@@ -748,8 +771,13 @@ export class SupervisorRuntime implements SupervisorBackend {
       );
       // Fleet discovery and collaboration work before the first worker is bound.
       // Empty fleets have no dispatch worker; do not invent an allowed model.
-      if (registeredModels.length || freshBindingsConfigured || inferenceBindingsConfigured) {
+      if (registeredModels.length || freshBindingsConfigured || inferenceBindingsConfigured || this.config.projects.some(p=>p.accountIds.some(id=>id.startsWith('claude-code:')))) {
       this.worker = createJobWorker({
+        agentExecutor:{resources:()=>this.agentResources(),invoke:op=>{
+          if(!this.agentExecutor)throw Error('agent_executor_unavailable');
+          return this.agentExecutor.invoke(op);
+        },cancelAll:async()=>{await this.agentExecutor?.cancelAll?.();}},
+        isAgentEligible:op=>this.agentEligible(op),
         bridge: workerBridge,
         beforeClaim: () => this.syncDispatchPolicy(),
         adapterFactory: adapters,
@@ -828,9 +856,11 @@ export class SupervisorRuntime implements SupervisorBackend {
         throw new JobInputError("provider_retired");
       }
       const inferenceResources = await this.inferenceResources(true);
+      const agentResources = await this.agentResources();
       const eligible = requested.filter((id) => {
         const signal = accountSignal(state.accounts.find((row) => row.id === id), nativeTarget);
         const inference = inferenceResources.get(id);
+        if(agentResources.some(r=>r.accountId===id))return true;
         return signal.enabled && signal.authorized && signal.health === "healthy" && (signal.quota === "available" || signal.quota === "unknown" && this.config.allowUnknownQuota) ||
           !!inference && inference.enabled && inference.authorized && inference.health === "healthy" && inference.capacity > 0 && this.config.allowUnknownQuota;
       });
@@ -840,6 +870,16 @@ export class SupervisorRuntime implements SupervisorBackend {
         task.execution.mode === "fresh");
       const inferenceTasks = requestedTasks.filter((task): task is JobTaskInput & { execution: Extract<JobTaskInput["execution"], { mode: "inference" }> } =>
         task.execution.mode === "inference");
+      const agentTasks=requestedTasks.filter(task=>task.execution.mode==='agent');
+      const agentBindings=new Map<string,AgentResource>();
+      for(const task of agentTasks){
+        if(task.execution.mode!=='agent')continue;
+        const e=task.execution;
+        const binding=agentResources.find(r=>eligible.includes(r.accountId)&&r.profileId===e.profileId&&r.models.includes(e.model)&&r.timeoutMs>=e.timeoutMs);
+        if(!binding)throw new JobInputError('agent profile/model is not enabled and bound to this project');
+        if(task.output.maxBytes>16384)throw new JobInputError('Claude agent output limit must not exceed 16384 bytes');
+        agentBindings.set(task.taskId,binding);
+      }
       let dispatchEligible = eligible;
       // Fresh work is account-pinned per task.  This lets a single durable job
       // fan out across verified account/workspace/stack tuples while preserving
@@ -880,16 +920,20 @@ export class SupervisorRuntime implements SupervisorBackend {
       }
       const sessions = project.registeredSessions.filter((session) => dispatchEligible.includes(session.accountId));
       if (requestedTasks.some((task) => task.execution.mode === "existing-session") && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
-      if (!freshTasks.length && !inferenceTasks.length && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
+      if (!freshTasks.length && !inferenceTasks.length && !agentTasks.length && !sessions.length) throw new JobInputError("no registered session is configured for the eligible accounts");
       let nextSession = 0;
       const tasks = requestedTasks.map((task) => {
         const output = task.output;
         if (output.kind !== "text") throw new JobInputError("the current supervisor supports bounded text output only");
         if (output.maxBytes > this.config.localLimits.maxOutputBytes) throw new JobInputError("text output exceeds the configured supervisor limit");
-        const markerLine = task.execution.mode === "inference"
+        const markerLine = task.execution.mode === "inference" || task.execution.mode === "agent"
           ? `\n\nFinish with this exact completion marker as the final nonempty line. Do not add any text after it: ${output.expectedMarker}`
           : `\n\nInclude this exact completion marker on its own line: ${output.expectedMarker}`;
         if (Buffer.byteLength(task.instructions + markerLine) > 16_384) throw new JobInputError("instructions plus completion marker exceed 16 KiB");
+        if(task.execution.mode==='agent'){
+          const binding=agentBindings.get(task.taskId)!;
+          return {...task,instructions:task.instructions+markerLine,execution:{...task.execution,accountId:binding.accountId}};
+        }
         if (task.execution.mode === "fresh") {
           const binding = freshBindingsByTask.get(task.taskId);
           if (!binding) throw new JobInputError(`fresh ${task.execution.provider} task is missing its verified binding`);
@@ -979,6 +1023,7 @@ export class SupervisorRuntime implements SupervisorBackend {
         requestStartedAt: item.requestStartedAt,
         finishReason: item.finishReason, terminationEvidence: item.terminationEvidence, modelEvidence: item.modelEvidence,
         providerUsage: item.providerUsage, providerHost: item.providerHost, providerAccountId: item.providerAccountId,
+        attemptId:item.attemptId,artifactId:item.artifactId,profileId:item.profileId,costUsd:item.costUsd,
         createdAt: item.createdAt ?? item.created_at,
       })) : [];
       return boundedJson({ assignmentId: args.jobId, results });
@@ -1023,7 +1068,8 @@ export class SupervisorRuntime implements SupervisorBackend {
             : "encrypted_credential_allowlist_and_live_model_catalog",
           ...(resource.provider === "oracle" ? { eligibleHostCount: resource.oracleHosts?.length ?? 0 } : {}) }];
       });
-      return boundedJson({ projectId: project.projectId, accounts, workers, inferenceResources,
+      const agentResources=(await this.agentResources()).filter(r=>project.accountIds.includes(r.accountId)).map(r=>({...r,executionMode:'agent',quota:'not_reported',tools:['Read','Glob','Grep'],maxBudgetUsd:0.25}));
+      return boundedJson({ projectId: project.projectId, accounts, workers, inferenceResources, agentResources,
         maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
     }
     if (name === "job_inbox") {
@@ -1058,7 +1104,9 @@ export class SupervisorRuntime implements SupervisorBackend {
       const jobId = String(args.jobId);
       const row = parseJson(await this.bridge.request("GET", `/admin/api/v1/assignments/${jobId}`, undefined, owner));
       if (row.projectId !== project.projectId || !Number.isInteger(row.revision)) throw new JobInputError("job is not available");
-      return boundedJson(await this.bridge.request("POST", `/v1/assignments/${jobId}/cancel`, { expectedRevision: row.revision }, owner));
+      const cancelled=await this.bridge.request("POST", `/v1/assignments/${jobId}/cancel`, { expectedRevision: row.revision }, owner);
+      const localCancellationRequests=await this.agentExecutor?.cancelJob?.(project.projectId,jobId,caller.clientId)??0;
+      return boundedJson({...parseJson(cancelled),localCancellationRequests});
     }
     if (name === "job_control") {
       const controlRoute = `/admin/api/v1/projects/${encodeURIComponent(project.projectId)}/control`;

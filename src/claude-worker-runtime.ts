@@ -8,6 +8,7 @@ import { ClaudeWorkspaceDispatch } from './claude-workspace-dispatch.js';
 import { ClaudeTaskDispatch, readClaudeRunnerProfiles } from './claude-task-dispatch.js';
 import { ClaudeCodeJobs } from './providers/claude-code-jobs.js';
 import { loadBedrockCredentialSource } from './bedrock-credential-source.js';
+import type { AgentResource } from './job-worker.js';
 
 const SAFE=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CWD=fileURLToPath(new URL('../supervisor/',import.meta.url));
@@ -29,9 +30,16 @@ export class ClaudeWorkerRuntime {
  private closed=false;
  private pendingStarts=0;
  private submitting=false;
+ private dagEnabled=false;
  private readonly startedAt=Math.floor(Date.now()/1000);
  private workerActor(clientId:string){return 'client:claude-worker-'+createHash('sha256').update(clientId).digest('hex').slice(0,24);}
  constructor(private readonly store:StateStore,private readonly workspace:AgentWorkspaceService,private readonly backend:SupervisorBackend,private readonly allowedExecutables:readonly string[],private readonly allowedCwds:readonly string[]){}
+ enableDag(){this.dagEnabled=true;}
+ async resources():Promise<AgentResource[]>{
+  const rows=await readClaudeRunnerProfiles(join(this.store.dir,'runner-profiles.json'));
+  return rows.filter(row=>row.enabled&&row.id.length<=100&&this.allowedExecutables.includes(row.binary)&&this.allowedCwds.includes(row.cwd))
+   .map(row=>({accountId:'claude-code:'+row.id,provider:'claude-code',profileId:row.id,models:row.allowedModels,capacity:1,timeoutMs:120000,busy:this.active.size+this.pendingStarts>0||this.submitting}));
+ }
  private async ledger(input:Record<string,unknown>):Promise<any>{
   const output=await runWorkspacePython('/usr/bin/python3',['-m','snooze.claude_workspace_worker','--db',join(this.store.dir,'agent-workspace.sqlite3'),'--ledger'],JSON.stringify(input),{cwd:CWD,timeoutMs:10000,maxStdoutBytes:65536});
   const value=JSON.parse(output);if(value?.error)throw new Error('claude_attempt_operation_failed');return value;
@@ -94,7 +102,7 @@ export class ClaudeWorkerRuntime {
   if(Object.keys(args).some(key=>!allowed.includes(key)))throw Error('invalid_claude_worker_input');
   if(name==='claude_workers'){
    const rows=await readClaudeRunnerProfiles(join(this.store.dir,'runner-profiles.json'));
-   return {projectId:args.projectId,workers:rows.filter(row=>row.enabled&&this.allowedExecutables.includes(row.binary)&&this.allowedCwds.includes(row.cwd)).map(row=>({profileId:row.id,provider:'claude-code',inferenceProvider:'bedrock',models:row.allowedModels,capacity:1,tools:['Read','Glob','Grep'],maxBudgetUsd:0.25,taskInterface:'workspace-task',mainDagIntegration:false})),activeWorkers:this.active.size};
+   return {projectId:args.projectId,workers:rows.filter(row=>row.enabled&&this.allowedExecutables.includes(row.binary)&&this.allowedCwds.includes(row.cwd)).map(row=>({accountId:'claude-code:'+row.id,profileId:row.id,provider:'claude-code',inferenceProvider:'bedrock',models:row.allowedModels,capacity:1,tools:['Read','Glob','Grep'],maxBudgetUsd:0.25,taskInterface:'workspace-task',mainDagIntegration:this.dagEnabled})),activeWorkers:this.active.size};
   }
   if(typeof args.taskId!=='string'||!SAFE.test(args.taskId))throw Error('invalid_claude_worker_task');
   if(name==='claude_task_cancel'){
