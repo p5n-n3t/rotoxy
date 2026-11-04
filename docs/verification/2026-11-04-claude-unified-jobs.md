@@ -171,3 +171,19 @@ an authenticated local tools/list observation. The repository's portable guide
 and optional orchestration skill describe the verified agent/inference contract,
 capacity distinctions, origin protection and no-replay rules. Native Claude task
 cards now link to the durable parent job and external task ID.
+
+## Restored-capacity verification
+
+Job `rx-unified-restored-capacity-20261104-d` completed all three tasks after the
+exact legacy reservation retirement. Claude Haiku through Bedrock produced a
+review artifact (attempt7), Oracle qwen3.5:2b ran on ora5, and Cloudflare's pinned
+llama-3.1-8b-instruct-fp8 endpoint returned the required arithmetic and marker.
+All three client invocation intervals overlap by2.455 seconds. This measures
+request lifetimes, not internal GPU execution. Claude reported $0.004889; actual
+Cloudflare charges remain unreported. The initial read-only discovery failure
+created no assignment or budget reservation; both were checked absent before
+this one submission. No ambiguous mutation was replayed.
+
+Authentication used a temporary locally signed scoped JWT for an existing
+registered OAuth client. This does not prove a new external client's OAuth consent
+or dormant-chat event delivery. Private receipts remain outside version control.

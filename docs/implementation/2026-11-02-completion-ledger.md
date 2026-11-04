@@ -5,6 +5,22 @@ Keep this ledger current; a source commit is not a deployed milestone.
 
 ## Current checkpoint
 
+Latest 2026-11-04 evidence supersedes older chronological entries below:
+- Backend/CLI deployed3e47ae6; CI41867073940 passed. Follow-up894411e is staged,
+  with21 focused Node tests and5 retirement tests passed; release CI in progress.
+- Main durable jobs now execute Claude Code, Oracle and Cloudflare. Controlled
+  job rx-unified-restored-capacity-20261104-d completed with validated outputs
+  and2.455s three-way request overlap. Claude reported $0.004889.
+- Three exact blocked legacy reservations retired with consistent backup and
+  journal; two unrelated Cloudflare ambiguities preserved. Historical purge is
+  still separate and incomplete.
+- Browser inventory confirms authenticated admin; inspection control fails.
+  Authenticated visual acceptance remains unverified.
+- Remaining: Codex durable DAG integration and native-account binding protection,
+  objective planner, complete Oracle/search acceptance, historical purge and
+  end-to-end fresh-client/reconnect/recovery/browser acceptance.
+
+
 - Operator resumed implementation on Sol after the architectural pass.
 - Source checkpoint `9f7d26e`: config/doctor/health corrections, shared Oracle-aware
   search configuration validation and UI, Cloudflare receipt/cancellation fixes,
