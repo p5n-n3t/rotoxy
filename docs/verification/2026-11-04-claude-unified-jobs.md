@@ -109,3 +109,29 @@ live job `rx-unified-capacity-20261104-b` completed Claude file inspection and
 Oracle computation with8.004seconds of client-interval overlap; Cloudflare was
 excluded because occupancy was explicitly unavailable, not counted as executed.
 Its Claude CLI reported$0.004763. A final capacity/three-provider gate remains.
+
+## Final installed mixed-provider proof
+
+Release8cc347a passed CI41858645741 and was activated with rollback material at
+`~/.local/state/rotoxy/releases/rollback-account-ids-1793806458/`.
+Live job `rx-unified-all-providers-20261104-c` completed all three nodes:
+
+- Claude Code via Bedrock Haiku read package.json and returned the requested
+  inspection result, exact marker, matching model, attempt and review artifact.
+  CLI reported$0.004905.
+- Oracle returned validated arithmetic and marker, reporting qwen3.5:2b on ora7.
+- Cloudflare returned validated arithmetic and marker through its selected Llama
+  endpoint. It did not report a model ID; the selected endpoint is the model
+  evidence, as required by the existing Cloudflare contract.
+
+All results were retrieved via the ordinary job results operation. There was
+pairwise overlap (Claude/Oracle and Oracle/Cloudflare), but no common interval for
+all three. Do not claim three simultaneous executions. These measured intervals
+cover client invocations, not GPU execution. Discovery correctly showed six free
+Cloudflare accounts and two retained slots at the observed time. Retained work
+from other clients was not modified. Verification used short-lived locally issued
+scoped JWTs for a registered client, not a fresh external OAuth login.
+
+The lifecycle CLI also now defaults to concise readable output, retains --json
+for automation, and reports actual local health in status. Focused launcher tests
+pass14/14; installation of the wrapper does not require a backend restart.

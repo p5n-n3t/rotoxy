@@ -9,7 +9,7 @@ const isolatedHome = await mkdtemp(join(tmpdir(), 'rotoxy-home-'));
 process.env.HOME = isolatedHome;
 process.env.TOKEN2OAUTH_CONFIG_DIR = join(isolatedHome, '.config/token2oauth-test');
 
-import { APP_UNITS, FUNNEL_UNIT, TARGET_UNIT, RotoxyController, parseArgs } from '../scripts/rotoxy-control.mjs';
+import { APP_UNITS, FUNNEL_UNIT, TARGET_UNIT, RotoxyController, formatLifecycleOutput, parseArgs } from '../scripts/rotoxy-control.mjs';
 
 test.after(async () => { await rm(isolatedHome, { recursive: true, force: true }); });
 
@@ -159,11 +159,40 @@ test('persistent migration refuses a foreign mount even with the owned-root appr
   assert.equal(f.events.some(([file,args]) => file === 'tailscale' && args.includes('off')),false);
 });
 
-test('CLI accepts only explicit manual actions and migration plan file on up', () => {
+test('CLI accepts explicit human or JSON lifecycle output without loosening migration flags', () => {
   assert.deepEqual(parseArgs(['up']), { action: 'up', migrationPlan: undefined });
   assert.deepEqual(parseArgs(['up', '--migration-plan', '/tmp/review.json']), { action: 'up', migrationPlan: '/tmp/review.json' });
+  assert.deepEqual(parseArgs(['status', '--json']), { action: 'status', migrationPlan: undefined, json: true });
+  assert.deepEqual(parseArgs(['up', '--json', '--migration-plan', '/tmp/review.json']), { action: 'up', migrationPlan: '/tmp/review.json', json: true });
   assert.throws(() => parseArgs(['enable']), /Usage/);
   assert.throws(() => parseArgs(['status', '--migration-plan', 'x']), /only valid with up/);
+  assert.throws(() => parseArgs(['up', '--json', '--json']), /Usage/);
+  assert.throws(() => parseArgs(['down', '--migration-plan', 'x', '--json']), /only valid with up/);
+});
+
+test('human lifecycle output summarizes service states, readiness, ingress, and public route without dumping snapshots', () => {
+  const result = { ok: true, started: ['rotoxy.target'], status: {
+    units: { 'rotoxy-gateway.service': true, 'rotoxy-oracle-pool.service': false,
+      'rotoxy-worker-monitor.service': true, 'rotoxy-funnel.service': true, 'rotoxy.target': true },
+    configuredUnits: ['rotoxy-gateway.service', 'rotoxy-oracle-pool.service', 'rotoxy-worker-monitor.service'],
+    root: 'http://127.0.0.1:2030', funnelAllowed: true, mounts: ['/','/token2oauth'],
+    localReady: true, healthUrl: 'http://127.0.0.1:2030/healthz', publicRoute: 'https://rotoxy.tailnet.ts.net/', healthy: false,
+    config: { hugeRawSnapshot: 'x'.repeat(10000) },
+  } };
+  const output = formatLifecycleOutput('up', result);
+  assert.match(output, /ROTOXY started/);
+  assert.match(output, /rotoxy-gateway\.service: active/);
+  assert.match(output, /rotoxy-oracle-pool\.service: inactive/);
+  assert.match(output, /Local readiness: ready/);
+  assert.match(output, /Ingress: active; routes to the local gateway/);
+  assert.match(output, /Public route: https:\/\/rotoxy\.tailnet\.ts\.net\//);
+  assert.match(output, /Started by this command: rotoxy\.target/);
+  assert.doesNotMatch(output, /hugeRawSnapshot|x{1000}/);
+  assert.equal(formatLifecycleOutput('status', result.status).startsWith('ROTOXY status: needs attention'), true);
+  assert.equal(formatLifecycleOutput('install-plan', { files: ['rotoxy.target'], installCommands: ['one'],
+    wrapperSymlink: 'ln -sfn ...', migrationGate: 'review exact mappings' }),
+  'ROTOXY install plan (manual; no unit is enabled at boot)\nFiles: rotoxy.target\nInstall steps: 1 commands\nWrapper: ln -sfn ...\nMigration gate: review exact mappings');
+  assert.equal(formatLifecycleOutput('status', result.status, true), JSON.stringify(result.status, null, 2), '--json retains the full status object');
 });
 
 // Real Tailscale keeps non-background routes under a session-keyed Foreground map.
@@ -172,6 +201,7 @@ test('reads foreground routes and ignores session keys when verifying their with
   let current = config;
   const controller = new RotoxyController(async (file, args) => {
     if (file === 'tailscale') return { code: 0, stdout: JSON.stringify(current) };
+    if (file === 'curl') return { code: 0, stdout: 'ok' };
     if (file === 'systemctl' && args[1] === 'show') return { code: 0, stdout: 'loaded' };
     if (file === 'systemctl' && args[1] === 'is-active') return { code: 0, stdout: 'active' };
     if (file === 'systemctl' && args[1] === 'stop') { if (args[2] === FUNNEL_UNIT) current = {}; return { code: 0, stdout: '' }; }

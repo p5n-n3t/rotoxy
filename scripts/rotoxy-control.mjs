@@ -136,8 +136,14 @@ export class RotoxyController {
     for (const unit of MANAGED_UNITS) units[unit] = await this.active(unit);
     const route = await this.inspect();
     const configuredUnits = await this.appUnits();
+    const health = await this.command('curl', ['--fail', '--silent', '--show-error', '--max-time', '2', this.healthUrl]);
+    let publicRoute = null;
+    if (route.funnelAllowed && route.hostPort && route.root?.Proxy === 'http://127.0.0.1:2030') {
+      try { publicRoute = `https://${new URL(`https://${route.hostPort}`).host}/`; } catch {}
+    }
     return { units, configuredUnits, root: route.root?.Proxy || null, funnelAllowed: route.funnelAllowed,
-      mounts: Object.keys(route.handlers).sort(), healthy: configuredUnits.every(unit => units[unit]) && units[FUNNEL_UNIT] && route.root?.Proxy === 'http://127.0.0.1:2030' && route.funnelAllowed };
+      mounts: Object.keys(route.handlers).sort(), localReady: health.code === 0, healthUrl: this.healthUrl, publicRoute,
+      healthy: configuredUnits.every(unit => units[unit]) && units[FUNNEL_UNIT] && route.root?.Proxy === 'http://127.0.0.1:2030' && route.funnelAllowed && health.code === 0 };
   }
   async waitHealthy() {
     const deadline = this.now() + this.healthTimeoutMs;
@@ -277,21 +283,55 @@ export function forwardCli(argv, options = {}) {
 
 export function parseArgs(argv) {
   const action = argv[0];
-  if (!['up', 'down', 'status', 'install-plan'].includes(action)) throw new Error('Usage: rotoxy-control.mjs {up|down|status|install-plan} [--migration-plan file]');
+  const usage = 'Usage: rotoxy-control.mjs {up|down|status|install-plan} [--json] [--migration-plan file]';
+  if (!['up', 'down', 'status', 'install-plan'].includes(action)) throw new Error(usage);
   let migrationPlan;
+  let json = false;
   for (let i = 1; i < argv.length; i++) {
-    if (argv[i] !== '--migration-plan' || !argv[i + 1] || migrationPlan) throw new Error('Usage: rotoxy-control.mjs up [--migration-plan file]');
-    migrationPlan = argv[++i];
+    if (argv[i] === '--json' && !json) { json = true; continue; }
+    if (argv[i] === '--migration-plan' && argv[i + 1] && !migrationPlan) { migrationPlan = argv[++i]; continue; }
+    throw new Error(usage);
   }
   if (migrationPlan && action !== 'up') throw new Error('--migration-plan is only valid with up');
-  return { action, migrationPlan };
+  return { action, migrationPlan, ...(json ? { json: true } : {}) };
+}
+
+export function formatLifecycleOutput(action, result, json = false) {
+  if (json) return JSON.stringify(result, null, 2);
+  if (action === 'install-plan') {
+    return [
+      'ROTOXY install plan (manual; no unit is enabled at boot)',
+      `Files: ${result.files.join(', ')}`,
+      `Install steps: ${result.installCommands.length} commands`,
+      ...result.installCommands.map((command,index)=>`  ${index+1}. ${command}`),
+      `Back up wrapper: ${result.wrapperBackup}`,
+      `Wrapper: ${result.wrapperSymlink}`,
+      `Migration gate: ${result.migrationGate}`,
+    ].join('\n');
+  }
+  const status = action === 'status' ? result : result.status;
+  const heading = action === 'up' ? 'ROTOXY started' : action === 'down' ? 'ROTOXY stopped' : `ROTOXY status: ${status.healthy ? 'healthy' : 'needs attention'}`;
+  const rows = [heading, 'Services:'];
+  for (const unit of MANAGED_UNITS) {
+    const configured = unit === FUNNEL_UNIT || unit === TARGET_UNIT || status.configuredUnits?.includes(unit);
+    rows.push(`  ${unit}: ${configured ? status.units?.[unit] ? 'active' : 'inactive' : 'not installed'}`);
+  }
+  rows.push(`Local readiness: ${status.localReady ? 'ready' : 'not ready'} (${status.healthUrl || LOCAL_HEALTH})`);
+  const ingress = status.funnelAllowed && status.root === 'http://127.0.0.1:2030'
+    ? 'active; routes to the local gateway' : 'not active';
+  rows.push(`Ingress: ${ingress}`);
+  if (status.publicRoute) rows.push(`Public route: ${status.publicRoute}`);
+  if (Array.isArray(status.mounts) && status.mounts.length) rows.push(`Mounted paths: ${status.mounts.join(', ')}`);
+  if (Array.isArray(result.started) && result.started.length) rows.push(`Started by this command: ${result.started.join(', ')}`);
+  if (Number.isInteger(result.localCancellationRequests) && result.localCancellationRequests > 0) rows.push(`Local cancellation requests: ${result.localCancellationRequests}`);
+  return rows.join('\n');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
     const argv = process.argv.slice(2);
     if (!['up', 'down', 'status', 'install-plan'].includes(argv[0])) { forwardCli(argv); process.exit(0); }
-    const { action, migrationPlan } = parseArgs(argv);
+    const { action, migrationPlan, json } = parseArgs(argv);
     const controller = new RotoxyController();
     let result;
     if (action === 'up') {
@@ -305,7 +345,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     else if (action === 'down') result = await controller.down();
     else if (action === 'status') result = await controller.status();
     else result = controller.installPlan();
-    console.log(JSON.stringify(result, null, 2));
+    console.log(formatLifecycleOutput(action, result, json));
   } catch (error) {
     // A forwarded CLI already owns its diagnostics on inherited stdout/stderr.
     // Preserve its exit status without appending execFileSync's command dump.
