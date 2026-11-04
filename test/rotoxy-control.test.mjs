@@ -67,7 +67,33 @@ function fixture({ health = true, initial = {} } = {}) {
 
 test('default health window leaves a bounded margin for normal gateway startup', () => {
   const controller = new RotoxyController(async () => ({ code: 0, stdout: '' }), { lockPath: join(isolatedHome, 'default-window.lock') });
-  assert.equal(controller.healthAttempts, 30);
+  assert.equal(controller.healthAttempts, 180);
+  assert.equal(controller.healthTimeoutMs, 90_000);
+});
+
+test('cold gateway can become healthy after 26 seconds without premature rollback', async () => {
+  let elapsed = 0;
+  let calls = 0;
+  const controller = new RotoxyController(async () => {
+    calls++;
+    return { code: elapsed >= 26_000 ? 0 : 7, stdout: '' };
+  }, { now: () => elapsed, sleep: async ms => { elapsed += ms; } });
+  await controller.waitHealthy();
+  assert.equal(elapsed, 26_000);
+  assert.ok(calls > 30);
+});
+
+test('slow failed probes cannot stretch readiness beyond the bounded deadline', async () => {
+  let elapsed = 0;
+  let calls = 0;
+  const controller = new RotoxyController(async () => {
+    calls++;
+    elapsed += 2_000;
+    return { code: 28, stdout: '' };
+  }, { now: () => elapsed, sleep: async ms => { elapsed += ms; } });
+  await assert.rejects(controller.waitHealthy(), /health check within 90s.*journalctl/);
+  assert.equal(elapsed, 90_000);
+  assert.equal(calls, 36);
 });
 
 test('manual up health-checks before foreground Funnel and down withdraws only that unit', async () => {

@@ -99,10 +99,12 @@ export class RotoxyController {
     this.healthUrl = options.healthUrl || LOCAL_HEALTH;
     this.lockPath = options.lockPath || resolve(homedir(), '.local/state/rotoxy/control.lock');
     this.sleep = options.sleep || (ms => new Promise(r => setTimeout(r, ms)));
-    // The gateway starts the private supervisor and Oracle-pool adapters before
-    // binding port 2030. Leave a bounded margin for a normal cold start instead
-    // of declaring a healthy release failed at the ten-second edge.
-    this.healthAttempts = options.healthAttempts || 30;
+    // Private supervisor/inventory initialization precedes binding port 2030.
+    // Cold starts can exceed 25 seconds; quick connection refusals must not
+    // exhaust the readiness window early. Also bound slow HTTP probes by time.
+    this.healthAttempts = options.healthAttempts ?? 180;
+    this.healthTimeoutMs = options.healthTimeoutMs ?? 90_000;
+    this.now = options.now || Date.now;
   }
   async command(file, args) {
     const result = await this.run(file, args);
@@ -138,12 +140,14 @@ export class RotoxyController {
       mounts: Object.keys(route.handlers).sort(), healthy: configuredUnits.every(unit => units[unit]) && units[FUNNEL_UNIT] && route.root?.Proxy === 'http://127.0.0.1:2030' && route.funnelAllowed };
   }
   async waitHealthy() {
-    for (let i = 0; i < this.healthAttempts; i++) {
+    const deadline = this.now() + this.healthTimeoutMs;
+    for (let i = 0; i < this.healthAttempts && this.now() < deadline; i++) {
       const r = await this.command('curl', ['--fail', '--silent', '--show-error', '--max-time', '2', this.healthUrl]);
       if (r.code === 0) return;
-      await this.sleep(500);
+      const remaining = deadline - this.now();
+      if (remaining > 0 && i + 1 < this.healthAttempts) await this.sleep(Math.min(500, remaining));
     }
-    throw new Error(`ROTOXY did not pass ${this.healthUrl} health check`);
+    throw new Error(`ROTOXY did not pass ${this.healthUrl} health check within ${this.healthTimeoutMs / 1000}s. Check gateway startup logs with: journalctl --user -u rotoxy-gateway.service -n 30`);
   }
   async runUnit(action, unit) {
     if (!MANAGED_UNITS.includes(unit)) throw new Error(`Refusing unmanaged unit ${unit}`);
