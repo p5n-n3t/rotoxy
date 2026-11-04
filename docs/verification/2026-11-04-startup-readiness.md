@@ -15,3 +15,12 @@ owned units. Boot activation and unrelated services are unchanged.
 Verification: 13 launcher tests pass, including a simulated 26-second cold start,
 slow failed probes reaching the 90-second deadline, failed-start rollback, and
 Tailscale route preservation. No TypeScript/backend change is needed.
+
+Live verification after installation: `rotoxy down` and `rotoxy up` both completed;
+all owned units and the single-root Funnel became healthy. Public `/healthz` and
+`/admin/login` returned HTTP 200; unauthenticated MCP initialization returned HTTP
+401, preserving authentication. A repeated `up` returned success with no newly
+started units. Installed launcher: `~/.local/share/rotoxy-launchers/6d3f89d1cc12e3fb25b376fc8fe02804d6a8830f/rotoxy-control.mjs`.
+The backend release remains 7e4290d; this repair changes only the launcher.
+Previous launcher link is recorded privately under
+`~/.local/state/rotoxy/releases/launcher-1793804053/previous-link.json`.
