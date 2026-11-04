@@ -187,3 +187,31 @@ this one submission. No ambiguous mutation was replayed.
 Authentication used a temporary locally signed scoped JWT for an existing
 registered OAuth client. This does not prove a new external client's OAuth consent
 or dormant-chat event delivery. Private receipts remain outside version control.
+
+## Activated release and rollback
+
+Runtime and installed CLI activated from immutable release
+`f5e9b89688ca6b1b49235a0dbd54c3e0e28d5ebf`. Its CI41874702231 passed on
+Node22/24 (755 Node tests per job),562 Python supervisor tests and18 Oracle API
+tests. Doctor reports healthy: optional absent upstream checks are explicitly
+skipped, with process/config/credentials/OAuth/Funnel evidence checked. Public
+Funnel edge176.58.90.63 returned login HTTP200 with TLS verification. Gateway,
+Oracle pool, monitor and Funnel units report active; local readiness is ready.
+
+After activation, job_results returned the three completed results from job c;
+Claude artifact attribution survived, and exact synthetic legacy owner attribution
+was corrected without changing real historical provider actors. No replay occurred.
+
+Activation backup:
+`~/.local/state/rotoxy/releases/rollback-activation-1793812193/`.
+It contains the previous service drop-in, CLI link targets, supervisor config and
+consistent scheduler database backup. Roll back service/CLI references only after
+checking for active operations. Do not restore the whole old database over newer
+client work. Funnel configuration was untouched.
+
+The built-in browser lists an authenticated Admin tab after operator login, but
+its inspection control reports unavailable. No authenticated visual acceptance is
+claimed. MCP Events server support still has no proven live ChatGPT subscription
+and reaction. Codex subscription execution remains unwired; see its separate audit.
+Verification-sidecar conservative reservations total$1.59; this is an estimate,
+not a guaranteed bill or a substitute for provider-reported usage.

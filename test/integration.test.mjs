@@ -566,12 +566,15 @@ test("health and dashboard do not count legacy credentials as selectable without
     await env.store.update((state) => { state.config.upstreamUrl = ""; });
     const health = await (await fetch(env.base + "/healthz")).json();
     assert.equal(health.upstreamConfigured, false);
-    assert.equal(health.accounts, 2);
+    assert.equal(health.accountScope, "upstream-mcp");
+    assert.equal(health.accounts, 0);
     assert.equal(health.selectable, 0);
     const dashboard = await (await fetch(env.base + "/")).text();
-    assert.match(dashboard, /Legacy upstream credential pool/);
-    assert.match(dashboard, /selectable for the configured upstream MCP endpoint/);
-    assert.match(dashboard, />0<span class="muted"> \/ 2<\/span>/);
+    assert.doesNotMatch(dashboard, /Legacy upstream credential pool/);
+    assert.match(dashboard, /href="[^"]*\/admin\/providers">Provider pools/);
+    assert.match(dashboard, /href="[^"]*\/admin\/resources">Resource connections/);
+    assert.doesNotMatch(dashboard, /selectable for the configured upstream MCP endpoint/);
+    assert.doesNotMatch(dashboard, /0<span class="muted"> \/ 2<\/span>/);
   } finally {
     await env.teardown();
   }
