@@ -1,9 +1,13 @@
 import json
+import http.client
+import socket
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from snooze.jobs import JobRegistry, validate_assignment
+from snooze.bridge import PrivateHTTPServer
 from test_jobs import assignment, task
 
 
@@ -157,6 +161,60 @@ class JobRegistryAgentTests(unittest.TestCase):
             db.execute("UPDATE operations SET state='queued',worker=NULL,lease_until=NULL WHERE id=?", (operation["operationId"],))
         self.assertIsNone(self.claim(worker="another", now=4))
         self.assertEqual(self.registry.get_assignment("agent-job")["tasks"][0]["state"], "blocked")
+
+    def test_retained_ambiguous_attempt_reduces_read_only_account_capacity(self):
+        self.submit(job_id="retained-job")
+        operation = self.claim(now=3, lease=1)
+        self.assertEqual(operation["kind"], "run_agent")
+        self.assertIsNone(self.claim(worker="reaper", now=5))
+        before = self.registry.get_assignment("retained-job")
+        capacity = self.registry.account_capacity([ACCOUNT])
+        self.assertEqual(capacity, {"accounts": [{"accountId": ACCOUNT, "capacity": 4,
+                                                   "occupied": 1, "available": 3, "retained": 1}]})
+        after = self.registry.get_assignment("retained-job")
+        self.assertEqual(after, before, "capacity read must not reconcile, queue, or mutate retained work")
+        with self.assertRaisesRegex(ValueError, "unique safe IDs"):
+            self.registry.account_capacity([ACCOUNT, ACCOUNT])
+        for invalid in ([], ["../secret"], [None], ["a" * 129], ["valid", *[f"x{i}" for i in range(50)] ]):
+            with self.subTest(invalid=invalid[:2]), self.assertRaises(ValueError):
+                self.registry.account_capacity(invalid)
+
+    def test_private_capacity_route_requires_bearer_exact_body_and_hides_unknown_ids(self):
+        self.submit(job_id="bridge-retained")
+        self.claim(now=3, lease=1)
+        self.assertIsNone(self.claim(worker="reaper", now=5))
+        bearer = "private-bridge-test-bearer-0123456789"
+        path = Path(self.temp.name) / "private" / "capacity.sock"
+        server = PrivateHTTPServer(path, self.registry, bearer)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def post(body, token=bearer, route="/v1/accounts/capacity"):
+            conn = http.client.HTTPConnection("local")
+            conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            conn.sock.connect(str(path))
+            headers = {"Content-Type": "application/json"}
+            if token is not None:
+                headers["Authorization"] = "Bearer " + token
+            conn.request("POST", route, body=json.dumps(body), headers=headers)
+            response = conn.getresponse()
+            payload = response.read()
+            conn.close()
+            return response.status, json.loads(payload) if payload else None
+
+        try:
+            status, value = post({"accountIds": [ACCOUNT, "unregistered-account"]})
+            self.assertEqual(status, 200)
+            self.assertEqual([row["accountId"] for row in value["accounts"]], [ACCOUNT])
+            self.assertEqual(value["accounts"][0]["retained"], 1)
+            self.assertEqual(post({"accountIds": [ACCOUNT]}, token=None)[0], 401)
+            self.assertEqual(post({"accountIds": [ACCOUNT], "reveal": True})[0], 400)
+            self.assertEqual(post({"accountIds": [ACCOUNT, ACCOUNT]})[0], 400)
+            self.assertEqual(post({"accountIds": [ACCOUNT]}, route="/v1/accounts/capacity?extra=1")[0], 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":

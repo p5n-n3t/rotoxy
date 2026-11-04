@@ -172,6 +172,14 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             if self.command == "POST" and route == "/v1/accounts":
                 self._reply(200, registry.register_account(self._body()))
                 return
+            if self.command == "POST" and route == "/v1/accounts/capacity":
+                if query:
+                    raise ValueError("Unexpected account capacity query")
+                body = self._body()
+                if set(body) != {"accountIds"}:
+                    raise ValueError("accountIds is required")
+                self._reply(200, registry.account_capacity(body["accountIds"]))
+                return
             if self.command == "GET" and route == "/v1/inbox":
                 if set(query) - {"projectId", "after", "limit"}:
                     raise ValueError("Invalid inbox query")

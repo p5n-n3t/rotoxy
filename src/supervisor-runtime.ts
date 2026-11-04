@@ -303,6 +303,19 @@ function workspaceAccessRevision(raw: string, clients: Array<{ clientId: string;
 }
 
 export class SupervisorRuntime implements SupervisorBackend {
+  private async capacitySnapshot(accountIds:string[]):Promise<Map<string,{occupiedCapacity:number;availableCapacity:number;retainedCapacity:number}>|undefined>{
+    try{
+      const raw=parseJson(await this.bridge.request('POST','/v1/accounts/capacity',{accountIds:accountIds.slice(0,50)}));
+      if(!Array.isArray(raw.accounts))return undefined;
+      const result=new Map<string,{occupiedCapacity:number;availableCapacity:number;retainedCapacity:number}>();
+      for(const row of raw.accounts){
+        if(!object(row)||typeof row.accountId!=='string'||!accountIds.includes(row.accountId)||
+          !['occupied','available','retained'].every(k=>Number.isSafeInteger(row[k])&&Number(row[k])>=0))return undefined;
+        result.set(row.accountId,{occupiedCapacity:Number(row.occupied),availableCapacity:Number(row.available),retainedCapacity:Number(row.retained)});
+      }
+      return result;
+    }catch{return undefined;}
+  }
   private agentExecutor?:AgentJobExecutor;
   private agentResourceStatus='not_configured';
   setAgentExecutor(executor:AgentJobExecutor){this.agentExecutor=executor;this.dispatchPolicyFingerprint="";}
@@ -870,6 +883,7 @@ export class SupervisorRuntime implements SupervisorBackend {
       });
       if (!eligible.length) throw new JobInputError("no requested account is currently enabled, authorized, healthy, and quota-eligible");
       const requestedTasks = args.tasks as JobTaskInput[];
+      const capacity=await this.capacitySnapshot(eligible);
       const freshTasks = requestedTasks.filter((task): task is JobTaskInput & { execution: Extract<JobTaskInput["execution"], { mode: "fresh" }> } =>
         task.execution.mode === "fresh");
       const inferenceTasks = requestedTasks.filter((task): task is JobTaskInput & { execution: Extract<JobTaskInput["execution"], { mode: "inference" }> } =>
@@ -912,12 +926,14 @@ export class SupervisorRuntime implements SupervisorBackend {
       const inferenceCursor = new Map<string, number>();
       for (const task of inferenceTasks) {
         const key = `${task.execution.provider}:${task.execution.model}`;
-        const candidates = eligible.filter((accountId) => {
+        let candidates = eligible.filter((accountId) => {
           const resource = inferenceResources.get(accountId);
           return resource?.provider === task.execution.provider && resource.enabled && resource.authorized && resource.health === "healthy" &&
             resource.capacity > 0 && resource.models.includes(task.execution.model) && task.execution.maxOutputTokens <= resource.maxOutputTokens;
         });
         if (!candidates.length) throw new JobInputError(`no enabled, healthy, allowlisted ${task.execution.provider} resource supports ${task.execution.model} and the requested output limit`);
+        const free=candidates.filter(id=>(capacity?.get(id)?.availableCapacity??0)>0);
+        if(free.length)candidates=free;
         const cursor = inferenceCursor.get(key) ?? 0;
         inferenceBindingsByTask.set(task.taskId, { accountId: candidates[cursor % candidates.length]! });
         inferenceCursor.set(key, cursor + 1);
@@ -1035,6 +1051,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     if (name === "job_workers") {
       const state = await this.options.store.load();
       const inference = await this.inferenceResources(true);
+      const capacity=await this.capacitySnapshot(project.accountIds);
       const nativeTarget = nativeLightSprintTarget(state.config.upstreamUrl);
       const workers = project.registeredSessions.map((session) => {
         const signal = accountSignal(state.accounts.find((row) => row.id === session.accountId), nativeTarget);
@@ -1070,9 +1087,10 @@ export class SupervisorRuntime implements SupervisorBackend {
           capacity: resource.capacity, provenance: resource.provider === "oracle"
             ? "fresh_enabled_host_inventory_and_private_api_credential"
             : "encrypted_credential_allowlist_and_live_model_catalog",
+          ...(capacity?.get(accountId)??{capacityStatus:'Scheduler occupancy is unavailable; configured capacity is not free capacity.'}),
           ...(resource.provider === "oracle" ? { eligibleHostCount: resource.oracleHosts?.length ?? 0 } : {}) }];
       });
-      const agentResources=(await this.agentResources()).filter(r=>project.accountIds.includes(r.accountId)).map(r=>({...r,executionMode:'agent',quota:'not_reported',tools:['Read','Glob','Grep'],maxBudgetUsd:0.25}));
+      const agentResources=(await this.agentResources()).filter(r=>project.accountIds.includes(r.accountId)).map(r=>({...r,...capacity?.get(r.accountId),...(r.busy?{availableCapacity:0}:{}),executionMode:'agent',quota:'not_reported',tools:['Read','Glob','Grep'],maxBudgetUsd:0.25}));
       return boundedJson({ projectId: project.projectId, accounts, workers, inferenceResources, agentResources,agentResourcesStatus:this.agentResourceStatus,
         maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
     }

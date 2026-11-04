@@ -59,3 +59,18 @@ test('runtime binds agent task to selected trusted profile without legacy upstre
  assert.deepEqual(inventory.agentResources,[]);assert.match(inventory.agentResourcesStatus,/registry unavailable/);
 });
 function callerForInventory(){return {clientId:'client-a',projectId:'fleet'};}
+
+test('new inference work prefers a free eligible account while retaining ambiguous occupancy',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'rx-capacity-route-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+ const config={version:1,projects:[{projectId:'fleet',clientIds:['client-a'],accountIds:['cf-held','cf-free'],registeredSessions:[]}],maxWorkers:2,allowUnknownQuota:true,localLimits:{maxTasks:100,maxJobBytes:1048576,maxOutputBytes:32768}};
+ const runtime=new SupervisorRuntime(config,{configDir:dir,store:{load:async()=>({config:{},accounts:[]})}});runtime.started=true;
+ const model='@cf/meta/llama-3.1-8b-instruct';runtime.inferenceResources=async()=>new Map(['cf-held','cf-free'].map(id=>[id,{provider:'cloudflare',enabled:true,authorized:true,health:'healthy',capacity:1,models:[model],maxOutputTokens:128}]));
+ let submitted;runtime.bridge={request:async(method,path,body)=>{
+  if(path==='/v1/accounts/capacity')return {accounts:[{accountId:'cf-held',occupied:1,available:0,retained:1},{accountId:'cf-free',occupied:0,available:1,retained:0}]};
+  if(path==='/v1/assignments'){submitted=body;return {assignmentId:'dag',state:'queued'};}throw Error('unexpected route');
+ }};
+ const s=submission();s.eligibleAccountIds=['cf-held','cf-free'];s.tasks[0].execution={mode:'inference',provider:'cloudflare',model,maxOutputTokens:128};
+ await runtime.callTool('job_submit',s,callerForInventory());assert.equal(submitted.tasks[0].execution.accountId,'cf-free');
+ const inventory=await runtime.callTool('job_workers',{projectId:'fleet'},callerForInventory());
+ const held=inventory.inferenceResources.find(r=>r.accountId==='cf-held');assert.equal(held.availableCapacity,0);assert.equal(held.retainedCapacity,1);assert.equal(held.capacity,1);
+});

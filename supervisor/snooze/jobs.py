@@ -530,6 +530,44 @@ class JobRegistry:
                        (account_id, json.dumps(data, sort_keys=True), revision, when))
             return {"accountId": account_id, "revision": revision}
 
+    def account_capacity(self, account_ids):
+        """Return capacity counters for registered account IDs without scheduling work."""
+        if (not isinstance(account_ids, list) or not 1 <= len(account_ids) <= 50 or
+                any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value)
+                    for value in account_ids) or len(set(account_ids)) != len(account_ids)):
+            raise ValueError("accountIds must contain 1 to 50 unique safe IDs")
+        values = []
+        with self.connection() as db:
+            for account_id in account_ids:
+                row = db.execute("SELECT data FROM registered_accounts WHERE account_id=?", (account_id,)).fetchone()
+                if not row:
+                    continue
+                capacity = json.loads(row["data"]).get("localCapacity", 1)
+                job_occupied = db.execute(
+                    "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND (" + _SLOT_SQL + ")",
+                    (account_id,),
+                ).fetchone()[0]
+                external_occupied = 0
+                external_retained = 0
+                if self.repository is not None:
+                    for attempt in db.execute("SELECT state,data FROM attempts WHERE account=? AND released_at IS NULL", (account_id,)):
+                        identity = json.loads(attempt["data"] or "{}")
+                        # R21 assignment attempts already have a job_tasks slot;
+                        # match scheduler occupancy accounting and avoid counting twice.
+                        if identity.get("r21Assignment"):
+                            continue
+                        external_occupied += 1
+                        if attempt["state"] == "ambiguous":
+                            external_retained += 1
+                retained_jobs = db.execute(
+                    "SELECT COUNT(*) FROM job_tasks WHERE selected_account=? AND state='ambiguous' AND released_at IS NULL",
+                    (account_id,),
+                ).fetchone()[0]
+                occupied = job_occupied + external_occupied
+                values.append({"accountId": account_id, "capacity": capacity, "occupied": occupied,
+                               "available": max(0, capacity - occupied), "retained": retained_jobs + external_retained})
+        return {"accounts": values}
+
     @staticmethod
     def _account(db, account_id, session_id=None, *, observation=False):
         row = db.execute("SELECT data FROM registered_accounts WHERE account_id=?", (account_id,)).fetchone()

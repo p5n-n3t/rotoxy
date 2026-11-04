@@ -132,6 +132,7 @@ export function isAllowedSupervisorRoute(method: string, route: string): boolean
   // this private, bearer-authenticated Unix-socket boundary.
   if (path === "/v1/assignments" && method === "POST") return parsed.search === "";
   if (path === "/v1/accounts" && method === "POST") return parsed.search === "";
+  if (path === "/v1/accounts/capacity" && method === "POST") return parsed.search === "";
   if (path === "/admin/api/v1/assignments" && method === "GET") {
     allowedQuery = ["projectId", "offset", "limit"];
   } else if (path === "/admin/api/v1/events" && method === "GET") {

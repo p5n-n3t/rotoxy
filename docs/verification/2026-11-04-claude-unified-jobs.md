@@ -71,3 +71,31 @@ Tests cover cancellation before invoke and during delayed discovery with zero
 launches. CI41855286203 exposed an old test's positional schema assumption; the
 assertion now locates the fresh branch by discriminant. Final focused subset13/13
 passes, including the real Python/synthetic CLI dependency+cancellation test.
+
+## Installed gate and capacity finding
+
+CI41855929937 passed 751 Node tests on each of Node22/24, 553 Python supervisor
+tests and 18 Oracle API tests. Release4fbe0ed was activated after a consistent
+private rollback backup at
+`~/.local/state/rotoxy/releases/rollback-claude-dag-1793805492/`.
+
+Live job `rx-unified-claude-oracle-20261104-a` completed its Claude and Oracle nodes
+with verified arithmetic output and completion markers. Claude requested/reported
+Haiku matched and its review artifact was retrieved; CLI-reported cost$0.002182.
+Oracle reported `oracle/qwen3.5:2b` on ora6. Their measured client invocation
+intervals overlapped12.814seconds (not proof of GPU timing).
+
+Cloudflare remained queued because an unrelated client's ambiguous task retained
+that account slot. No slot was released and that client's work was untouched.
+The controlled probe job was cancelled after inspection, retaining its completed
+outputs. Its three-provider completion gate did NOT pass. Private report and
+$0.27 estimated budget reservation retain this result; no ambiguous call was replayed.
+
+The follow-up adds a read-only authenticated private capacity endpoint, reporting
+configured capacity, occupied slots, available slots and retained ambiguous slots.
+Discovery exposes those distinctions. New inference assignments prefer a free
+eligible account when available; already dispatched stateful work stays pinned.
+If all eligible accounts are busy, queueing remains valid. Missing occupancy data
+is explicitly reported; configured capacity is not labelled free capacity.
+Tests cover retained-slot counting without double-counting repository attempts,
+no state mutation from reads, endpoint authentication, and free-account selection.
