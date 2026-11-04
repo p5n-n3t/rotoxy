@@ -302,6 +302,13 @@ function workspaceAccessRevision(raw: string, clients: Array<{ clientId: string;
   return createHash("sha256").update(raw).update("\0").update(JSON.stringify(clients)).digest("hex");
 }
 
+function presentedAvailableCapacity(resourceCapacity: unknown, scheduler: { occupiedCapacity: number; availableCapacity: number } | undefined, usable: boolean): number | undefined {
+  if (!usable) return 0;
+  if (!scheduler || !Number.isSafeInteger(resourceCapacity) || Number(resourceCapacity) < 0) return undefined;
+  const currentResourceFree = Math.max(0, Number(resourceCapacity) - scheduler.occupiedCapacity);
+  return Math.min(currentResourceFree, scheduler.availableCapacity);
+}
+
 export class SupervisorRuntime implements SupervisorBackend {
   private async capacitySnapshot(accountIds:string[]):Promise<Map<string,{occupiedCapacity:number;availableCapacity:number;retainedCapacity:number}>|undefined>{
     try{
@@ -1090,16 +1097,26 @@ export class SupervisorRuntime implements SupervisorBackend {
       const inferenceResources = project.accountIds.flatMap((accountId) => {
         const resource = inference.get(accountId);
         if (!resource) return [];
+        const schedulerCapacity = capacity?.get(accountId);
+        const availableCapacity = presentedAvailableCapacity(resource.capacity, schedulerCapacity,
+          resource.enabled && resource.authorized && resource.health === "healthy");
         return [{ accountId, provider: resource.provider, enabled: resource.enabled,
           authorized: resource.authorized, health: resource.health, quota: "unknown",
           models: resource.models, maxOutputTokens: resource.maxOutputTokens,
           capacity: resource.capacity, provenance: resource.provider === "oracle"
             ? "fresh_enabled_host_inventory_and_private_api_credential"
             : "encrypted_credential_allowlist_and_live_model_catalog",
-          ...(capacity?.get(accountId)??{capacityStatus:'Scheduler occupancy is unavailable; configured capacity is not free capacity.'}),
+          ...(schedulerCapacity??{capacityStatus:'Scheduler occupancy is unavailable; configured capacity is not free capacity.'}),
+          ...(availableCapacity !== undefined ? { availableCapacity } : {}),
           ...(resource.provider === "oracle" ? { eligibleHostCount: resource.oracleHosts?.length ?? 0 } : {}) }];
       });
-      const agentResources=(await this.agentResources()).filter(r=>project.accountIds.includes(r.accountId)).map(r=>({...r,...capacity?.get(r.accountId),...(r.busy?{availableCapacity:0}:{}),executionMode:'agent',quota:'not_reported',tools:['Read','Glob','Grep'],maxBudgetUsd:0.25}));
+      const agentResources=(await this.agentResources()).filter(r=>project.accountIds.includes(r.accountId)).map(r=>{
+        const schedulerCapacity=capacity?.get(r.accountId);
+        const usable=!r.busy;
+        const availableCapacity=presentedAvailableCapacity(r.capacity,schedulerCapacity,usable);
+        return {...r,...schedulerCapacity,...(availableCapacity!==undefined?{availableCapacity}:{}),
+          executionMode:'agent',quota:'not_reported',tools:['Read','Glob','Grep'],maxBudgetUsd:0.25};
+      });
       return boundedJson({ projectId: project.projectId, accounts, workers, inferenceResources, agentResources,agentResourcesStatus:this.agentResourceStatus,
         maxWorkers: this.config.maxWorkers, dispatchEnabled: true });
     }

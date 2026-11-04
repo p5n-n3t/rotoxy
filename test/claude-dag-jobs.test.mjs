@@ -74,3 +74,33 @@ test('new inference work prefers a free eligible account while retaining ambiguo
  const inventory=await runtime.callTool('job_workers',{projectId:'fleet'},callerForInventory());
  const held=inventory.inferenceResources.find(r=>r.accountId==='cf-held');assert.equal(held.availableCapacity,0);assert.equal(held.retainedCapacity,1);assert.equal(held.capacity,1);
 });
+
+test('job_workers clamps stale scheduler availability to current resource capacity and eligibility',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'rx-capacity-presentation-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+ const ids=['ora-current','ora-occupied','ora-disabled','ora-unauthorized','ora-degraded',resource.accountId,'claude-code:busy'];
+ const config={version:1,projects:[{projectId:'fleet',clientIds:['client-a'],accountIds:ids,registeredSessions:[]}],maxWorkers:2,allowUnknownQuota:true,localLimits:{maxTasks:100,maxJobBytes:1048576,maxOutputBytes:32768}};
+ const runtime=new SupervisorRuntime(config,{configDir:dir,store:{dir,load:async()=>({config:{},accounts:[]})}});runtime.started=true;
+ const oracle=(accountId,overrides={})=>[accountId,{provider:'oracle',enabled:true,authorized:true,health:'healthy',capacity:1,models:['model-a'],maxOutputTokens:128,...overrides}];
+ runtime.inferenceResources=async()=>new Map([
+  oracle('ora-current'),oracle('ora-occupied'),oracle('ora-disabled',{enabled:false}),oracle('ora-unauthorized',{authorized:false}),oracle('ora-degraded',{health:'degraded'}),
+ ]);
+ const busyAgent={...resource,accountId:'claude-code:busy',profileId:'busy',capacity:1,busy:true};
+ runtime.setAgentExecutor({resources:async()=>[resource,busyAgent],invoke:async()=>{throw Error('inventory must not dispatch');}});
+ runtime.bridge={request:async(method,path,body)=>{
+  if(path==='/v1/accounts/capacity')return {accounts:body.accountIds.map(accountId=>({accountId,occupied:accountId==='ora-occupied'?1:0,available:2,retained:1}))};
+  throw Error('unexpected route '+path);
+ }};
+ const inventory=await runtime.callTool('job_workers',{projectId:'fleet'},callerForInventory());
+ const find=(accountId)=>inventory.inferenceResources.find(row=>row.accountId===accountId);
+ assert.equal(find('ora-current').capacity,1);assert.equal(find('ora-current').availableCapacity,1);
+ assert.equal(find('ora-current').occupiedCapacity,0);assert.equal(find('ora-current').retainedCapacity,1);
+ assert.equal(find('ora-occupied').availableCapacity,0,"current capacity is reduced by durable occupied capacity before applying scheduler availability");
+ for(const accountId of ['ora-disabled','ora-unauthorized','ora-degraded']){
+  assert.equal(find(accountId).availableCapacity,0,accountId+' is not currently dispatchable');
+  assert.equal(find(accountId).occupiedCapacity,0);assert.equal(find(accountId).retainedCapacity,1);
+ }
+ const active=inventory.agentResources.find(row=>row.accountId===resource.accountId);
+ const busy=inventory.agentResources.find(row=>row.accountId==='claude-code:busy');
+ assert.equal(active.capacity,1);assert.equal(active.availableCapacity,1);assert.equal(active.retainedCapacity,1);
+ assert.equal(busy.capacity,1);assert.equal(busy.availableCapacity,0);assert.equal(busy.retainedCapacity,1);
+});

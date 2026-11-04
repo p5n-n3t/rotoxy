@@ -5,6 +5,16 @@ Keep this ledger current; a source commit is not a deployed milestone.
 
 ## Current checkpoint
 
+Release follow-up:60ba6bc is deployed; CI41875806440 passes. Public health now
+scopes account counts to the configured upstream and omits inactive historical
+credentials. Local full integration file passed13/13. Delegated capacity
+presentation fix clamps free slots to current limit minus occupied work and
+scheduler availability, preserves ambiguous reservations; build and31 focused
+Node tests passed. No further paid dispatch. Public Funnel edge checks were
+intermittent: one edge200 while two timed out; local and normal tailnet access
+remain healthy. Do not claim every public edge is continuously reachable.
+
+
 Latest 2026-11-04 evidence supersedes older chronological entries below:
 - Backend/CLI deployed3e47ae6; CI41867073940 passed. Follow-up894411e is staged,
   with21 focused Node tests and5 retirement tests passed; release CI in progress.
