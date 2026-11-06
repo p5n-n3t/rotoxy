@@ -23,8 +23,10 @@ test('Codex crosses the real Python DAG and workspace ledgers, preserving receip
   await writeFile(join(dir, 'codex-profiles.json'), JSON.stringify({version:1,profiles:[{id:target},{id:native}]}), {mode:0o600});
   await new CodexPoolPolicyStore(store).configure({version:1,dispatchEnabled:true,protectInitiatingAccount:true,profiles:[{profileId:target,enabled:true,maxConcurrent:1},{profileId:native,enabled:false,maxConcurrent:1}]});
   await new OriginProtectionStore(store).bindOrRenew({actor:{clientId:'client-a',sessionId:'test-origin'},nativeProfileId:native,profileAliases:[native],verifiedProviderAccountSubject:'native-subject',source:'trusted-server-resolver',expectedRevision:0,expiresAt:Date.now()+300000});
-  const config = {version:1,projects:[{projectId:'fleet',clientIds:['client-a'],accountIds:[accountId],registeredSessions:[]}],maxWorkers:2,allowUnknownQuota:true,localLimits:{maxTasks:100,maxJobBytes:1048576,maxOutputBytes:32768}};
-  const options = {configDir:dir,store,supervisorCwd:join(process.cwd(),'supervisor'),routingConfigDir:dir,supervisionDbPath:join(dir,'inbox.sqlite'),recoveryDbPath:join(dir,'recovery.sqlite'),oracleConfigPath:join(dir,'oracle.json'),oracleDbPath:join(dir,'oracle.sqlite'),oracleCachePath:join(dir,'oracle-cache.json'),oracleInventoryReader:async()=>({hosts:[]}),workerOptions:{pollIntervalMs:50}};
+  const config = {version:1,projects:[{projectId:'fleet',clientIds:['client-a'],accountIds:['metadata-only'],registeredSessions:[]}],sharedWorkspace:{projectId:'fleet',membership:'authenticated_mcp'},maxWorkers:2,allowUnknownQuota:true,localLimits:{maxTasks:100,maxJobBytes:1048576,maxOutputBytes:32768}};
+  const configPath=join(dir,'supervisor.json');
+  await writeFile(configPath,JSON.stringify(config),{mode:0o600});
+  const options = {configDir:dir,configPath,store,supervisorCwd:join(process.cwd(),'supervisor'),routingConfigDir:dir,supervisionDbPath:join(dir,'inbox.sqlite'),recoveryDbPath:join(dir,'recovery.sqlite'),oracleConfigPath:join(dir,'oracle.json'),oracleDbPath:join(dir,'oracle.sqlite'),oracleCachePath:join(dir,'oracle-cache.json'),oracleInventoryReader:async()=>({hosts:[]}),workerOptions:{pollIntervalMs:50}};
   let runtime = new SupervisorRuntime(config, options);
   let launches = 0;
   const profiles = {

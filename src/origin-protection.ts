@@ -53,7 +53,7 @@ function digest(domain: string, value: string): string {
   return createHash("sha256").update(domain).update(value).digest("hex");
 }
 function validActor(actor: unknown): actor is OriginActor {
-  return isRecord(actor) && typeof actor.clientId === "string" && OPAQUE_ID.test(actor.clientId) &&
+  return isRecord(actor) && typeof actor.clientId === "string" && /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,159}$/.test(actor.clientId) &&
     typeof actor.sessionId === "string" && OPAQUE_ID.test(actor.sessionId);
 }
 function actorHash(actor: OriginActor): string {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -21,7 +22,9 @@ MAX_CACHE = 256 * 1024
 MAX_REMOTE_BYTES = 256 * 1024
 MAX_MODELS = 256
 MAX_TEXT = 160
+INVENTORY_SSH_TIMEOUT = 15
 STATUSES = {"queued", "running", "complete", "failed", "ambiguous", "cancelled", "dispatching"}
+MAX_INVENTORY_PROBES = 32
 _TAGS_SCRIPT = """import json, urllib.request, urllib.error
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -316,18 +319,27 @@ def refresh(config_path: Path, db_path: Path, cache_path: Path, expected_cache_r
     fleet_raw, hosts = _fleet(config_path)
     old_raw, old = _read_cache(cache_path)
     if revision(old_raw) != expected_cache_revision: raise ValueError("cache_revision_conflict")
-    refreshed = {}
-    for host in hosts:
+    def probe(host: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if not host["enabled"]:
-            refreshed[host["id"]] = {"endpoint": _endpoint_token(host), "status": "disabled", "models": [], "observedAt": None}; continue
+            return host["id"], {"endpoint": _endpoint_token(host), "status": "disabled", "models": [], "observedAt": None}
         try:
-            response = ssh_probe(host, _TAGS_SCRIPT) if ssh_probe else SSHOllamaTransport(hosts=(host,))._ssh(host["id"], _TAGS_SCRIPT, timeout=8)
+            response = ssh_probe(host, _TAGS_SCRIPT) if ssh_probe else SSHOllamaTransport(hosts=(host,))._ssh(
+                host["id"], _TAGS_SCRIPT, timeout=INVENTORY_SSH_TIMEOUT)
             if type(response) is not dict or response.get("status") != "healthy": raise ValueError("catalog_unavailable")
             payload = response.get("body")
             if payload is None and "models" in response: payload = response
-            refreshed[host["id"]] = {"endpoint": _endpoint_token(host), "status": "healthy", "models": _clean_models(payload), "observedAt": time.time()}
+            result = {"endpoint": _endpoint_token(host), "status": "healthy", "models": _clean_models(payload), "observedAt": time.time()}
         except Exception:
-            refreshed[host["id"]] = {"endpoint": _endpoint_token(host), "status": "unavailable", "models": [], "observedAt": time.time()}
+            result = {"endpoint": _endpoint_token(host), "status": "unavailable", "models": [], "observedAt": time.time()}
+        return host["id"], result
+
+    # The inventory HTTP caller has a 40 second ceiling. Probe hosts concurrently
+    # so the fleet's bounded maximum (32) is covered by one per-host SSH deadline
+    # instead of multiplying that deadline by the host count.
+    if len(hosts) > MAX_INVENTORY_PROBES:
+        raise ValueError("invalid_host_count")
+    with ThreadPoolExecutor(max_workers=max(1, min(MAX_INVENTORY_PROBES, len(hosts)))) as pool:
+        refreshed = dict(pool.map(probe, hosts))
     value = {"version": 1, "fleetRevision": revision(fleet_raw), "updatedAt": time.time(), "hosts": refreshed}
     with _cache_lock(cache_path):
         current_raw, _current = _read_cache(cache_path)

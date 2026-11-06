@@ -352,7 +352,8 @@ export class SupervisorRuntime implements SupervisorBackend {
     }
     if(typeof op.input.projectId!=='string'||typeof op.input.clientId!=='string'||typeof op.input.jobId!=='string')return false;
     try{await this.authorizeWorkspace(op.input.projectId,op.input.clientId);}catch{return false;}
-    const project=this.config.projects.find(p=>p.projectId===op.input.projectId&&p.accountIds.includes(resource.accountId));
+    const project=this.config.projects.find(p=>p.projectId===op.input.projectId &&
+      (p.accountIds.includes(resource.accountId) || resource.provider === 'codex' && this.config.sharedWorkspace?.projectId === p.projectId));
     if(!project)return false;
     const assignment=parseJson(await this.bridge.request('GET',`/admin/api/v1/assignments/${op.input.jobId}`,undefined,this.owner({clientId:op.input.clientId,projectId:project.projectId})));
     if(assignment.projectId!==project.projectId||assignment.state!=='queued')return false;

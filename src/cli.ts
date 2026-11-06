@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { promisify } from "node:util";
+import { dirname, join } from "node:path";
 import { Command } from "commander";
 import { formatKeyValues, formatTable } from "./cli-format.js";
 import { CredentialPool } from "./pool.js";
@@ -19,6 +20,10 @@ import { StateStore, normalizeBasePath } from "./store.js";
 import { startServer } from "./server.js";
 import type { GatewayConfig, PoolStrategy } from "./types.js";
 import { configureClientConnection, inspectClientConnections, manualClientSetupNotes, removeClientConnection, restoreClientConnection, type LocalMcpClient } from "./client-connections.js";
+import { CodexProfiles } from "./codex-profiles.js";
+import { CodexPoolPolicyStore } from "./codex-pool-policy.js";
+import { OriginProtectionStore } from "./origin-protection.js";
+import { updateCodexWorkerControls } from "./codex-worker-controls.js";
 
 const execFileAsync = promisify(execFile);
 const program = new Command();
@@ -263,6 +268,88 @@ pool
       console.log(formatTable(snapshot.map((r) => ({ label: r.label, state: r.state, active: r.active, requests: r.requests, failures: r.failures, lastProbeAt: r.lastProbeAt }))));
     }
   });
+
+const codexPool = program.command("codex-pool").description("Inspect or control the local Codex subscription worker pool");
+function printCodexPool(policy: Awaited<ReturnType<CodexPoolPolicyStore["read"]>>, asJson: boolean): void {
+  if (asJson) {
+    console.log(JSON.stringify(policy, null, 2));
+    return;
+  }
+  console.log("Codex dispatch: " + (policy.dispatchEnabled ? "enabled" : "paused"));
+  if (!policy.profiles.length) return console.log("No Codex profiles registered.");
+  console.log(formatTable(policy.profiles.map((profile) => ({
+    profileId: profile.profileId, enabled: profile.enabled, configuredMax: profile.maxConcurrent,
+  }))));
+  console.log("Effective execution limit is one worker per profile.");
+  console.log("\nFull profile IDs\n" + policy.profiles.map(profile => profile.profileId).join("\n"));
+}
+function codexBinaryPath(override?: string): string {
+  if (override !== undefined) return override;
+  return process.env.ROTOXY_CODEX_BINARY || join(dirname(process.execPath), process.platform === "win32" ? "codex.exe" : "codex");
+}
+function cliCodexProfiles(stateStore: StateStore, binary?: string): CodexProfiles {
+  return new CodexProfiles({ codexBinary: codexBinaryPath(binary), configDir: stateStore.dir });
+}
+
+codexPool.command("status").option("--json", "JSON output").action(async (opts) => {
+  const stateStore = await ensureStore();
+  printCodexPool(await new CodexPoolPolicyStore(stateStore).read(), Boolean(opts.json));
+});
+for (const [name, enabled] of [["enable", true], ["disable", false]] as const) {
+  codexPool.command(name).option("--json", "JSON output").action(async (opts) => {
+    const stateStore = await ensureStore();
+    const policies = new CodexPoolPolicyStore(stateStore);
+    const current = await policies.read();
+    const profiles = cliCodexProfiles(stateStore);
+    try {
+      await updateCodexWorkerControls(stateStore, profiles, {
+        action: "pool", enabled: enabled ? "1" : "0",
+        profile: current.profiles.filter((profile) => profile.enabled).map((profile) => profile.profileId),
+      });
+      printCodexPool(await policies.read(), Boolean(opts.json));
+    } finally { await profiles.close(); }
+  });
+}
+
+program.command("codex-bind")
+  .description("Protect a native Codex account using the official local App Server identity")
+  .requiredOption("--client-id <clientId>", "registered ROTOXY client ID")
+  .requiredOption("--session-id <sessionId>", "stable origin session ID used by Codex job submissions")
+  .requiredOption("--native-profile <profileId>", "Codex profile currently signed into the native account")
+  .option("--codex-binary <path>", "trusted absolute path to the official Codex executable")
+  .action(async (opts) => {
+    const stateStore = await ensureStore();
+    const profiles = cliCodexProfiles(stateStore, opts.codexBinary);
+    try {
+      const origins = new OriginProtectionStore(stateStore);
+      const revision = await origins.snapshot();
+      const message = await updateCodexWorkerControls(stateStore, profiles, {
+        action: "bind", clientId: opts.clientId, sessionId: opts.sessionId,
+        profileId: opts.nativeProfile, revision: revision.revision,
+      });
+      console.log(message);
+    } finally { await profiles.close(); }
+  });
+
+program.command("codex-unbind")
+  .description("Close a native-account protection binding after switching accounts")
+  .requiredOption("--client-id <clientId>", "registered ROTOXY client ID that owns the binding")
+  .requiredOption("--session-id <sessionId>", "session ID that owns the binding")
+  .requiredOption("--binding-id <bindingId>", "exact origin binding ID to close")
+  .action(async (opts) => {
+    const stateStore = await ensureStore();
+    const profiles = cliCodexProfiles(stateStore);
+    try {
+      const origins = new OriginProtectionStore(stateStore);
+      const revision = await origins.snapshot();
+      const message = await updateCodexWorkerControls(stateStore, profiles, {
+        action: "close", clientId: opts.clientId, sessionId: opts.sessionId,
+        bindingId: opts.bindingId, revision: revision.revision,
+      });
+      console.log(message);
+    } finally { await profiles.close(); }
+  });
+
 pool
   .command("strategy <strategy>")
   .description("Set adaptive-sticky|round-robin|least-used|weighted-random|random|priority")

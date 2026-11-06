@@ -106,3 +106,15 @@ test('composite agent routing preserves Claude operations with no provider field
  const legacyClaude={operationId:'claude-operation-1234567890',kind:'run_agent',selectedAccountId:claude.accountId,input:{projectId:'fleet',clientId,jobId:'job-old',taskId:'task-old',profileId:'local',model:'haiku',prompt:'old task',timeoutMs:10000}};
  assert.equal((await composite.invoke(legacyClaude)).classification,'accepted');assert.equal(claudeCalls,1);assert.equal(codexCalls,0);
 });
+
+test('unavailable Codex metadata is cooled down without suppressing independent executors',async t=>{
+ const f=await fixture(t);let refreshes=0;
+ f.profiles.refreshProfile=async()=>{refreshes++;throw Error('metadata unavailable');};
+ assert.deepEqual(await f.adapter.resources(),[]);
+ assert.deepEqual(await f.adapter.resources(),[]);
+ assert.equal(refreshes,1,'a disconnected profile cannot stall every scheduling poll');
+ const claude={provider:'claude-code',resources:async()=>[{accountId:'claude-code:test',provider:'claude-code'}],invoke:async()=>({accountId:'claude-code:test',classification:'accepted',value:{}})};
+ const composite=new CompositeAgentJobs([claude,f.adapter]);
+ assert.equal((await composite.invoke({selectedAccountId:'claude-code:test',input:{}})).classification,'accepted');
+ assert.equal(refreshes,1,'provider-pinned dispatch does not scan unrelated catalogs');
+});

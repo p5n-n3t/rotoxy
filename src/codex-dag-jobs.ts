@@ -31,6 +31,8 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 /** Uses the existing StateStore transaction as a launch fence and the workspace
  * ledger for artifacts. An existing intent is reconciled, never launched again. */
 export class CodexDagJobs implements AgentJobExecutor {
+  readonly provider = "codex" as const;
+  private readonly unavailableUntil = new Map<string, number>();
   private readonly policy: CodexPoolPolicyStore;
   private readonly origins: OriginProtectionStore;
   private readonly snapshots = new Map<string, CodexProfileSnapshot>();
@@ -50,7 +52,8 @@ export class CodexDagJobs implements AgentJobExecutor {
     if (!policy.dispatchEnabled || this.closed) return [];
     const result: AgentResource[] = [];
     const registry = await this.profiles.listProfiles();
-    for (const rule of policy.profiles.filter(row => row.enabled)) {
+    await Promise.all(policy.profiles.filter(row => row.enabled).map(async rule => {
+      if ((this.unavailableUntil.get(rule.profileId) ?? 0) > Date.now()) return;
       try {
         let snapshot = this.snapshots.get(rule.profileId);
         if (!snapshot || Date.now() - snapshot.capturedAt > 60_000) {
@@ -59,16 +62,17 @@ export class CodexDagJobs implements AgentJobExecutor {
         }
         const models = snapshot.models.filter(model => model.reasoningEfforts?.some(reasoningEffort =>
           codexProfileFitsTask(snapshot!, { modelId: model.id, complexity: "routine", reasoningEffort })));
-        if (!snapshot.accountIdentity || !models.length) continue;
+        if (!snapshot.accountIdentity || !models.length) return;
         result.push({ accountId: "codex:" + rule.profileId, provider: "codex", profileId: rule.profileId,
           label: registry.find(profile => profile.id === rule.profileId)?.label, planType: snapshot.planType,
           reportedQuota: { capturedAt: snapshot.capturedAt, windows: snapshot.rateWindows },
           models: models.map(model => model.id), capacity: Math.min(1, rule.maxConcurrent), timeoutMs: 120000,
           busy: [...this.active.values()].some(row => row.attempt.profileId === rule.profileId),
           reasoningEfforts: Object.fromEntries(models.map(model => [model.id, model.reasoningEfforts!])) });
-      } catch { /* A disconnected profile cannot supply execution capacity. */ }
-    }
-    return result;
+        this.unavailableUntil.delete(rule.profileId);
+      } catch { this.unavailableUntil.set(rule.profileId, Date.now() + 60_000); }
+    }));
+    return result.sort((left, right) => left.profileId.localeCompare(right.profileId));
   }
 
   async authorize(input: Record<string, unknown>, clientId: string): Promise<string[]> {
@@ -247,13 +251,15 @@ export class CompositeAgentJobs implements AgentJobExecutor {
   }
   async authorize(input: Record<string, unknown>, clientId: string): Promise<unknown> {
     if (input.provider !== "codex") return;
-    for (const executor of this.executors) {
-      if ((await executor.resources()).some(resource => resource.provider === "codex" && resource.profileId === input.profileId)) return executor.authorize?.(input, clientId);
-    }
+    const executor = this.executors.find(candidate => candidate.provider === "codex");
+    if (executor?.authorize) return executor.authorize(input, clientId);
     throw Error("codex_executor_unavailable");
   }
   async invoke(operation: JobOperation): Promise<JobResult<Record<string, unknown>>> {
-    for (const executor of this.executors) {
+    const provider = operation.selectedAccountId.startsWith("codex:") ? "codex" : operation.selectedAccountId.startsWith("claude-code:") ? "claude-code" : undefined;
+    const pinned = this.executors.find(executor => executor.provider === provider);
+    if (pinned) return pinned.invoke(operation);
+    for (const executor of this.executors.filter(candidate => !candidate.provider)) {
       if ((await executor.resources()).some(resource => resource.accountId === operation.selectedAccountId)) return executor.invoke(operation);
     }
     return { accountId: operation.selectedAccountId, classification: "rejected", reason: "agent_provider_unavailable" };

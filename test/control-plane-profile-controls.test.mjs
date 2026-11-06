@@ -74,8 +74,8 @@ test("profile admin controls enforce session and CSRF, scope removals, and keep 
     assert.match(codexHtml, /Start ChatGPT device-code sign-in/);
     assert.match(codexHtml, /learn\.chatgpt\.com\/docs\/app-server#auth-endpoints/);
     assert.match(codexHtml, /developers\.openai\.com\/siwc/);
-    assert.match(codexHtml, /does not start work, select an account, or promise available plan capacity/);
-    assert.match(codexHtml, /No Claude account provider is implemented/);
+    assert.match(codexHtml, /Enabled, authenticated profiles with fresh quota/);
+    assert.match(codexHtml, /Claude through Bedrock/);
     assert.match(codexHtml, /action="\/t2o\/admin\/codex\/action"/);
     assert.match(codexHtml, /name="action" value="rename"/);
     assert.match(codexHtml, /name="action" value="remove"/);

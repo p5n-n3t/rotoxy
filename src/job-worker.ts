@@ -53,6 +53,7 @@ export interface AgentResource {
   label?: string; planType?: string; reportedQuota?: { capturedAt: number; windows: import("./codex-profiles.js").CodexRateWindow[] };
 }
 export interface AgentJobExecutor {
+  readonly provider?: "claude-code" | "codex";
   resources(): Promise<AgentResource[]>;
   authorize?(input: Record<string, unknown>, clientId: string): Promise<unknown>;
   invoke(operation: JobOperation): Promise<JobResult<Record<string, unknown>>>;
@@ -358,10 +359,12 @@ export function createJobWorker(options: JobWorkerOptions): JobWorker {
         ? options.isAccountObservable : options.isAccountEligible;
       if (op.kind === "run_agent") {
         const timeout = input.timeoutMs;
-        if (!options.agentExecutor || !options.isAgentEligible || !await options.isAgentEligible(op) ||
-            !Number.isSafeInteger(timeout) || Number(timeout) < 100 || Number(timeout) > 120000 ||
-            stopped || !running || (leaseDeadlines.get(op.operationId) ?? 0) - now() <= Number(timeout) + requestTimeoutMs) {
+        if (!options.agentExecutor || !options.isAgentEligible || !Number.isSafeInteger(timeout) || Number(timeout) < 100 || Number(timeout) > 120000) {
           return await submit(op, "rejected", {}, "agent_resource_unavailable");
+        }
+        if (!await options.isAgentEligible(op)) return await submit(op, "rejected", {}, "agent_eligibility_rejected");
+        if (stopped || !running || (leaseDeadlines.get(op.operationId) ?? 0) - now() <= Number(timeout) + requestTimeoutMs) {
+          return await submit(op, "rejected", {}, "agent_insufficient_lease");
         }
         mutationStarted = true;
         const invoked = await options.agentExecutor.invoke(op);

@@ -6,6 +6,7 @@ import type { ClaudeWorkerRuntime } from './claude-worker-runtime.js';
 /** The durable scheduler owns dispatch; the existing workspace ledger owns the
  * single Claude launch. A scheduler operation always maps to the same task. */
 export class ClaudeDagJobs implements AgentJobExecutor {
+ readonly provider = "claude-code" as const;
  private readonly active=new Map<string,{projectId:string;jobId:string;clientId:string;taskId:string;cancelled:boolean}>();
  private readonly cancellations=new Map<string,number>();
  private closed=false;

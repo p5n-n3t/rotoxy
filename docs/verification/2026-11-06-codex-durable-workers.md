@@ -45,3 +45,19 @@ Local evidence before release
   by those probes. Reported quota windows keep their provider denominators.
 
 Live inference, deployed SHA, restart checks and full CI are pending.
+
+
+The first live controlled job, rx-codex-dual-profile-20261106-a, was accepted but
+its first operation was rejected before native invocation. No Codex attempt intent
+or thread was created. A configPath-enabled production reload removed dynamically
+enrolled Codex IDs from the in-memory project before the claim-time membership
+check. The fix recognizes operator-enabled Codex resources only in the explicitly
+shared Fleet. The integration test now reads a real on-disk configuration with
+no manually added Codex account IDs. The controlled job was canceled, preserving
+its rejected receipt. Subsequent verification uses a new job ID.
+
+Full CI42294182435 passed for fe759e6, before that production-only correction.
+The native AUD profile was identity-verified and protected before pool enablement.
+Binding receipts and rollback backups are owner-private. No native worker ran in
+the first controlled job. Latest source also cools down failed profile metadata
+checks and avoids rescanning unrelated provider catalogs during pinned dispatch.

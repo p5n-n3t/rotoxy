@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -35,11 +36,13 @@ class OracleModelAdminTests(unittest.TestCase):
     def test_refresh_uses_only_fixed_readonly_script_and_caches_bounded_inventory(self):
         initial = models.snapshot(self.config, self.db, self.cache)
         calls = []
+        barrier = threading.Barrier(len(HOSTS))
         def probe(host, script):
             calls.append((host["id"], script))
             self.assertIn("NoRedirect", script)
             self.assertIn("http://127.0.0.1:11434/api/tags", script)
             self.assertNotIn("POST", script)
+            barrier.wait(timeout=2)
             payload = [
                 {"name": "qwen3.5:9b", "size": 12345, "modified_at": "2026-10-01T00:00:00Z"},
                 {"name": "gpt-oss:20b", "size": 9876, "modified_at": "2026-10-02T00:00:00Z"},
@@ -48,13 +51,45 @@ class OracleModelAdminTests(unittest.TestCase):
             ] + [{"name": f"extra-{index}:1", "size": index, "modified_at": None} for index in range(300)]
             return {"status": "healthy", "body": {"models": payload}}
         refreshed = models.refresh(self.config, self.db, self.cache, initial["cacheRevision"], probe)
-        self.assertEqual([call[0] for call in calls], [host["id"] for host in HOSTS])
+        self.assertEqual(sorted(call[0] for call in calls), sorted(host["id"] for host in HOSTS))
         self.assertEqual(refreshed["hosts"][0]["hostStatus"], "healthy")
+        self.assertTrue(all(host["hostStatus"] == "healthy" for host in refreshed["hosts"]))
         self.assertEqual([m["name"] for m in refreshed["hosts"][0]["models"]], ["qwen3.5:9b", "gpt-oss:20b"] + [f"extra-{i}:1" for i in range(252)])
         self.assertEqual(refreshed["hosts"][0]["models"][0]["size"], 12345)
         self.assertTrue(refreshed["hosts"][0]["observedAt"])
         self.assertEqual(self.cache.stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(list(self.root.glob("inventory.json.backup.*"))), 1)
+
+    def test_default_refresh_allows_ssh_connect_and_tags_response_to_finish(self):
+        initial = models.snapshot(self.config, self.db, self.cache)
+        calls = []
+        def source_probe(transport, host_id, script, payload=b"", *, timeout):
+            calls.append((host_id, timeout))
+            self.assertIn("/api/tags", script)
+            self.assertEqual(payload, b"")
+            return {"status": "healthy", "body": {"models": []}}
+        with patch.object(models.SSHOllamaTransport, "_ssh", source_probe):
+            models.refresh(self.config, self.db, self.cache, initial["cacheRevision"])
+        self.assertEqual(sorted(host_id for host_id, _timeout in calls), sorted(host["id"] for host in HOSTS))
+        self.assertEqual([timeout for _host_id, timeout in calls], [models.INVENTORY_SSH_TIMEOUT] * len(HOSTS))
+        self.assertGreater(models.INVENTORY_SSH_TIMEOUT, 10, "inventory budget must exceed the SSH ConnectTimeout")
+
+    def test_refresh_fits_outer_deadline_at_bounded_maximum_host_count(self):
+        fleet_hosts = [{"id": f"ora-test-{index:02d}", "ip": f"100.90.0.{index + 1}",
+                        "ssh_host": f"ora-test-{index:02d}.example", "enabled": True,
+                        "allowedModels": [DEFAULT_MODEL]} for index in range(models.MAX_INVENTORY_PROBES)]
+        config = {**default_config(), "version": 2, "hosts": fleet_hosts}
+        self.config.write_text(json.dumps(config)); os.chmod(self.config, 0o600)
+        initial = models.snapshot(self.config, self.db, self.cache)
+        barrier = threading.Barrier(models.MAX_INVENTORY_PROBES)
+        calls = []
+        def blocked_probe(host, _script):
+            calls.append(host["id"])
+            barrier.wait(timeout=5)
+            return {"status": "healthy", "body": {"models": []}}
+        refreshed = models.refresh(self.config, self.db, self.cache, initial["cacheRevision"], blocked_probe)
+        self.assertEqual(len(calls), models.MAX_INVENTORY_PROBES)
+        self.assertTrue(all(host["hostStatus"] == "healthy" for host in refreshed["hosts"]))
 
     def test_refresh_cas_and_fleet_host_removal_does_not_keep_stale_inventory(self):
         first = models.snapshot(self.config, self.db, self.cache)

@@ -106,3 +106,15 @@ test("unknown or unverified origin evidence blocks subscription dispatch", async
   await h.protection.bindOrRenew({ ...evidence(owner, profile(), "subject"), expectedRevision: 0, expiresAt: 30_000 });
   assert.equal((await h.protection.evaluateSubscriptionDispatch(owner, target, undefined)).reason, "origin_unverified");
 });
+
+
+test("origin protection accepts opaque OAuth client IDs beginning with underscore or hyphen", async t => {
+  const h = await harness(t);
+  const native = profile();
+  for (const [index, clientId] of ["_opaque-client", "-opaque-client"].entries()) {
+    const owner = actor(clientId, "session-one");
+    await h.protection.bindOrRenew({ ...evidence(owner, native, "native-subject"), expectedRevision: index, expiresAt: 30000 });
+    assert.equal((await h.protection.resolve(owner)).resolved, true);
+    assert.equal((await h.protection.evaluateSubscriptionDispatch(owner, native, "native-subject")).reason, "native_origin_protected");
+  }
+});
