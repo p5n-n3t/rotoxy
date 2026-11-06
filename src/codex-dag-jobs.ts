@@ -33,6 +33,7 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export class CodexDagJobs implements AgentJobExecutor {
   readonly provider = "codex" as const;
   private readonly unavailableUntil = new Map<string, number>();
+  private readonly refreshing = new Map<string, Promise<CodexProfileSnapshot>>();
   private readonly policy: CodexPoolPolicyStore;
   private readonly origins: OriginProtectionStore;
   private readonly snapshots = new Map<string, CodexProfileSnapshot>();
@@ -57,8 +58,15 @@ export class CodexDagJobs implements AgentJobExecutor {
       try {
         let snapshot = this.snapshots.get(rule.profileId);
         if (!snapshot || Date.now() - snapshot.capturedAt > 60_000) {
-          snapshot = await this.profiles.refreshProfile(rule.profileId);
-          this.snapshots.set(rule.profileId, snapshot);
+          let refresh = this.refreshing.get(rule.profileId);
+          if (!refresh) {
+            refresh = this.profiles.refreshProfile(rule.profileId);
+            this.refreshing.set(rule.profileId, refresh);
+          }
+          try {
+            snapshot = await refresh;
+            this.snapshots.set(rule.profileId, snapshot);
+          } finally { if (this.refreshing.get(rule.profileId) === refresh) this.refreshing.delete(rule.profileId); }
         }
         const models = snapshot.models.filter(model => model.reasoningEfforts?.some(reasoningEffort =>
           codexProfileFitsTask(snapshot!, { modelId: model.id, complexity: "routine", reasoningEffort })));

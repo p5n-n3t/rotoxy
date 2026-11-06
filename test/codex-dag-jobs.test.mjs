@@ -109,8 +109,8 @@ test('composite agent routing preserves Claude operations with no provider field
 
 test('unavailable Codex metadata is cooled down without suppressing independent executors',async t=>{
  const f=await fixture(t);let refreshes=0;
- f.profiles.refreshProfile=async()=>{refreshes++;throw Error('metadata unavailable');};
- assert.deepEqual(await f.adapter.resources(),[]);
+ f.profiles.refreshProfile=async()=>{refreshes++;await new Promise(resolve=>setTimeout(resolve,50));throw Error('metadata unavailable');};
+ assert.deepEqual(await Promise.all([f.adapter.resources(),f.adapter.resources()]),[[],[]]);
  assert.deepEqual(await f.adapter.resources(),[]);
  assert.equal(refreshes,1,'a disconnected profile cannot stall every scheduling poll');
  const claude={provider:'claude-code',resources:async()=>[{accountId:'claude-code:test',provider:'claude-code'}],invoke:async()=>({accountId:'claude-code:test',classification:'accepted',value:{}})};
