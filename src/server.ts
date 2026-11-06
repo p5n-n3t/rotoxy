@@ -28,6 +28,7 @@ import { createCloudflareRouter } from "./cloudflare-admin.js";
 import { OracleTools } from "./oracle-tools.js";
 import express from "express";
 import { join } from "node:path";
+import { CodexDagJobs, CompositeAgentJobs } from "./codex-dag-jobs.js";
 import { CodexProfiles } from "./codex-profiles.js";
 import { createResourceConnectionsRouter } from "./resource-connections.js";
 import { fileURLToPath } from "node:url";
@@ -76,7 +77,8 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const webToolsConfigPath = options.webToolsConfigPath ?? join(store.dir, "web-tools.json");
   const webTools = options.webTools ?? liveWebToolsConfig(webToolsConfigPath, store);
   const codexBinary = process.env.ROTOXY_CODEX_BINARY ?? process.env.TOKEN2OAUTH_CODEX_BINARY;
-  const codexProfiles = codexBinary ? new CodexProfiles({ codexBinary, configDir: store.dir }) : undefined;
+  const codexCwd = process.env.ROTOXY_CODEX_WORKER_CWD;
+  const codexProfiles = codexBinary ? new CodexProfiles({ codexBinary, configDir: store.dir, allowedExecutionCwds: codexCwd ? [realpathSync(codexCwd)] : [] }) : undefined;
   const agentWorkspace = new AgentWorkspaceService(store, options.supervisorBackend);
   const jobEvents = options.mcpEvents && options.supervisorBackend ? new McpJobEvents({ store, getStatus: async (args, clientId) => {
     const authorizationState = await store.load();
@@ -103,10 +105,10 @@ export async function buildApp(store = new StateStore(), options: Pick<ServerOpt
   const claudeWorker=options.claudeWorker && options.supervisorBackend && workerBinary && existsSync(workerBinary) && workerCwds.length ?
     new ClaudeWorkerRuntime(store,agentWorkspace,options.supervisorBackend,[realpathSync(workerBinary)],workerCwds.map(path=>realpathSync(path))) : undefined;
   const proxy = new McpProxy(store, pool, telemetry, supervisor, options.oracleTools, webTools, { service: agentWorkspace, backend: options.supervisorBackend }, jobEvents, claudeWorker);
-  if(claudeWorker&&options.supervisorBackend?.setAgentExecutor){
-    options.supervisorBackend.setAgentExecutor(new ClaudeDagJobs(claudeWorker,agentWorkspace));
-    claudeWorker.enableDag();
-  }
+  const agentExecutors = [];
+  if (claudeWorker) { agentExecutors.push(new ClaudeDagJobs(claudeWorker, agentWorkspace)); claudeWorker.enableDag(); }
+  if (codexProfiles && codexCwd) agentExecutors.push(new CodexDagJobs(store, codexProfiles, agentWorkspace, realpathSync(codexCwd)));
+  if (agentExecutors.length && options.supervisorBackend?.setAgentExecutor) options.supervisorBackend.setAgentExecutor(new CompositeAgentJobs(agentExecutors));
   const ui = new (await import("./ui.js")).AdminUi(store, pool, sessions, { oauth, telemetry });
 
   const app = express();

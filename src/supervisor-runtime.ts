@@ -334,13 +334,22 @@ export class SupervisorRuntime implements SupervisorBackend {
     const rules=await new ResourceRoutingRulesStore(this.options.store,this.options.routingConfigDir??this.options.configDir).read();
     try{
       const resources=await this.agentExecutor.resources();this.agentResourceStatus='configured';
-      return resources.filter(r=>rules.resources[r.accountId]?.enabled!==false)
+      const enabled = resources.filter(r=>rules.resources[r.accountId]?.enabled!==false)
         .map(r=>({...r,models:r.models.filter(model=>routingRuleAllowsModel(rules.resources[r.accountId],model))})).filter(r=>r.models.length>0);
+      const fleet = this.config.projects.find(project => project.projectId === this.config.sharedWorkspace?.projectId);
+      if (fleet) for (const resource of enabled.filter(row => row.provider === "codex")) {
+        if (!fleet.accountIds.includes(resource.accountId) && fleet.accountIds.length < 50) fleet.accountIds.push(resource.accountId);
+      }
+      return enabled;
     }catch{this.agentResourceStatus='Claude profile registry unavailable; inspect its private configuration.';return [];}
   }
   private async agentEligible(op:JobOperation):Promise<boolean>{
     const resource=(await this.agentResources()).find(r=>r.accountId===op.selectedAccountId&&r.profileId===op.input.profileId&&r.models.includes(String(op.input.model)));
     if(!resource||resource.busy||Number(op.input.timeoutMs)>resource.timeoutMs)return false;
+    if (resource.provider === "codex") {
+      if (!this.agentExecutor?.authorize) return false;
+      try { await this.agentExecutor?.authorize?.(op.input, String(op.input.clientId)); } catch { return false; }
+    }
     if(typeof op.input.projectId!=='string'||typeof op.input.clientId!=='string'||typeof op.input.jobId!=='string')return false;
     try{await this.authorizeWorkspace(op.input.projectId,op.input.clientId);}catch{return false;}
     const project=this.config.projects.find(p=>p.projectId===op.input.projectId&&p.accountIds.includes(resource.accountId));
@@ -647,10 +656,10 @@ export class SupervisorRuntime implements SupervisorBackend {
     const agents=await this.agentResources();
     const payloads=[...new Set(this.config.projects.flatMap(p=>p.accountIds))].map(accountId=>{
       const agent=agents.find(r=>r.accountId===accountId);
-      if(agent)return {accountId,enabled:rules.resources[accountId]?.enabled!==false,authorized:true,allowUnknownQuota:this.config.allowUnknownQuota,health:agent.busy?'degraded':'healthy',quota:'unknown',localCapacity:1,registeredSessions:[],agentProviders:[{provider:agent.provider,profileId:agent.profileId,models:agent.models,timeoutMs:agent.timeoutMs}]};
+      if(agent)return {accountId,enabled:rules.resources[accountId]?.enabled!==false,authorized:true,allowUnknownQuota:this.config.allowUnknownQuota,health:agent.busy?'degraded':'healthy',quota:'unknown',localCapacity:1,registeredSessions:[],agentProviders:[{provider:agent.provider,profileId:agent.profileId,models:agent.models,timeoutMs:agent.timeoutMs,...(agent.provider==='codex'?{reasoningEfforts:agent.reasoningEfforts}:{})}]};
       // Attachment happens after supervisor bootstrap. Preserve durable native
       // bindings while unavailable; dispatch rechecks the actual executor.
-      if(accountId.startsWith('claude-code:'))return undefined;
+      if(accountId.startsWith('claude-code:')||accountId.startsWith('codex:'))return undefined;
       const account=state.accounts.find(a=>a.id===accountId);
       const inferenceResource=inference.get(accountId);
       if(inferenceResource){return {accountId,enabled:inferenceResource.enabled,authorized:inferenceResource.authorized,
@@ -790,19 +799,10 @@ export class SupervisorRuntime implements SupervisorBackend {
       const configuredCloudflare = this.cloudflareCredentials !== undefined &&
         (await this.cloudflareCredentials.listCredentials()).some(credential => permittedAccountIds.has(credential.id));
       const inferenceBindingsConfigured = configuredOracle || configuredCloudflare;
-      const inferenceCapacity = inferenceBindingsConfigured
-        ? [...(await this.inferenceResources(true)).entries()]
-          .filter(([, resource]) => resource.enabled && resource.authorized && resource.health === "healthy" &&
-            resource.capacity > 0 && resource.models.length > 0)
-          .reduce((sum, [, resource]) => sum + resource.capacity, 0)
-        : 0;
-      const sessionCapacity = Math.max(
-        new Set(this.config.projects.flatMap(project => project.registeredSessions.map(session => session.sessionId))).size,
-        this.config.projects.flatMap(project => project.freshProvisioningBindings ?? []).length,
-      );
       // Fleet discovery and collaboration work before the first worker is bound.
-      // Empty fleets have no dispatch worker; do not invent an allowed model.
-      if (registeredModels.length || freshBindingsConfigured || inferenceBindingsConfigured || this.config.projects.some(p=>p.accountIds.some(id=>id.startsWith('claude-code:')))) {
+      // Shared Fleets keep a bounded consumer ready for operator-enabled native adapters.
+      // The durable scheduler enforces account and job ceilings on each claim.
+      if (registeredModels.length || freshBindingsConfigured || inferenceBindingsConfigured || this.config.sharedWorkspace || this.config.projects.some(p=>p.accountIds.some(id=>id.startsWith('claude-code:')||id.startsWith('codex:')))) {
       this.worker = createJobWorker({
         agentExecutor:{resources:()=>this.agentResources(),invoke:op=>{
           if(!this.agentExecutor)throw Error('agent_executor_unavailable');
@@ -839,11 +839,10 @@ export class SupervisorRuntime implements SupervisorBackend {
           return signal.enabled && signal.authorized;
         },
         workerId: `token2oauth-${createHash("sha256").update(this.options.configDir).digest("hex").slice(0, 12)}`,
-        allowedModels: registeredModels, maxConcurrent: boundedWorkerConcurrency(this.config.maxWorkers, sessionCapacity,
-          inferenceCapacity ? [inferenceCapacity] : []),
+        allowedModels: registeredModels, maxConcurrent: this.config.maxWorkers,
         allowFreshOperations: freshBindingsConfigured, ...this.options.workerOptions,
       });
-      if(this.agentExecutor||!this.config.projects.some(p=>p.accountIds.some(id=>id.startsWith('claude-code:')))){
+      if(this.agentExecutor||!this.config.projects.some(p=>p.accountIds.some(id=>id.startsWith('claude-code:')||id.startsWith('codex:')))){
         this.worker.start();this.workerRunning=true;
       }
       }
@@ -881,6 +880,7 @@ export class SupervisorRuntime implements SupervisorBackend {
     // assignment is in this exact Fleet project.
     const readOwner = sharedRead ? { ...owner, sharedProject: project.projectId } : owner;
     if (name === "job_submit") {
+        const agentResources = await this.agentResources();
       const requested = args.eligibleAccountIds as string[];
       if (requested.some((id) => !project.accountIds.includes(id))) throw new JobInputError("eligible accounts are outside this project binding");
       const state = await this.options.store.load();
@@ -889,7 +889,6 @@ export class SupervisorRuntime implements SupervisorBackend {
         throw new JobInputError("provider_retired");
       }
       const inferenceResources = await this.inferenceResources(true);
-      const agentResources = await this.agentResources();
       const eligible = requested.filter((id) => {
         const signal = accountSignal(state.accounts.find((row) => row.id === id), nativeTarget);
         const inference = inferenceResources.get(id);
@@ -909,9 +908,13 @@ export class SupervisorRuntime implements SupervisorBackend {
       for(const task of agentTasks){
         if(task.execution.mode!=='agent')continue;
         const e=task.execution;
-        const binding=agentResources.find(r=>eligible.includes(r.accountId)&&r.profileId===e.profileId&&r.models.includes(e.model)&&r.timeoutMs>=e.timeoutMs);
+        const binding=agentResources.find(r=>r.provider===e.provider&&eligible.includes(r.accountId)&&r.profileId===e.profileId&&r.models.includes(e.model)&&r.timeoutMs>=e.timeoutMs);
         if(!binding)throw new JobInputError('agent profile/model is not enabled and bound to this project');
-        if(task.output.maxBytes>16384)throw new JobInputError('Claude agent output limit must not exceed 16384 bytes');
+        if(task.output.maxBytes>16384)throw new JobInputError('Agent output limit must not exceed 16384 bytes');
+        if (e.provider === 'codex') {
+          if (!this.agentExecutor?.authorize) throw new JobInputError('Codex origin protection is unavailable');
+          try { await this.agentExecutor.authorize(e, caller.clientId); } catch { throw new JobInputError('Codex native account binding or profile eligibility needs attention in Connections'); }
+        }
         agentBindings.set(task.taskId,binding);
       }
       let dispatchEligible = eligible;
@@ -1059,7 +1062,7 @@ export class SupervisorRuntime implements SupervisorBackend {
         requestStartedAt: item.requestStartedAt,
         finishReason: item.finishReason, terminationEvidence: item.terminationEvidence, modelEvidence: item.modelEvidence,
         providerUsage: item.providerUsage, providerHost: item.providerHost, providerAccountId: item.providerAccountId,
-        attemptId:item.attemptId,artifactId:item.artifactId,profileId:item.profileId,costUsd:item.costUsd,
+        attemptId:item.attemptId,artifactId:item.artifactId,profileId:item.profileId,costUsd:item.costUsd,threadId:item.threadId,turnId:item.turnId,reasoningEffort:item.reasoningEffort,
         createdAt: item.createdAt ?? item.created_at,
       })) : [];
       return boundedJson({ assignmentId: args.jobId, results });
@@ -1115,7 +1118,7 @@ export class SupervisorRuntime implements SupervisorBackend {
         const usable=!r.busy;
         const availableCapacity=presentedAvailableCapacity(r.capacity,schedulerCapacity,usable);
         return {...r,...schedulerCapacity,...(availableCapacity!==undefined?{availableCapacity}:{}),
-          executionMode:'agent',quota:'not_reported',tools:['Read','Glob','Grep'],maxBudgetUsd:0.25};
+          executionMode:'agent',quota:'not_reported',...(r.provider==='claude-code'?{tools:['Read','Glob','Grep'],maxBudgetUsd:0.25}:{tools:['read-only sandbox'],requiresOriginBinding:true})};
       });
       return boundedJson({ projectId: project.projectId, accounts, workers, inferenceResources, agentResources,agentResourcesStatus:this.agentResourceStatus,
         maxWorkers: this.config.maxWorkers, dispatchEnabled: true });

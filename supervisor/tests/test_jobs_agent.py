@@ -14,12 +14,24 @@ from test_jobs import assignment, task
 PROFILE = "profile-claude-0001"
 ACCOUNT = f"claude-code:{PROFILE}"
 MODEL = "claude-sonnet-4-6"
+CODEX_PROFILE = "profile-codex-0001"
+CODEX_ACCOUNT = f"codex:{CODEX_PROFILE}"
+CODEX_MODEL = "gpt-5.1-codex"
 
 
 def agent_task(task_id="agent-task", *, depends=None, account=ACCOUNT, timeout=60000):
     value = task(task_id, account=account, depends=depends)
     value["execution"] = {"mode": "agent", "provider": "claude-code", "accountId": account,
                           "profileId": PROFILE, "model": MODEL, "timeoutMs": timeout}
+    return value
+
+
+def codex_task(task_id="codex-task", *, account=CODEX_ACCOUNT, effort="medium"):
+    value = task(task_id, account=account)
+    value["execution"] = {"mode": "agent", "provider": "codex", "accountId": account,
+                          "profileId": CODEX_PROFILE, "model": CODEX_MODEL, "timeoutMs": 60000,
+                          "reasoningEffort": effort, "complexity": "standard",
+                          "originSessionId": "origin-session-01"}
     return value
 
 
@@ -40,6 +52,17 @@ class JobRegistryAgentTests(unittest.TestCase):
             "localCapacity": 4, "registeredSessions": [], "agentProviders": [{
                 "provider": "claude-code", "profileId": PROFILE,
                 "models": models or [MODEL], "timeoutMs": timeout,
+            }],
+        }, now=1)
+
+    def register_codex(self, *, efforts=None, account=CODEX_ACCOUNT, models=None):
+        return self.registry.register_account({
+            "accountId": account, "enabled": True, "authorized": True,
+            "allowUnknownQuota": False, "health": "healthy", "quota": "available",
+            "localCapacity": 2, "registeredSessions": [], "agentProviders": [{
+                "provider": "codex", "profileId": CODEX_PROFILE,
+                "models": models or [CODEX_MODEL], "timeoutMs": 120000,
+                "reasoningEfforts": efforts or {CODEX_MODEL: ["low", "medium", "high"]},
             }],
         }, now=1)
 
@@ -80,6 +103,56 @@ class JobRegistryAgentTests(unittest.TestCase):
         no_owner = assignment("no-owner", "no-owner-key", [agent_task()], accounts=[ACCOUNT])
         with self.assertRaisesRegex(ValueError, "owner-bound registered profile"):
             self.registry.submit(no_owner, now=2)
+
+    def test_codex_registration_effort_and_account_profile_binding(self):
+        self.register_codex()
+        body = assignment("codex-bad-effort", "codex-bad-effort", [codex_task(effort="xhigh")], accounts=[CODEX_ACCOUNT])
+        body["clientId"] = "client-owner"
+        body["ownerPrincipalId"] = "oauth-client:client-owner"
+        with self.assertRaisesRegex(ValueError, "owner-bound registered profile"):
+            self.registry.submit(body, now=2)
+        wrong = codex_task(account="codex:someone-else")
+        body = assignment("codex-wrong-account", "codex-wrong-account", [wrong], accounts=["codex:someone-else"])
+        with self.assertRaisesRegex(ValueError, "Codex account must match its profile"):
+            validate_assignment(body)
+
+    def test_codex_model_may_use_registered_max_or_ultra_reasoning(self):
+        self.register_codex(efforts={CODEX_MODEL: ["low", "max", "ultra"]})
+        body = assignment("codex-ultra", "codex-ultra", [codex_task(effort="ultra")], accounts=[CODEX_ACCOUNT])
+        body["clientId"] = "client-owner"
+        body["ownerPrincipalId"] = "oauth-client:client-owner"
+        self.registry.submit(body, now=2)
+        operation = self.claim(now=3)
+        self.assertEqual(operation["input"]["reasoningEffort"], "ultra")
+
+    def test_codex_operation_and_result_bindings_are_persisted(self):
+        self.register_codex()
+        body = assignment("codex-job", "codex-job", [codex_task()], accounts=[CODEX_ACCOUNT])
+        body["clientId"] = "client-owner"
+        body["ownerPrincipalId"] = "oauth-client:client-owner"
+        self.registry.submit(body, now=2)
+        operation = self.claim(now=3)
+        self.assertEqual(operation["kind"], "run_agent")
+        self.assertEqual({key: operation["input"][key] for key in
+                          ("provider", "reasoningEffort", "complexity", "originSessionId")},
+                         {"provider": "codex", "reasoningEffort": "medium", "complexity": "standard",
+                          "originSessionId": "origin-session-01"})
+        result = {"assistantText": "Codex result\\nDONE", "reportedModel": CODEX_MODEL,
+                  "attemptId": "codex-attempt-01", "artifactId": "codex-artifact-01",
+                  "profileId": CODEX_PROFILE, "requestStartedAt": 3, "assistantAt": 4,
+                  "threadId": "thread-01", "turnId": "turn-01", "reasoningEffort": "high"}
+        with self.assertRaisesRegex(ValueError, "Codex result"):
+            self.registry.record_result(operation["operationId"],
+                                        {"workerId": "main-bridge", "outcome": "accepted", "result": result}, now=5)
+        result["reasoningEffort"] = "medium"
+        result["assistantText"] = "Codex result\nDONE"
+        receipt = self.registry.record_result(operation["operationId"],
+                                              {"workerId": "main-bridge", "outcome": "accepted", "result": result}, now=5)
+        self.assertEqual(receipt["state"], "complete")
+        saved = self.registry.assignment_results("codex-job", owner_principal_id="oauth-client:client-owner",
+                                                 client_id="client-owner")["results"][0]
+        self.assertEqual((saved["threadId"], saved["turnId"], saved["reasoningEffort"]),
+                         ("thread-01", "turn-01", "medium"))
 
     def test_operation_is_owner_bound_profile_pinned_and_completes_dependency(self):
         self.submit([agent_task("first"), agent_task("second", depends=["first"])])

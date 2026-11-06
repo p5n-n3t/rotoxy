@@ -204,14 +204,28 @@ def validate_assignment(body):
             if execution["accountId"] not in accounts:
                 raise ValueError("Inference account must be eligible")
         elif execution.get("mode") == "agent":
-            if set(execution) != {"mode", "provider", "accountId", "profileId", "model", "timeoutMs"}:
+            provider = execution.get("provider")
+            expected = {"mode", "provider", "accountId", "profileId", "model", "timeoutMs"}
+            if provider == "codex":
+                expected |= {"reasoningEffort", "complexity", "originSessionId"}
+            if set(execution) != expected:
                 raise ValueError("Invalid bounded agent execution binding")
             for field, maximum in (("provider", 64), ("accountId", 256), ("profileId", 128), ("model", 160)):
                 _text(execution[field], f"execution.{field}", maximum)
-            if execution["provider"] != "claude-code":
+            if provider not in {"claude-code", "codex"}:
                 raise ValueError("Unsupported agent provider")
             if type(execution["timeoutMs"]) is not int or not 100 <= execution["timeoutMs"] <= 120000:
                 raise ValueError("Agent timeoutMs must be between 100 and 120000")
+            if provider == "codex":
+                if (not isinstance(execution["reasoningEffort"], str) or
+                        execution["reasoningEffort"] not in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} or
+                        not isinstance(execution["complexity"], str) or
+                        execution["complexity"] not in {"routine", "standard", "complex"} or
+                        not isinstance(execution["originSessionId"], str) or
+                        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", execution["originSessionId"])):
+                    raise ValueError("Invalid Codex reasoning, complexity, or origin session binding")
+                if execution["accountId"] != f"codex:{execution['profileId']}":
+                    raise ValueError("Codex account must match its profile")
             if execution["accountId"] not in accounts:
                 raise ValueError("Agent account must be eligible")
         else:
@@ -455,12 +469,19 @@ class JobRegistry:
         clean_agents = []
         seen_agents = set()
         for item in agents:
-            _closed_object(item, {"provider", "profileId", "models", "timeoutMs"}, "agent provider")
+            if not isinstance(item, dict):
+                raise ValueError("agent provider must be an object")
+            if not {"provider", "profileId", "models", "timeoutMs"} <= set(item):
+                raise ValueError("agent provider has unsupported or missing fields")
             provider = _text(item["provider"], "agent provider", 64)
             profile_id = _text(item["profileId"], "agent profileId", 128)
             models = item["models"]
             maximum = item["timeoutMs"]
-            if provider != "claude-code" or profile_id in seen_agents:
+            expected_fields = {"provider", "profileId", "models", "timeoutMs"}
+            if provider == "codex":
+                expected_fields.add("reasoningEfforts")
+            _closed_object(item, expected_fields, "agent provider")
+            if provider not in {"claude-code", "codex"} or (provider, profile_id) in seen_agents:
                 raise ValueError("Unsupported or duplicate agent profile")
             if not isinstance(models, list) or not 1 <= len(models) <= 64:
                 raise ValueError("Agent models must be a bounded nonempty list")
@@ -469,8 +490,21 @@ class JobRegistry:
                 raise ValueError("Duplicate agent model")
             if type(maximum) is not int or not 100 <= maximum <= 120000:
                 raise ValueError("Invalid agent timeout limit")
-            seen_agents.add(profile_id)
-            clean_agents.append({"provider": provider, "profileId": profile_id, "models": clean_models, "timeoutMs": maximum})
+            clean = {"provider": provider, "profileId": profile_id, "models": clean_models, "timeoutMs": maximum}
+            if provider == "codex":
+                if account_id != f"codex:{profile_id}":
+                    raise ValueError("Codex account must match its profile")
+                effort_map = item["reasoningEfforts"]
+                allowed_efforts = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+                if (not isinstance(effort_map, dict) or set(effort_map) != set(clean_models) or
+                        any(not isinstance(efforts, list) or not efforts or
+                            any(not isinstance(effort, str) or effort not in allowed_efforts for effort in efforts) or
+                            len(efforts) != len(set(efforts))
+                            for efforts in effort_map.values())):
+                    raise ValueError("Codex reasoningEfforts must map every model to supported efforts")
+                clean["reasoningEfforts"] = {model: list(effort_map[model]) for model in clean_models}
+            seen_agents.add((provider, profile_id))
+            clean_agents.append(clean)
         data = {"accountId": account_id, "enabled": body["enabled"], "authorized": body["authorized"],
                 "allowUnknownQuota": body["allowUnknownQuota"], "health": body["health"],
                 "quota": body["quota"], "localCapacity": capacity, "registeredSessions": clean_sessions,
@@ -594,8 +628,12 @@ class JobRegistry:
         profile = next((item for item in account.get("agentProviders", [])
                         if item.get("provider") == execution.get("provider") and
                         item.get("profileId") == execution.get("profileId")), None)
-        return bool(profile and execution.get("model") in profile.get("models", []) and
-                    execution.get("timeoutMs", 0) <= profile.get("timeoutMs", 0))
+        if not profile or execution.get("model") not in profile.get("models", []) or execution.get("timeoutMs", 0) > profile.get("timeoutMs", 0):
+            return False
+        if execution.get("provider") == "codex":
+            return (execution.get("accountId") == f"codex:{execution.get('profileId')}" and
+                    execution.get("reasoningEffort") in profile.get("reasoningEfforts", {}).get(execution.get("model"), []))
+        return True
 
     @staticmethod
     def _scopes_overlap(left, right):
@@ -1050,6 +1088,10 @@ class JobRegistry:
                                    "profileId": execution["profileId"], "model": execution["model"],
                                    "prompt": spec["instructions"], "timeoutMs": execution["timeoutMs"],
                                    "expectedMarker": spec["output"]["expectedMarker"], "dispatchAt": dispatch_at}
+                if execution["provider"] == "codex":
+                    operation_input.update({"provider": "codex", "reasoningEffort": execution["reasoningEffort"],
+                                            "complexity": execution["complexity"],
+                                            "originSessionId": execution["originSessionId"]})
             else:
                 operation_input = {"sessionId": session["id"], "instructions": spec["instructions"],
                                    "clientMessageId": f"{attempt}:{generation}", "expectedMarker": spec["output"]["expectedMarker"],
@@ -1300,7 +1342,7 @@ class JobRegistry:
         result = body.get("result", {})
         if not isinstance(result, dict) or len(json.dumps(result, separators=(",", ":")).encode()) > 32768:
             raise ValueError("Result must be a bounded object")
-        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "requestStartedAt", "usage", "creditDebit", "finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId", "attemptId", "artifactId", "profileId", "costUsd"}
+        allowed_result = {"providerTaskId", "sessionId", "branchName", "commitRef", "artifactRefs", "pullRequest", "reportedModel", "status", "assistantText", "assistantAt", "requestStartedAt", "usage", "creditDebit", "finishReason", "terminationEvidence", "modelEvidence", "providerUsage", "providerHost", "providerAccountId", "attemptId", "artifactId", "profileId", "costUsd", "threadId", "turnId", "reasoningEffort"}
         if set(result) - allowed_result:
             raise ValueError("Unsupported operation result fields")
         for key, value in result.items():
@@ -1439,15 +1481,20 @@ class JobRegistry:
                         not isinstance(result.get("artifactId"), str) or not result["artifactId"] or len(result["artifactId"]) > 256 or
                         not owner or agent_input.get("projectId") != owner["project"] or agent_input.get("clientId") != owner["client_id"]):
                     raise ValueError("Accepted Claude agent result is missing its owner, profile, attempt, artifact, or model binding")
+                if execution["provider"] == "codex":
+                    if (not isinstance(result.get("threadId"), str) or not result["threadId"].strip() or len(result["threadId"]) > 128 or
+                            not isinstance(result.get("turnId"), str) or not result["turnId"].strip() or len(result["turnId"]) > 128 or
+                            result.get("reasoningEffort") != execution["reasoningEffort"]):
+                        raise ValueError("Accepted Codex result is missing its thread, turn, or reasoning binding")
                 if (type(request_started_at) not in {int, float} or not math.isfinite(request_started_at) or
                         type(assistant_at) not in {int, float} or not math.isfinite(assistant_at) or
                         type(dispatch_at) not in {int, float} or not math.isfinite(dispatch_at) or
                         request_started_at < dispatch_at or assistant_at < request_started_at):
-                    raise ValueError("Claude agent request interval timestamps are invalid")
+                    raise ValueError("Agent request interval timestamps are invalid")
                 final_line = next((line for line in reversed(assistant_text.splitlines()) if line.strip()), "")
                 if (len(assistant_text.encode("utf-8")) > spec["output"]["maxBytes"] or
                         final_line != spec["output"]["expectedMarker"]):
-                    raise ValueError("Claude agent result does not satisfy the bounded final marker contract")
+                    raise ValueError("Agent result does not satisfy the bounded final marker contract")
             debit = result.get("creditDebit")
             if debit is not None:
                 if self.credit_admission is None or op["kind"] != "chat_session" or outcome != "accepted":
@@ -1534,6 +1581,9 @@ class JobRegistry:
                 text_value = result["assistantText"]
                 metadata = {"attemptId": result["attemptId"], "artifactId": result["artifactId"],
                             "profileId": result["profileId"], "requestStartedAt": result["requestStartedAt"]}
+                if spec["execution"]["provider"] == "codex":
+                    metadata.update({"threadId": result["threadId"], "turnId": result["turnId"],
+                                     "reasoningEffort": result["reasoningEffort"]})
                 if "costUsd" in result:
                     metadata["costUsd"] = result["costUsd"]
                 db.execute("INSERT OR IGNORE INTO job_results(assignment,task_id,generation,text,assistant_at,reported_model,created_at,metadata) VALUES(?,?,?,?,?,?,?,?)",

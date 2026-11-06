@@ -182,6 +182,20 @@ export class OriginProtectionStore {
     return { revision };
   }
 
+  async listAdmin(): Promise<Array<{ bindingId: string; nativeProfileId: string; expiresAt: number; closed: boolean }>> {
+    const document = await this.read();
+    return document.bindings.map(binding => ({ bindingId: binding.bindingId, nativeProfileId: binding.nativeProfileId, expiresAt: binding.expiresAt, closed: binding.closedAt !== undefined }));
+  }
+
+  /** Resolve protected aliases only for an existing authenticated client/session lease. */
+  async resolve(actor: OriginActor): Promise<{ resolved: boolean; protectedProfileIds: string[] }> {
+    const document = await this.read();
+    if (!validActor(actor)) return { resolved: false, protectedProfileIds: [] };
+    const own = document.bindings.find(binding => binding.actorHash === actorHash(actor) && binding.closedAt === undefined);
+    if (!own || own.expiresAt <= this.now()) return { resolved: false, protectedProfileIds: [] };
+    return { resolved: true, protectedProfileIds: [...new Set(document.bindings.filter(binding => binding.closedAt === undefined).flatMap(binding => binding.protectedProfileIds))] };
+  }
+
   /** Subscription-only gate; API-key and local inference pools do not call this policy. */
   async evaluateSubscriptionDispatch(actor: OriginActor, targetProfileId: string, verifiedProviderAccountSubject: string | undefined): Promise<OriginProtectionDecision> {
     const document = await this.read();

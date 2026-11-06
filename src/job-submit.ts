@@ -21,7 +21,8 @@ export interface JobTaskInput {
   instructions: string;
   execution: { mode: "fresh"; provider: "claude" | "codex" | "auto" | "pi" } | { mode: "existing-session" } |
     { mode: "inference"; provider: "oracle" | "cloudflare"; model: string; maxOutputTokens: number } |
-    { mode: "agent"; provider: "claude-code"; profileId: string; model: string; timeoutMs: number };
+    { mode: "agent"; provider: "claude-code"; profileId: string; model: string; timeoutMs: number } |
+    { mode: "agent"; provider: "codex"; profileId: string; model: string; timeoutMs: number; reasoningEffort: string; complexity: "routine" | "standard" | "complex"; originSessionId: string };
   output: { kind: "text"; maxBytes: number; format: string; expectedMarker: string };
   priority?: number;
   observationTimeoutSeconds?: number;
@@ -112,13 +113,17 @@ function parseTask(raw: unknown): JobTaskInput {
     if (!Number.isSafeInteger(raw.execution.maxOutputTokens) || Number(raw.execution.maxOutputTokens) < 1 || Number(raw.execution.maxOutputTokens) > 4096) throw new JobInputError("maxOutputTokens must be between 1 and 4096");
     execution = { mode: "inference", provider: raw.execution.provider, model, maxOutputTokens: Number(raw.execution.maxOutputTokens) };
   } else if (raw.execution.mode === "agent") {
-    only(raw.execution, ["mode", "provider", "profileId", "model", "timeoutMs"], "execution");
-    if (raw.execution.provider !== "claude-code") throw new JobInputError("agent provider must be claude-code");
+    const codex = raw.execution.provider === "codex";
+    only(raw.execution, ["mode", "provider", "profileId", "model", "timeoutMs", ...(codex ? ["reasoningEffort", "complexity", "originSessionId"] : [])], "execution");
+    if (!codex && raw.execution.provider !== "claude-code") throw new JobInputError("agent provider must be claude-code or codex");
     const profileId = id(raw.execution.profileId, "agent profileId");
     const model = str(raw.execution.model, "agent model", 160);
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(model)) throw new JobInputError("invalid agent model");
     if (!Number.isSafeInteger(raw.execution.timeoutMs) || Number(raw.execution.timeoutMs) < 100 || Number(raw.execution.timeoutMs) > 120000) throw new JobInputError("agent timeoutMs must be between 100 and 120000");
-    execution = { mode: "agent", provider: "claude-code", profileId, model, timeoutMs: Number(raw.execution.timeoutMs) };
+    if (codex) {
+      if (!["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(String(raw.execution.reasoningEffort)) || !["routine", "standard", "complex"].includes(String(raw.execution.complexity)) || Number(raw.execution.timeoutMs) < 1000) throw new JobInputError("invalid Codex effort, complexity or timeout");
+      execution = { mode: "agent", provider: "codex", profileId, model, timeoutMs: Number(raw.execution.timeoutMs), reasoningEffort: String(raw.execution.reasoningEffort), complexity: raw.execution.complexity as "routine" | "standard" | "complex", originSessionId: id(raw.execution.originSessionId, "originSessionId") };
+    } else execution = { mode: "agent", provider: "claude-code", profileId, model, timeoutMs: Number(raw.execution.timeoutMs) };
   } else throw new JobInputError("execution.mode must be fresh, existing-session, inference, or agent");
 
   if (!object(raw.output) || raw.output.kind !== "text") throw new JobInputError("the current supervisor supports bounded text output only");
@@ -203,6 +208,11 @@ export const JOB_TOOL_DEFINITIONS = [
         observationTimeoutSeconds: { type: "integer", minimum: 60, maximum: 604800, description: "Monitoring deadline only; expiry requires reconciliation and does not cancel the upstream worker. Default six hours." },
         instructions: { type: "string", minLength: 1, maxLength: 16384 },
         execution: { oneOf: [
+          { type: "object", additionalProperties: false, required: ["mode", "provider", "profileId", "model", "timeoutMs", "reasoningEffort", "complexity", "originSessionId"], properties: {
+            mode: { const: "agent" }, provider: { const: "codex" }, profileId: jobKey,
+            model: { type: "string", minLength: 1, maxLength: 160 }, timeoutMs: { type: "integer", minimum: 1000, maximum: 120000 },
+            reasoningEffort: { enum: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] }, complexity: { enum: ["routine", "standard", "complex"] }, originSessionId: jobKey,
+          } },
           { type: "object", additionalProperties: false, required: ["mode", "provider", "profileId", "model", "timeoutMs"], properties: {
             mode: { const: "agent" }, provider: { const: "claude-code" }, profileId: jobKey,
             model: { type: "string", minLength: 1, maxLength: 160 }, timeoutMs: { type: "integer", minimum: 100, maximum: 120000 },

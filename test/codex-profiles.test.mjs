@@ -137,7 +137,7 @@ test("Codex execution pins an eligible profile, persists ownership before turn s
     if (method === "account/read") return { account: { type: "chatgpt" } };
     if (method === "model/list") return { data: [{ id: "model-a", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }] };
     if (method === "account/rateLimits/read") return { rateLimits: { primary: { usedPercent: 20, windowDurationMins: 300 } } };
-    if (method === "thread/start") return { thread: { id: "thread-exec-1" } };
+    if (method === "thread/start") return { model: "model-a", thread: { id: "thread-exec-1" } };
     if (method === "turn/start") {
       const owners = JSON.parse(await readFile(join(h.root, "config", "codex-thread-owners.json"), "utf8")).owners;
       assert.equal(owners[params.threadId], ownerProfileId, "thread/profile binding is durable before turn launch");
@@ -198,7 +198,7 @@ test("Codex cancellation interrupts only the profile-owned active turn and repor
     if (method === "account/read") return { account: { type: "chatgpt" } };
     if (method === "model/list") return { data: [{ id: "model-a", supportedReasoningEfforts: ["medium"] }] };
     if (method === "account/rateLimits/read") return { rateLimits: { primary: { usedPercent: 1 } } };
-    if (method === "thread/resume") return { thread: { id: params.threadId } };
+    if (method === "thread/resume") return { model: "model-a", thread: { id: params.threadId } };
     if (method === "turn/start") return { turn: { id: "turn-owned" } };
     if (method === "turn/interrupt") return { turn: { id: params.turnId, status: "interrupted" } };
     return {};
@@ -223,7 +223,7 @@ test("Codex turn timeout interrupts the owned turn and never retries an ambiguou
     if (method === "account/read") return { account: { type: "chatgpt" } };
     if (method === "model/list") return { data: [{ id: "model-a", supportedReasoningEfforts: ["medium"] }] };
     if (method === "account/rateLimits/read") return { rateLimits: { primary: { usedPercent: 1 } } };
-    if (method === "thread/start") return { thread: { id: "timeout-thread" } };
+    if (method === "thread/start") return { model: "model-a", thread: { id: "timeout-thread" } };
     if (method === "turn/start") return { turn: { id: "timeout-turn" } };
     if (method === "turn/interrupt") return { turn: { id: params.turnId, status: "interrupted" } };
     return {};

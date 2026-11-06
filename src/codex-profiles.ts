@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmod, mkdir, open, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -34,6 +34,8 @@ export interface CodexProfileSnapshot {
   profileId: string;
   capturedAt: number;
   authMode?: "chatgpt" | "other";
+  /** Hash of the account identity reported by the official App Server. */
+  accountIdentity?: string;
   planType?: string;
   models: Array<{ id: string; name?: string; reasoningEfforts?: string[] }>;
   rateWindows: CodexRateWindow[];
@@ -85,6 +87,8 @@ export interface CodexExecutionRequest {
   origin: CodexExecutionOriginBinding;
   threadId?: string;
   timeoutMs?: number;
+  authorizeSnapshot?: (snapshot: CodexProfileSnapshot) => Promise<void>;
+  onReceipt?: (receipt: { threadId: string; turnId?: string }) => Promise<void>;
 }
 
 export interface CodexPendingApprovalRequest { id: string | number; method: string; params: Record<string, unknown> }
@@ -578,7 +582,9 @@ export class CodexProfiles {
     }
     const reportedMode = accountInfo.type ?? accountInfo.authMode;
     const authMode = reportedMode === "chatgpt" ? "chatgpt" : reportedMode == null ? undefined : "other";
-    const snapshot: CodexProfileSnapshot = { profileId, capturedAt: this.now(), ...(authMode ? { authMode } : {}), ...(safeString(accountInfo.planType, 40) ? { planType: accountInfo.planType as string } : {}), models, rateWindows: windows };
+    const email = safeString(accountInfo.email, 512)?.trim().toLowerCase();
+    const accountIdentity = authMode === "chatgpt" && email ? createHash("sha256").update("rotoxy:codex-account:v1\0").update(email).digest("hex") : undefined;
+    const snapshot: CodexProfileSnapshot = { profileId, capturedAt: this.now(), ...(accountIdentity ? { accountIdentity } : {}), ...(authMode ? { authMode } : {}), ...(safeString(accountInfo.planType, 40) ? { planType: accountInfo.planType as string } : {}), models, rateWindows: windows };
     this.snapshots.set(profileId, snapshot);
     await this.mutateProfiles((profiles) => {
       const profile = profiles.find((item) => item.id === profileId);
@@ -644,6 +650,7 @@ export class CodexProfiles {
 
     return this.withProfileOperation(request.profileId, async () => {
       const snapshot = await this.refreshProfile(request.profileId);
+      await request.authorizeSnapshot?.(snapshot);
       const candidates = await this.eligibleProfiles(request.modelId, 60_000);
       if (!candidates.includes(request.profileId)) throw new CodexExecutionError("profile_ineligible");
       const model = snapshot.models.find((item) => item.id === request.modelId);
@@ -660,7 +667,7 @@ export class CodexProfiles {
             threadId, model: request.modelId, cwd: canonicalCwd, approvalPolicy: "on-request", sandbox: "read-only",
           });
         } catch { throw new CodexExecutionError("thread_start_ambiguous"); }
-        if (record(resumed.thread)?.id !== threadId) throw new CodexExecutionError("thread_start_ambiguous");
+        if (resumed.model !== request.modelId || record(resumed.thread)?.id !== threadId) throw new CodexExecutionError("thread_start_ambiguous");
       } else {
         let started: Record<string, unknown>;
         try {
@@ -669,12 +676,14 @@ export class CodexProfiles {
           });
         }
         catch { throw new CodexExecutionError("thread_start_ambiguous"); }
+        if (started.model !== request.modelId) throw new CodexExecutionError("thread_start_ambiguous");
         const thread = record(started.thread);
         threadId = safeString(thread?.id, 160);
         if (!threadId || !/^[A-Za-z0-9_-]{1,160}$/.test(threadId)) throw new CodexExecutionError("thread_start_ambiguous");
         // Persist profile ownership before the next remote mutation (turn/start).
         await this.bindThread(threadId, request.profileId);
       }
+      await request.onReceipt?.({ threadId });
       if (isCancelled()) throw new Error("Codex execution was cancelled before turn start");
       if (this.activeTurns.has(threadId) || this.startingTurns.has(threadId)) throw new CodexExecutionError("turn_invalid");
 
@@ -727,6 +736,13 @@ export class CodexProfiles {
         this.startingTurns.delete(threadId);
         unlistenNotification(); unlistenServerRequest();
         throw new CodexExecutionError("turn_start_ambiguous");
+      }
+      try { await request.onReceipt?.({ threadId, turnId }); }
+      catch {
+        try { await this.interruptOwnedTurn(request.profileId, threadId, turnId, transport); } catch {}
+        this.startingTurns.delete(threadId);
+        unlistenNotification(); unlistenServerRequest();
+        throw new CodexExecutionError("turn_outcome_ambiguous");
       }
       this.startingTurns.delete(threadId);
       this.activeTurns.set(threadId, { profileId: request.profileId, turnId });

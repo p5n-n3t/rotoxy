@@ -1,6 +1,6 @@
 # Codex subscription worker: DAG integration seam
 
-**Status:** design audit only. Codex profile execution remains unwired in the durable job DAG. Do not describe Codex as a supported worker or as part of the verified three-provider overlap.
+**Status as of 2026-11-06:** the seams below have a local implementation and synthetic integration proof. Live subscription execution and deployment verification are pending. The November4 mixed-provider proof covers Claude, Oracle and Cloudflare.
 
 ## Existing interfaces
 

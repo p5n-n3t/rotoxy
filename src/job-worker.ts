@@ -48,11 +48,13 @@ export interface JobOperation {
 }
 
 export interface AgentResource {
-  accountId: string; provider: "claude-code"; profileId: string; models: string[];
-  capacity: number; timeoutMs: number; busy?:boolean;
+  accountId: string; provider: "claude-code" | "codex"; profileId: string; models: string[];
+  capacity: number; timeoutMs: number; busy?:boolean; reasoningEfforts?: Record<string, string[]>;
+  label?: string; planType?: string; reportedQuota?: { capturedAt: number; windows: import("./codex-profiles.js").CodexRateWindow[] };
 }
 export interface AgentJobExecutor {
   resources(): Promise<AgentResource[]>;
+  authorize?(input: Record<string, unknown>, clientId: string): Promise<unknown>;
   invoke(operation: JobOperation): Promise<JobResult<Record<string, unknown>>>;
   cancelJob?(projectId:string,jobId:string,clientId:string):Promise<number>;
   cancelAll?():Promise<void>;

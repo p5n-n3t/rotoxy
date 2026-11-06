@@ -42,3 +42,23 @@ Use `workspace_update` for attributed messages, artifact submission and review d
 ## Handoff
 
 Before ending, leave the objective, job IDs, validated artifacts, outstanding incidents and exact next action in the project ledger/checkpoint. Desktop notification delivery does not wake a dormant chat. Claim automatic recovery or resumption only when that adapter is configured and its execution receipt is verified.
+
+
+## Codex subscription workers
+
+Discover `job_workers.agentResources` and use only provider `codex` rows that
+expose the requested model and reasoning effort. Before submission, have the
+operator protect the initiating native account under ChatGPT & Codex. Use the
+bound session name as `originSessionId`. The OAuth client ID is resolved by the
+gateway. Generic OAuth consent does not identify the native ChatGPT account.
+
+A Codex task uses `execution: {mode: "agent", provider: "codex", profileId,
+model, reasoningEffort, complexity: "routine" | "standard" | "complex",
+originSessionId, timeoutMs}`. Read-only execution is bounded to two minutes.
+Results include thread, turn, profile, effort and artifact references. A pending
+native approval becomes a blocked review requiring explicit intervention.
+Inspect the durable inbox and receipts before resuming. An ambiguous attempt
+retains its reservation. Existing attempts cannot be automatically relaunched.
+Subscription quota windows stay separate per account. Resource discovery reports
+current eligible models and configured slots, with per-session origin checks at
+submission and again before launch.
