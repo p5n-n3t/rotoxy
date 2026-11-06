@@ -30,18 +30,19 @@ async function fixture(t,{bound=true,nativeSubject='native-account-subject',targ
   await origins.bindOrRenew({actor:{clientId,sessionId:originSessionId},nativeProfileId:nativeProfile,profileAliases:[nativeProfile],verifiedProviderAccountSubject:nativeSubject,source:'trusted-server-resolver',expectedRevision:0,expiresAt:Date.now()+60_000});
  }
  const snapshot={profileId:targetProfile,capturedAt:Date.now(),authMode:'chatgpt',accountIdentity:targetSubject,planType:'plus',models:[{id:model,reasoningEfforts:[effort,'high']}],rateWindows:[{limitId:'weekly',slot:'week',usedPercent:10,exhausted:false}]};
- let launches=0,cancelled=0;
+ let launches=0,cancelled=0,waitForExecution=false;
  let taskState;
  const workspace={async snapshot(project,actor){assert.equal(project,'fleet');assert.match(actor,/^client:(client-a|codex-worker-[a-f0-9]+)$/);if(workspaceFailure)throw Error('workspace unavailable');return {revision:taskState?.revision??0,participants:[{id:actor}],tasks:taskState?[taskState]:[],artifacts:taskState?.artifact?[{id:taskState.artifact,taskId:taskState.id}]:[]};},async update(project,actor,input){
+  if(input.action==='participant_upsert')return;
   if(input.action==='task_create')taskState={id:input.taskId,revision:1,state:'ready',description:input.description};
   else if(input.action==='task_claim')taskState={...taskState,revision:taskState.revision+1,state:'claimed'};
   else if(input.action==='artifact_submit')taskState={...taskState,revision:taskState.revision+1,artifact:input.artifactId};
   else if(input.action==='task_update')taskState={...taskState,revision:taskState.revision+1,state:input.state};
   else throw Error('unexpected workspace operation '+input.action);
  }};
- const profiles={async listProfiles(){return [{id:targetProfile}];},async refreshProfile(id){assert.equal(id,targetProfile);return structuredClone(snapshot);},startExecution(request){launches++;let rejectPromise;let resolvePromise;const promise=new Promise((resolve,reject)=>{resolvePromise=resolve;rejectPromise=reject;});request.onReceipt({threadId:'thread-codex-01',turnId:'turn-codex-01'});const handle={promise,pendingRequests:[],async cancel(){cancelled++;rejectPromise(Error('cancelled'));}};if(!fixture.waitForExecution)resolvePromise({profileId:targetProfile,threadId:'thread-codex-01',turnId:'turn-codex-01',modelId:model,reasoningEffort:effort,text:'Bounded result\nDONE',status:'completed'});return handle;}};
+ const profiles={async listProfiles(){return [{id:targetProfile}];},async refreshProfile(id){assert.equal(id,targetProfile);return structuredClone(snapshot);},startExecution(request){launches++;let rejectPromise;let resolvePromise;const promise=new Promise((resolve,reject)=>{resolvePromise=resolve;rejectPromise=reject;});const receipt=request.onReceipt({threadId:'thread-codex-01',turnId:'turn-codex-01'});const handle={promise,pendingRequests:[],async cancel(){cancelled++;rejectPromise(Error('cancelled'));}};void receipt.then(()=>{if(!waitForExecution)resolvePromise({profileId:targetProfile,threadId:'thread-codex-01',turnId:'turn-codex-01',modelId:model,reasoningEffort:effort,text:'Bounded result\nDONE',status:'completed'});}).catch(rejectPromise);return handle;}};
  const adapter=new CodexDagJobs(store,profiles,workspace,dir);
- return {dir,store,policy,workspace,profiles,adapter,counts:()=>({launches,cancelled}),setWait(value){fixture.waitForExecution=value;}};
+ return {dir,store,policy,workspace,profiles,adapter,counts:()=>({launches,cancelled}),setWait(value){waitForExecution=value;}};
 }
 
 test('unknown or protected origin account cannot launch Codex execution',async t=>{
